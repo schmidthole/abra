@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+unset TASKS_AXI_FILE
+exec npx --yes tasks-axi@0.2.5 "$@"
