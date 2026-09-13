@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""register repositories and create isolated git worktrees."""
+"""register repositories and manage isolated git worktrees."""
 
 import argparse
 import json
@@ -86,21 +86,28 @@ def register(root, name, path, base, aliases, description):
     return entry
 
 
-def create(root, name, task, verify=None):
+def target_path(root, name, task, verify=None):
     slug(task)
     name, repo = resolve(read_registry(root), name)
     slug(name)
-    source = Path(repo["path"]).resolve()
-    ref = verify if verify else repo["base"]
     if verify and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", verify):
         raise ValueError("verification requires a full commit hash")
+    suffix = task + ("-verify-" + verify if verify else "")
+    target = root.resolve() / ".worktrees" / name / suffix
+    for path in (target.parent.parent, target.parent, target):
+        if path.is_symlink():
+            raise ValueError("managed worktree paths must not contain symlinks")
+    return name, repo, target
+
+
+def create(root, name, task, verify=None):
+    name, repo, target = target_path(root, name, task, verify)
+    source = Path(repo["path"]).resolve()
+    ref = verify if verify else repo["base"]
     commit = git(source, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
     if verify and commit != verify:
         raise ValueError("verification hash must identify a commit directly")
-    suffix = task + ("-verify-" + commit if verify else "")
-    parent = root / ".worktrees" / name
-    parent.mkdir(parents=True, exist_ok=True)
-    target = parent / suffix
+    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() or target.is_symlink():
         raise ValueError(
             "worktree path already exists; inspect it instead of replacing it"
@@ -111,6 +118,54 @@ def create(root, name, task, verify=None):
     options = ["--detach"] if verify else ["-b", branch]
     git(source, "worktree", "add", *options, str(target), commit)
     return dict(repo=name, path=str(target), branch=branch, commit=commit)
+
+
+def cleanup(root, name, task, verify=None, idle=False, yes=False):
+    if not idle:
+        raise ValueError("cleanup requires --idle after confirming no agent uses it")
+    name, repo, target = target_path(root, name, task, verify)
+    source = Path(repo["path"]).resolve()
+    if target == source:
+        raise ValueError("cannot remove the source checkout")
+    entries = git(source, "worktree", "list", "--porcelain", "-z").split("\0\0")
+    entry = next(
+        (
+            entry.split("\0")
+            for entry in entries
+            if entry.split("\0")[0] == "worktree " + str(target)
+        ),
+        None,
+    )
+    if entry is None or not target.is_dir():
+        raise ValueError("target is not a registered worktree of this repo")
+    if any(field.startswith("locked") for field in entry):
+        raise ValueError("worktree is locked")
+    if Path(git(target, "rev-parse", "--show-toplevel")).resolve() != target or git(
+        target, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    ) != git(source, "rev-parse", "--path-format=absolute", "--git-common-dir"):
+        raise ValueError("target does not belong to the registered repo")
+    if git(
+        target,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    ):
+        raise ValueError("worktree has uncommitted or untracked changes")
+    commit = git(target, "rev-parse", "HEAD")
+    if not git(
+        source,
+        "for-each-ref",
+        "--contains=" + commit,
+        "--format=%(refname)",
+        "refs/heads",
+        "refs/remotes",
+        "refs/tags",
+    ):
+        raise ValueError("worktree head is not preserved by a branch or tag")
+    if yes:
+        git(source, "worktree", "remove", str(target))
+    return dict(repo=name, path=str(target), commit=commit, removed=yes)
 
 
 def main():
@@ -129,6 +184,19 @@ def main():
     worktree.add_argument("repo")
     worktree.add_argument("task")
     worktree.add_argument("--verify", metavar="commit")
+    remove = commands.add_parser("cleanup")
+    remove.add_argument("repo")
+    remove.add_argument("task")
+    remove.add_argument("--verify", metavar="commit")
+    remove.add_argument(
+        "--idle",
+        action="store_true",
+        required=True,
+        help="confirm no agent uses the worktree",
+    )
+    remove.add_argument(
+        "--yes", action="store_true", help="remove the worktree; otherwise preview"
+    )
     args = parser.parse_args()
     try:
         if args.command == "register":
@@ -140,6 +208,10 @@ def main():
         elif args.command == "resolve":
             name, repo = resolve(read_registry(ROOT), args.name)
             result = dict(name=name, **repo)
+        elif args.command == "cleanup":
+            result = cleanup(
+                ROOT, args.repo, args.task, args.verify, args.idle, args.yes
+            )
         else:
             result = create(ROOT, args.repo, args.task, args.verify)
         print(json.dumps(result, indent=2))

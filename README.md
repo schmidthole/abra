@@ -50,6 +50,24 @@ the source checkout can have uncommitted changes; these are never copied or rese
 fetch the intended remote before creation when a fresh remote base is required.
 worktrees are file isolation, not a security boundary.
 
+after delivery, confirm the worker/verifier has stopped using its directory, then
+preview and execute cleanup:
+
+```sh
+python3 bin/worktree.py cleanup example fix-login --idle
+python3 bin/worktree.py cleanup example fix-login --idle --yes
+python3 bin/worktree.py cleanup example fix-login --verify <full-commit-hash> --idle --yes
+```
+
+`--idle` asserts that no agent or process still uses the worktree; the command does
+not scan processes. cleanup refuses dirty/untracked work, locked worktrees, unsafe
+paths, and commits not preserved by a branch or tag. `--yes` removes the worktree
+including ignored files such as dependencies, caches, and local configuration.
+branches, reports, and the source checkout remain. save any needed ignored files
+first. clean up obsolete verification attempts too; if a directory contains probes
+or changes, inspect them and remove only known disposable files before retrying.
+there is no force option, background cleanup, or automatic deletion on context reset.
+
 ## pipeline
 
 worker → independent review/tests/docs/lint → fixes and fresh verification if needed

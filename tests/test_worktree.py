@@ -82,6 +82,82 @@ class WorktreeTests(unittest.TestCase):
             worktree.create(self.root, "demo", "collision")
         self.assertFalse((self.root / ".worktrees/demo/collision").exists())
 
+    def test_cleanup_preview_removal_and_branch_preservation(self):
+        result = worktree.create(self.root, "demo", "finished")
+        path = Path(result["path"])
+        with self.assertRaisesRegex(ValueError, "--idle"):
+            worktree.cleanup(self.root, "demo", "finished", yes=True)
+        preview = worktree.cleanup(self.root, "sample", "finished", idle=True)
+        self.assertFalse(preview["removed"])
+        self.assertTrue(path.exists())
+        removed = worktree.cleanup(self.root, "demo", "finished", idle=True, yes=True)
+        self.assertTrue(removed["removed"])
+        self.assertFalse(path.exists())
+        self.assertEqual(
+            worktree.git(self.source, "rev-parse", "abra/finished"), result["commit"]
+        )
+        self.assertTrue(self.source.exists())
+
+    def test_cleanup_refuses_dirty_and_hidden_untracked_files(self):
+        path = Path(worktree.create(self.root, "demo", "dirty")["path"])
+        worktree.git(path, "config", "status.showUntrackedFiles", "no")
+        for filename in ("file.txt", "untracked.txt"):
+            with self.subTest(filename=filename):
+                (path / filename).write_text("unsaved\n")
+                with self.assertRaisesRegex(ValueError, "uncommitted or untracked"):
+                    worktree.cleanup(self.root, "demo", "dirty", idle=True, yes=True)
+                self.assertTrue(path.exists())
+                if filename == "file.txt":
+                    worktree.git(path, "checkout", "--", filename)
+
+    def test_cleanup_detached_commit_requires_preserving_ref(self):
+        head = worktree.git(self.source, "rev-parse", "HEAD")
+        path = Path(worktree.create(self.root, "demo", "review", head)["path"])
+        (path / "file.txt").write_text("unique\n")
+        worktree.git(path, "commit", "-am", "unique")
+        with self.assertRaisesRegex(ValueError, "not preserved"):
+            worktree.cleanup(self.root, "demo", "review", head, idle=True, yes=True)
+        worktree.git(path, "tag", "saved-review")
+        worktree.cleanup(self.root, "demo", "review", head, idle=True, yes=True)
+        self.assertFalse(path.exists())
+        self.assertTrue(worktree.git(self.source, "rev-parse", "saved-review"))
+
+    def test_cleanup_refuses_locked_worktree(self):
+        path = Path(worktree.create(self.root, "demo", "locked")["path"])
+        worktree.git(self.source, "worktree", "lock", str(path))
+        with self.assertRaisesRegex(ValueError, "locked"):
+            worktree.cleanup(self.root, "demo", "locked", idle=True, yes=True)
+        self.assertTrue(path.exists())
+
+    def test_cleanup_rejects_invalid_paths_and_symlinks(self):
+        for task, verify in (("../escape", None), ("valid", "main")):
+            with self.assertRaises(ValueError):
+                worktree.cleanup(self.root, "demo", task, verify, idle=True, yes=True)
+        managed = self.root / ".worktrees"
+        managed.symlink_to(self.source, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlinks"):
+            worktree.cleanup(self.root, "demo", "main", idle=True, yes=True)
+        self.assertTrue(self.source.exists())
+
+    def test_cleanup_refuses_foreign_worktree(self):
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        worktree.git(foreign, "init", "-b", "main")
+        worktree.git(foreign, "fetch", str(self.source), "main")
+        path = self.root / ".worktrees/demo/foreign"
+        worktree.git(foreign, "worktree", "add", "--detach", str(path), "FETCH_HEAD")
+        with self.assertRaisesRegex(ValueError, "not a registered worktree"):
+            worktree.cleanup(self.root, "demo", "foreign", idle=True, yes=True)
+        self.assertTrue(path.exists())
+
+    def test_cleanup_removes_ignored_output(self):
+        path = Path(worktree.create(self.root, "demo", "ignored")["path"])
+        worktree.git(path, "config", "core.excludesFile", str(self.root / "ignore"))
+        (self.root / "ignore").write_text("cache\n")
+        (path / "cache").write_text("disposable\n")
+        worktree.cleanup(self.root, "demo", "ignored", idle=True, yes=True)
+        self.assertFalse(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

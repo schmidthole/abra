@@ -97,9 +97,14 @@ that final checkpoint alone or claim unsaved context is recoverable.
 
 save reports under `data/<task-id>/`. if a verification path already exists,
 inspect it; use a distinct attempt task-id for a fresh verification directory.
-do not reset or delete an existing worktree to make a command succeed. cleanup is
-ordinary `git worktree remove` after confirming the work is delivered, clean,
-and no agent still uses it. keep branches unless their deletion is authorized.
+do not reset or delete an existing worktree to make a command succeed. after delivery,
+save the outcome, confirm all agents/processes using its worktrees have stopped, and
+run `worktree.py cleanup <repo> <task-id> --idle` to preview, then add `--yes`.
+include `--verify <full-commit>` for each completed or superseded verification attempt.
+`--idle` is your assertion, not process detection. ignored files are removed too;
+preserve anything needed first. inspect dirty probes or generated files and remove
+only known disposable changes before retrying; never force cleanup. record any
+retained path and reason in the task notes. retain branches and reports.
 
 ## implementation conventions
 
