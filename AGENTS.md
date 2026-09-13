@@ -28,10 +28,25 @@ database, daemon, watcher, process runner, or agent framework.
 4. for unknown names, use gh-axi search/repo help and inspect likely matches.
    resolve ambiguity with the user. never silently register a guessed match.
    register confirmed local checkouts with a useful description and aliases.
-5. inspect existing inflight items before starting duplicates. after an interrupted
-   session, inspect native agent state, recorded worktrees, and commits. a backlog
+5. read the full notes of unfinished tasks, including held items, before continuing
+   or starting duplicates. after a context reset or interrupted session, reconcile
+   those notes with native agent state, recorded worktrees, and commits. a backlog
    entry is not proof an agent is still alive. resume or redispatch only after
    resolving ownership; do not promise unattended execution after codex exits.
+
+## context continuity
+
+keep each unfinished task's tasks-axi body sufficient for a fresh coordinator to
+continue without conversation history: original request, current acceptance criteria
+and steering, decisions and authority, progress, next action, blockers or unanswered
+questions, promised follow-ups, and agent/worktree/commit/report/pr references.
+read the full body before updating it; keep a concise current handoff, not a transcript.
+persist consequential user steering before acting on it and record outcomes after
+dispatch, worker results, and verification. distinguish intended actions from confirmed
+outcomes. changed acceptance criteria require renewed verification even at the same
+commit. capture outstanding promises as tasks when no existing item owns them.
+before yielding or a requested context clear, reconcile these notes; do not rely on
+that final checkpoint alone or claim unsaved context is recoverable.
 
 ## dispatch
 
