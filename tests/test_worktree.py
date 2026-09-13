@@ -133,11 +133,24 @@ class WorktreeTests(unittest.TestCase):
         for task, verify in (("../escape", None), ("valid", "main")):
             with self.assertRaises(ValueError):
                 worktree.cleanup(self.root, "demo", task, verify, idle=True, yes=True)
-        managed = self.root / ".worktrees"
-        managed.symlink_to(self.source, target_is_directory=True)
-        with self.assertRaisesRegex(ValueError, "symlinks"):
-            worktree.cleanup(self.root, "demo", "main", idle=True, yes=True)
+        for relative in (".worktrees", ".worktrees/demo", ".worktrees/demo/main"):
+            with self.subTest(path=relative):
+                managed = self.root / relative
+                managed.parent.mkdir(parents=True, exist_ok=True)
+                managed.symlink_to(self.source, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "symlinks"):
+                    worktree.cleanup(self.root, "demo", "main", idle=True, yes=True)
+                managed.unlink()
         self.assertTrue(self.source.exists())
+
+    def test_cleanup_refuses_registered_source_checkout(self):
+        path = Path(worktree.create(self.root, "demo", "source")["path"])
+        registry = worktree.read_registry(self.root)
+        registry["demo"]["path"] = str(path)
+        (self.root / "data/repos.json").write_text(worktree.json.dumps(registry))
+        with self.assertRaisesRegex(ValueError, "source checkout"):
+            worktree.cleanup(self.root, "demo", "source", idle=True, yes=True)
+        self.assertTrue(path.exists())
 
     def test_cleanup_refuses_foreign_worktree(self):
         foreign = self.root / "foreign"
