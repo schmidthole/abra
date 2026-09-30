@@ -7,7 +7,7 @@ original user request: {{request}}
 acceptance criteria: {{acceptance}}
 constraints and project instructions: {{constraints}}
 
-implement this bounded task. read the project's applicable instructions. run all
+implement this bounded task. read the project's applicable instructions (AGENTS.md, CLAUDE.md, or equivalent). run all
 commands in the specified working directory and change files only there. use the
 smallest idiomatic change. add meaningful tests, run existing unit tests, run the
 formatter, and update documentation where behavior or usage changes. do not edit

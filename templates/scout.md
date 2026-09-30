@@ -6,7 +6,7 @@ question and original user request: {{request}}
 scope and project instructions: {{constraints}}
 report path: {{report_path}}
 
-investigate the question independently. read applicable project instructions.
+investigate the question independently. read applicable project instructions (AGENTS.md, CLAUDE.md, or equivalent).
 do not modify project files, run mutating project commands, publish, or dispatch
 other agents. use gh-axi for github reads when needed. distinguish observed facts
 from inference and identify unresolved questions. write a concise report only at
