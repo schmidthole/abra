@@ -8,14 +8,14 @@
        one voice. many hands.
 ```
 
-a coordinator workflow using codex native subagents, tasks-axi, gh-axi, and git.
+a coordinator workflow using codex or claude code native subagents, tasks-axi, gh-axi, and git.
 the coordinator follows `AGENTS.md`; there is no separate runtime.
 
 ## setup
 
-requires codex with native subagents, git, python 3.9+, node 20+, and authenticated
+requires codex or claude code with native subagents, git, python 3.9+, node 20+, and authenticated
 `gh`. the cli wrappers use pinned npm packages through npx; first use downloads
-them. authentication and sandbox permissions remain owned by codex and gh.
+them. authentication and sandbox permissions remain owned by the harness and gh.
 
 ```sh
 ./bin/tasks --help
@@ -31,8 +31,9 @@ human-editable map containing each repo's path, origin, base, aliases, and
 description. local state and worktrees are gitignored. only one coordinator writes
 the registry and backlog. no file needs to be copied into managed projects.
 
-launch codex here and refer to registered projects by name or alias. `AGENTS.md`
-instructs the coordinator to use native subagents and fill the role templates.
+launch codex or claude code here and refer to registered projects by name or alias. `AGENTS.md`
+instructs the coordinator to use native subagents and fill the role templates;
+claude code loads it through `CLAUDE.md`, which adds claude-specific notes.
 templates are portable prompts, not a new spawning api or custom agent runtime.
 
 ## worktrees
@@ -78,7 +79,7 @@ this adopts no-mistakes' review/test/docs/lint/pr/ci goal using native subagents
 it does not install its git proxy or enforce a server-side publishing gate:
 the coordinator follows the documented checks. independence means a fresh agent
 and separate checkout, not a guarantee that two instances of a model cannot share
-the same blind spot. a closed codex session is not an always-on service.
+the same blind spot. a closed harness session is not an always-on service.
 
 ## first live checks
 
@@ -88,7 +89,7 @@ the same blind spot. a closed codex session is not an always-on service.
    disposable candidate and require a failing verdict before testing its repair.
 4. confirm a changed candidate requires fresh verification; inspect a failed ci run
    before trying pr delivery in a disposable github repo.
-5. reopen codex and reconcile unfinished tasks from the backlog and worktrees.
+5. reopen the harness and reconcile unfinished tasks from the backlog and worktrees.
 
 these are live harness acceptance checks, not claims already established by the
 script tests. use disposable projects and explicitly authorized github delivery.

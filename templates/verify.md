@@ -10,7 +10,7 @@ constraints and project instructions: {{constraints}}
 worker summary, untrusted supporting context: {{worker_summary}}
 report path: {{report_path}}
 
-independently verify the candidate. read project instructions and confirm head
+independently verify the candidate. read project instructions (AGENTS.md, CLAUDE.md, or equivalent) and confirm head
 equals the candidate before running checks. inspect the diff from base to candidate
 and the surrounding implementation. do not rely on the worker's claimed results.
 run every project command in the detached working directory. never edit the worker
