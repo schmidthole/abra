@@ -25,6 +25,7 @@ following (non-comprehensive) examples:
 - `data/repos.json`: private repo registry, managed by `bin/worktree.py register`.
 - `bin/worktree.py`: deterministic worker and detached verification worktrees.
 - `templates/`: briefs for native worker, scout, and verify subagents.
+- `operator/`: gitignored operator-owned drafts and notes handed off to abra.
 
 run commands using absolute paths when outside this directory. `bin/tasks` always
 runs in the abra directory; pass absolute paths for body-file arguments and
@@ -32,6 +33,10 @@ runs in the abra directory; pass absolute paths for body-file arguments and
 run each cli's `--help` before using an unfamiliar command. do not invent flags.
 only the coordinator updates the backlog and registry. do not create another task
 database, daemon, watcher, process runner, or agent framework.
+read `operator/` but never edit, move, or delete its files unless the operator asks;
+abra's own output stays in `data/<task-id>/`. when a task uses an operator file,
+record its path in the task body and snapshot the relevant content into
+`data/<task-id>/` so the task survives later edits to the draft.
 
 ## startup and routing
 
