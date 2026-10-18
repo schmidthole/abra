@@ -28,8 +28,10 @@ python3 bin/worktree.py list
 the registry starts empty; register actual checkouts with their actual base refs.
 names and aliases must be unambiguous lowercase slugs. `data/repos.json` is a
 human-editable map containing each repo's path, origin, base, aliases, and
-description. local state and worktrees are gitignored. only one coordinator writes
-the registry and backlog. no file needs to be copied into managed projects.
+description. `operator/` holds your own drafts and notes to hand off to the
+coordinator, which reads but does not edit them. local state, `operator/`, and
+worktrees are gitignored. only one coordinator writes the registry and backlog.
+no file needs to be copied into managed projects.
 
 launch codex or claude code here and refer to registered projects by name or alias. `AGENTS.md`
 instructs the coordinator to use native subagents and fill the role templates;
