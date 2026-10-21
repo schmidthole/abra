@@ -87,9 +87,13 @@ def specialty(root, env):
     if not isinstance(config, dict):
         raise ValueError("specialty.json must be an object")
     prompt = base / "SPECIALTY.md"
+    try:
+        text = prompt.read_text(encoding="utf-8") if prompt.is_file() else None
+    except UnicodeDecodeError:
+        raise ValueError("SPECIALTY.md is not valid utf-8") from None
     return dict(
         dir=base,
-        prompt=prompt.read_text() if prompt.is_file() else None,
+        prompt=text,
         mcp=(
             inside(base, config["mcp_config"], "mcp_config")
             if "mcp_config" in config
@@ -160,7 +164,7 @@ def slot(locks, env):
 def load_json(path, label):
     try:
         return json.loads(path.read_text())
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ValueError(label + " is not valid json") from None
 
 
@@ -238,7 +242,7 @@ def attempt(root, argv, env):
         raise ValueError("could not start the claude harness") from None
     try:
         output = json.loads(result.stdout)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, "harness output is not json"
     if not isinstance(output, dict):
         return None, "harness output is not a json object"

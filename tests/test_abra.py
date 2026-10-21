@@ -28,6 +28,12 @@ STUB = textwrap.dedent(
         print(json.dumps({"is_error": False, "result": "ok",
                           "session_id": "--dangerously-skip-permissions"}))
         sys.exit(0)
+    if mode == "deep":
+        print("[" * 100000)
+        sys.exit(0)
+    if mode == "deep-on-resume" and resuming:
+        print("[" * 100000)
+        sys.exit(0)
     if mode == "garbage":
         print("not json")
     elif mode == "error":
@@ -143,6 +149,47 @@ class AbraTests(unittest.TestCase):
         result = self.abra("run", "--key", "k", "--text", "x")
         self.assertEqual(result.returncode, 1)
         self.assertIn("specialty.json is not valid json", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_deeply_nested_json_fails_cleanly(self):
+        (self.root / "data").mkdir()
+        (self.root / "data/sessions.json").write_text("[" * 100000)
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("data/sessions.json is not valid json", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        (self.root / "data/sessions.json").unlink()
+        manifest = self.specialty().joinpath("specialty.json")
+        manifest.write_text("[" * 100000)
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("specialty.json is not valid json", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.calls(), [])
+        manifest.unlink()
+        result = self.abra("run", "--key", "k", "--text", "x", STUB_MODE="deep")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("harness output is not json", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_deeply_nested_harness_output_on_resume_retries(self):
+        self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
+        result = self.abra(
+            "run", "--key", "k", "--text", "y", STUB_MODE="deep-on-resume"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "could not resume session for k: harness output is not json", result.stderr
+        )
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(self.calls()), 3)
+
+    def test_invalid_utf8_specialty_prompt_is_named(self):
+        self.specialty(prompt=None).joinpath("SPECIALTY.md").write_bytes(b"\xff\xfe")
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SPECIALTY.md is not valid utf-8", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.calls(), [])
 
