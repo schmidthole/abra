@@ -97,7 +97,8 @@ allowed for chat ids); requesters also allow `@` and spaces; event text is limit
 to 32 kib of utf-8. `job <name>` reads `jobs.<name>.prompt` from the specialty's
 `specialty.json` and uses the key `job:<name>:<utc yyyy-mm-dd>`.
 
-when `specialty/` (or `ABRA_SPECIALTY_DIR`) exists, `SPECIALTY.md` is appended to
+when `specialty/` (or `ABRA_SPECIALTY_DIR`, which must be an absolute path to a
+directory; empty means unset) exists, `SPECIALTY.md` is appended to
 the system prompt and `mcp_config` is passed with `--strict-mcp-config`; paths must
 stay inside the specialty directory. if `bin/specialty.py` exists, its `check` must
 pass before the harness runs.
@@ -113,9 +114,15 @@ agent mode is off by default. enable it only inside an isolated container whose
 credentials and network egress are already scoped; it removes every permission
 prompt and check.
 
+if a stored session cannot be resumed, the runner clears it and retries once in a
+fresh session with a note to rebuild context from the task body and backlog; if
+that also fails, the key's session stays cleared.
+
 one key never runs twice at once. a busy key or full concurrency cap fails fast
 with exit code 75 instead of queueing, so the caller decides whether to retry.
-other failures exit 1. there are no service, systemd, or cron files: scheduling,
+usage errors exit 2 and other failures exit 1. the prompt and `SPECIALTY.md` are
+passed as process arguments, visible in the host process list, so run on a
+single-tenant host or container. there are no service, systemd, or cron files: scheduling,
 retries, and process supervision belong to the deployer.
 
 ## pipeline

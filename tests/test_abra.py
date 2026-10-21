@@ -20,6 +20,9 @@ STUB = textwrap.dedent(
         handle.write(json.dumps(sys.argv[1:]) + "\\n")
     time.sleep(float(os.environ.get("STUB_SLEEP", "0")))
     mode = os.environ.get("STUB_MODE", "ok")
+    if mode == "resume-fails" and "--resume" in sys.argv:
+        print(json.dumps({"is_error": True, "result": "no conversation found"}))
+        sys.exit(1)
     if mode == "garbage":
         print("not json")
     elif mode == "error":
@@ -132,7 +135,7 @@ class AbraTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, args)
             self.assertIn("abra: error:", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
-            self.assertEqual(result.stderr, result.stderr.lower())
+            self.assertTrue(result.stderr.startswith("abra: error: "), args)
         self.assertEqual(self.calls(), [])
 
     def test_skip_permissions_only_with_opt_in(self):
@@ -143,6 +146,37 @@ class AbraTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", calls[0])
         self.assertNotIn("--dangerously-skip-permissions", calls[1])
         self.assertIn("--dangerously-skip-permissions", calls[2])
+
+    def test_unresumable_session_retries_fresh_once(self):
+        self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
+        result = self.abra("run", "--key", "k", "--text", "y", STUB_MODE="resume-fails")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not resume session for k", result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1][calls[1].index("--resume") + 1], "session-1")
+        self.assertNotIn("--resume", calls[2])
+        self.assertTrue(calls[2][1].startswith("note: the previous session"))
+        sessions = json.loads((self.root / "data/sessions.json").read_text())
+        self.assertEqual(sessions["k"]["session_id"], "session-3")
+
+    def test_unresumable_session_and_failed_retry_clears_session(self):
+        self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
+        self.abra("run", "--key", "other", "--text", "x")
+        result = self.abra("run", "--key", "k", "--text", "y", STUB_MODE="error")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("abra: error: harness reported an error", result.stderr)
+        self.assertEqual(len(self.calls()), 4)
+        sessions = json.loads((self.root / "data/sessions.json").read_text())
+        self.assertNotIn("k", sessions)
+        self.assertIn("other", sessions)
+        self.abra("run", "--key", "k", "--text", "z")
+        self.assertNotIn("--resume", self.calls()[4])
+
+    def test_first_run_failure_does_not_retry(self):
+        result = self.abra("run", "--key", "k", "--text", "x", STUB_MODE="garbage")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_harness_failures_exit_nonzero(self):
         result = self.abra("run", "--key", "k", "--text", "x", STUB_MODE="garbage")
@@ -175,6 +209,24 @@ class AbraTests(unittest.TestCase):
         call = self.calls()[0]
         self.assertNotIn("--append-system-prompt", call)
         self.assertNotIn("--mcp-config", call)
+
+    def test_specialty_dir_env_rules(self):
+        self.specialty()
+        self.abra("run", "--key", "k", "--text", "x", ABRA_SPECIALTY_DIR="")
+        self.assertIn("be helpful\n", self.calls()[0])
+        result = self.abra(
+            "run", "--key", "k", "--text", "x", ABRA_SPECIALTY_DIR="specialty"
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("absolute path", result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_default_specialty_path_not_directory(self):
+        (self.root / "specialty").write_text("not a dir")
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a directory", result.stderr)
+        self.assertEqual(self.calls(), [])
 
     def test_specialty_dir_from_env_and_missing_env_dir(self):
         other = Path(self.temporary.name) / "elsewhere"

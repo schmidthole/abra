@@ -21,6 +21,10 @@ JOB = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 SESSION = re.compile(r"[A-Za-z0-9-]{1,128}")
 MAX_TEXT = 32 * 1024
 BUSY = 75
+RESUME_NOTE = (
+    "note: the previous session for this key could not be resumed. rebuild"
+    " context from the task body and the backlog before acting.\n\n"
+)
 
 
 class Busy(Exception):
@@ -64,12 +68,19 @@ def inside(base, relative, label):
 
 
 def specialty(root, env):
-    configured = env.get("ABRA_SPECIALTY_DIR")
-    base = Path(configured) if configured else root / "specialty"
-    if not base.is_dir():
-        if configured:
+    configured = env.get("ABRA_SPECIALTY_DIR", "")
+    if configured:
+        base = Path(configured)
+        if not base.is_absolute():
+            raise ValueError("abra_specialty_dir must be an absolute path")
+        if not base.is_dir():
             raise ValueError("abra_specialty_dir is not a directory")
-        return None
+    else:
+        base = root / "specialty"
+        if not base.exists() and not base.is_symlink():
+            return None
+        if not base.is_dir():
+            raise ValueError("specialty path exists but is not a directory")
     base = base.resolve()
     manifest = base / "specialty.json"
     config = json.loads(manifest.read_text()) if manifest.is_file() else {}
@@ -155,12 +166,16 @@ def read_sessions(data):
 
 
 def save_session(data, key, session):
+    """store a key's session id; none removes it."""
     with lock(data / "locks/sessions.lock", blocking=True):
         sessions = read_sessions(data)
-        sessions[key] = dict(
-            session_id=session,
-            updated=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
+        if session is None:
+            sessions.pop(key, None)
+        else:
+            sessions[key] = dict(
+                session_id=session,
+                updated=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
         temporary = data / "sessions.json.tmp"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w") as handle:
@@ -198,6 +213,29 @@ def preflight(root, env):
         raise ValueError("specialty check failed; refusing to invoke the harness")
 
 
+def attempt(root, argv, env):
+    """run the harness once; return (output, failure message or none)."""
+    try:
+        result = subprocess.run(
+            argv, cwd=root, env=env, stdout=subprocess.PIPE, text=True
+        )
+    except OSError:
+        raise ValueError("could not start the claude harness") from None
+    try:
+        output = json.loads(result.stdout)
+    except ValueError:
+        return None, "harness output is not json"
+    if not isinstance(output, dict):
+        return None, "harness output is not a json object"
+    if output.get("is_error"):
+        return output, "harness reported an error"
+    if result.returncode:
+        return output, "harness exited with code " + str(result.returncode)
+    if not isinstance(output.get("result"), str):
+        return output, "harness output has no result text"
+    return output, None
+
+
 def execute(root, key, prompt, spec, env):
     data = root / "data"
     locks = data / "locks"
@@ -211,30 +249,22 @@ def execute(root, key, prompt, spec, env):
         entry = read_sessions(data).get(key)
         session = entry.get("session_id") if isinstance(entry, dict) else None
         log(("resuming session for " if session else "starting session for ") + key)
-        try:
-            result = subprocess.run(
-                command(prompt, session, spec, env),
-                cwd=root,
-                env=env,
-                stdout=subprocess.PIPE,
-                text=True,
+        output, failure = attempt(root, command(prompt, session, spec, env), env)
+        if failure and session:
+            log("could not resume session for " + key + ": " + failure)
+            log("cleared stored session; retrying once without resume")
+            save_session(data, key, None)
+            output, failure = attempt(
+                root, command(RESUME_NOTE + prompt, None, spec, env), env
             )
-        except OSError:
-            raise ValueError("could not start the claude harness") from None
-        try:
-            output = json.loads(result.stdout)
-        except ValueError:
-            raise ValueError("harness output is not json") from None
-        if not isinstance(output, dict):
-            raise ValueError("harness output is not a json object")
-        if SESSION.fullmatch(str(output.get("session_id", ""))):
+            if failure:
+                raise ValueError(failure)
+        if output and SESSION.fullmatch(str(output.get("session_id", ""))):
             save_session(data, key, output["session_id"])
         else:
             log("harness output has no usable session id")
-        if result.returncode or output.get("is_error"):
-            raise ValueError("harness failed with exit code " + str(result.returncode))
-        if not isinstance(output.get("result"), str):
-            raise ValueError("harness output has no result text")
+        if failure:
+            raise ValueError(failure)
         log("finished " + key)
         return output["result"]
 
@@ -269,10 +299,10 @@ def main(argv=None):
             prompt = job_prompt(args.name, key, text)
         print(execute(ROOT, key, prompt, spec, env))
     except Busy as error:
-        log("busy: " + str(error).lower())
+        log("busy: " + str(error))
         return BUSY
     except (ValueError, OSError, KeyError) as error:
-        log("error: " + str(error).lower())
+        log("error: " + str(error))
         return 1
     return 0
 
