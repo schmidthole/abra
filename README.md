@@ -86,7 +86,10 @@ each conversation key (a chat thread, ticket, or job run) resumes its own sessio
 ```sh
 bin/abra run --key thread-123 --from U0123 --text "fix the login bug in example"
 bin/abra run --key ticket-42 --from alice --text-file /path/to/event.txt
+bin/abra run --key slack:C01:1700.1 --messages-file /path/to/batch.json \
+  --work-id abra-x7k2 --session-id 0f8fad5b-d9cb-469f-a165-70867728950e
 bin/abra job daily-digest
+bin/abra sessions prune --older-than 90
 ```
 
 `run` wraps the text in a delimited untrusted-data block naming the requester and
@@ -96,6 +99,29 @@ text to stdout, and logs progress to stderr. session ids are stored per key in
 allowed for chat ids); requesters also allow `@` and spaces; event text is limited
 to 32 kib of utf-8. `job <name>` reads `jobs.<name>.prompt` from the specialty's
 `specialty.json` and uses the key `job:<name>:<utc yyyy-mm-dd>`.
+
+`run` options for trigger runtimes that batch a conversation's queued messages:
+
+- `--messages-file M` replaces `--text`/`--text-file`: a json array of 1 to 50
+  objects with exactly `from` (requester pattern) and non-empty `text`, at most
+  32 kib. each message gets its own delimited untrusted block naming its sender,
+  in order. `--from` is a usage error with it.
+- `--work-id W` (`[a-z0-9]+(-[a-z0-9]+)*`, at most 64 chars) tells abra the
+  conversation is work item `W`: it uses `W` as the tasks-axi task id and
+  `data/W/` for reports, creating the task if missing and reusing it otherwise.
+- `--session-id U` (canonical lowercase uuid) pre-assigns the claude session id so
+  the caller can announce it before the run. it is only for a fresh key: a key
+  with a stored session exits 1. the resume retry below never reuses it.
+- `--context-file C` (utf-8, non-empty, at most 256 kib) is prior conversation
+  history for resurrecting an archived conversation. it is wrapped in its own
+  untrusted block before the new messages, and used only when the key has no
+  stored session (fresh start or the resume retry); otherwise it is ignored with a
+  log line.
+
+`sessions prune --older-than DAYS` (integer 1 to 3650) removes stored sessions
+whose `updated` time (last successful use) is older than `DAYS`, or missing or
+unparsable, and prints each removed key on its own line. the caller picks the age,
+for example 90 days.
 
 when `specialty/` (or `ABRA_SPECIALTY_DIR`, which must be an absolute path to a
 directory; empty means unset) exists, `SPECIALTY.md` is appended to
@@ -122,7 +148,8 @@ one key never runs twice at once. a busy key or full concurrency cap fails fast
 with exit code 75 instead of queueing, so the caller decides whether to retry.
 usage errors exit 2 and other failures exit 1. the prompt and `SPECIALTY.md` are
 passed as process arguments, visible in the host process list, so run on a
-single-tenant host or container. there are no service, systemd, or cron files: scheduling,
+single-tenant host or container. linux caps one argument at 128 kib, so a prompt with a
+large context file can fail to start the harness there (exit 1). there are no service, systemd, or cron files: scheduling,
 retries, and process supervision belong to the deployer.
 
 ## pipeline
