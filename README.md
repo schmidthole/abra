@@ -78,6 +78,53 @@ purpose: `SPECIALTY.md` guides the model, `specialty.json` fixes the repo regist
 declared secrets, and delivery ceiling. lint it with `python3 bin/specialty.py check`.
 see [docs/specialty.md](docs/specialty.md).
 
+## headless runner
+
+`bin/abra` runs one event through claude code without an interactive session.
+each conversation key (a chat thread, ticket, or job run) resumes its own session.
+
+```sh
+bin/abra run --key thread-123 --from U0123 --text "fix the login bug in example"
+bin/abra run --key ticket-42 --from alice --text-file /path/to/event.txt
+bin/abra job daily-digest
+```
+
+`run` wraps the text in a delimited untrusted-data block naming the requester and
+key, invokes `claude -p --output-format json` in this directory, prints the result
+text to stdout, and logs progress to stderr. session ids are stored per key in
+`data/sessions.json`. keys match `[A-Za-z0-9][A-Za-z0-9:._-]{0,127}` (uppercase is
+allowed for chat ids); requesters also allow `@` and spaces; event text is limited
+to 32 kib of utf-8. `job <name>` reads `jobs.<name>.prompt` from the specialty's
+`specialty.json` and uses the key `job:<name>:<utc yyyy-mm-dd>`.
+
+when `specialty/` (or `ABRA_SPECIALTY_DIR`, which must be an absolute path to a
+directory; empty means unset) exists, `SPECIALTY.md` is appended to
+the system prompt and `mcp_config` is passed with `--strict-mcp-config`; paths must
+stay inside the specialty directory. if `bin/specialty.py` exists, its `check` must
+pass before the harness runs.
+
+| variable | effect |
+| --- | --- |
+| `ABRA_CLAUDE_BIN` | harness binary, default `claude` |
+| `ABRA_SPECIALTY_DIR` | specialty directory, default `specialty/` |
+| `ABRA_MAX_CONCURRENCY` | concurrent runs across keys, default 2 |
+| `ABRA_AGENT_MODE` | `1` passes `--dangerously-skip-permissions` |
+
+agent mode is off by default. enable it only inside an isolated container whose
+credentials and network egress are already scoped; it removes every permission
+prompt and check.
+
+if a stored session cannot be resumed, the runner clears it and retries once in a
+fresh session with a note to rebuild context from the task body and backlog; if
+that also fails, the key's session stays cleared.
+
+one key never runs twice at once. a busy key or full concurrency cap fails fast
+with exit code 75 instead of queueing, so the caller decides whether to retry.
+usage errors exit 2 and other failures exit 1. the prompt and `SPECIALTY.md` are
+passed as process arguments, visible in the host process list, so run on a
+single-tenant host or container. there are no service, systemd, or cron files: scheduling,
+retries, and process supervision belong to the deployer.
+
 ## pipeline
 
 worker → independent review/tests/docs/lint → fixes and fresh verification if needed
@@ -114,6 +161,7 @@ make test
 
 tests use temporary git repositories to check alias resolution, collisions,
 dirty-checkout preservation, worker isolation, and exact-commit verification.
+runner tests use a stub harness through `ABRA_CLAUDE_BIN`.
 
 references: [tasks-axi](https://github.com/kunchenguid/tasks-axi),
 [gh-axi](https://github.com/kunchenguid/gh-axi),
