@@ -73,8 +73,9 @@ exceptions raised by adapter methods are logged by type and never stop the runti
 
   `--session-id` is passed on the first turn of a session (and after resurrection);
   `--context-file` only when resurrecting. temp files are 0600 under
-  `data/triggers/tmp/` and removed after the call, including when writing them
-fails; leftovers from a crash are removed at startup. argv lists only; no shell.
+  `data/triggers/tmp/<adapter name>/` (0700) and removed after the call, including
+  when writing them fails. at startup the runtime removes only its own adapter's
+  leftover temp files and stale store temp files. argv lists only; no shell.
 - exit 0: the stdout result text is posted with `reply` (nothing is posted when it
   is empty).
 - exit 75 (busy): the batch is acked `queued` again and retried after a backoff
@@ -101,9 +102,9 @@ not already present under `data/`. session ids are lowercase uuid4.
 ## store
 
 `<root>/data/triggers/<adapter name>.json`, written atomically (temp file, fsync,
-rename) with mode 0600 in a 0700 directory, under a lock. a sibling `.lock` file is
-(0600) is held for the process lifetime, so a second runtime for the same adapter on the same
-root refuses to start. a corrupt store fails closed at startup.
+rename) with mode 0600 in a 0700 directory, under a lock. a sibling `.lock` file
+(0600) is held for the process lifetime, so a second runtime for the same adapter
+on the same root refuses to start. a corrupt store fails closed at startup.
 
 ```json
 {"version": 1, "convs": {"slack:C1:1712.1": {

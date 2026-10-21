@@ -187,6 +187,7 @@ class Runtime:
         self.backoff = backoff or (lambda attempt: min(300, 5 * 2**attempt))
         self.directory = self.root / "data/triggers"
         self.path = self.directory / (adapter_name + ".json")
+        self.scratch = self.directory / "tmp" / adapter_name
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.stopping = threading.Event()
@@ -201,8 +202,7 @@ class Runtime:
     # lifecycle
 
     def start(self):
-        scratch = self.directory / "tmp"
-        for directory in (self.directory, scratch):
+        for directory in (self.directory, self.directory / "tmp", self.scratch):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             directory.chmod(0o700)
         descriptor = os.open(
@@ -210,6 +210,7 @@ class Runtime:
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
             0o600,
         )
+        os.fchmod(descriptor, 0o600)
         holder = os.fdopen(descriptor, "a")
         try:
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -217,7 +218,9 @@ class Runtime:
             holder.close()
             raise ValueError("another runtime already owns " + self.path.name)
         self.holder = holder
-        stale = [path for path in scratch.iterdir() if path.is_file()]
+        # only this adapter's temp files: other adapters may share the root
+        stale = [path for path in self.scratch.iterdir() if path.is_file()]
+        stale += list(self.directory.glob("." + self.path.name + "*.tmp"))
         for path in stale:
             path.unlink()
         if stale:
@@ -479,7 +482,7 @@ class Runtime:
                 self.changed.notify_all()
 
     def _temporary(self, data):
-        descriptor, path = tempfile.mkstemp(dir=self.directory / "tmp")
+        descriptor, path = tempfile.mkstemp(dir=self.scratch)
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)

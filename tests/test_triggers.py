@@ -319,7 +319,7 @@ class TriggerTests(unittest.TestCase):
         self.assertTrue(instance.wait_idle(10))
         leftovers = [p.name for p in path.parent.iterdir() if p.suffix == ".tmp"]
         self.assertEqual(leftovers, [])
-        self.assertEqual(list((path.parent / "tmp").iterdir()), [])
+        self.assertEqual(list((path.parent / "tmp/test").iterdir()), [])
         entry = self.store()["convs"]["t:c1:1"]
         for field in ("work_id", "session_id", "created", "last_used"):
             self.assertIsInstance(entry[field], str)
@@ -457,20 +457,43 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(self.runs(), [])
 
     def test_temporary_files_cleaned_on_write_failure_and_startup(self):
-        scratch = self.root / "data/triggers/tmp"
+        directory = self.root / "data/triggers"
+        scratch = directory / "tmp/test"
         scratch.mkdir(parents=True)
-        scratch.parent.chmod(0o755)
-        scratch.chmod(0o755)
+        for path in (directory, scratch.parent, scratch):
+            path.chmod(0o755)
         (scratch / "leftover").write_text("old message")
+        (directory / ".test.jsonabc.tmp").write_text("old store")
+        lock = directory / "test.lock"
+        lock.write_text("")
+        lock.chmod(0o644)
         adapter, instance = self.start()
         self.assertEqual(list(scratch.iterdir()), [])
-        self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(scratch.parent.stat().st_mode & 0o777, 0o700)
-        lock = self.root / "data/triggers/test.lock"
+        self.assertFalse((directory / ".test.jsonabc.tmp").exists())
+        for path in (directory, scratch.parent, scratch):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
         self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
         with self.assertRaises(TypeError):
             instance._temporary("not bytes")
         self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_startup_sweep_leaves_other_adapters_temp_files(self):
+        adapter, instance = self.start()
+        directory = self.root / "data/triggers"
+        mine = directory / "tmp/test/in-flight"
+        mine.write_text("running turn")
+        theirs = directory / "tmp/other"
+        theirs.mkdir()
+        (theirs / "leftover").write_text("old message")
+        (directory / ".other.jsonxyz.tmp").write_text("old store")
+
+        class Other(Adapter):
+            name = "other"
+
+        self.start(Other())
+        self.assertTrue(mine.exists())
+        self.assertEqual(list(theirs.iterdir()), [])
+        self.assertFalse((directory / ".other.jsonxyz.tmp").exists())
 
     def test_catch_up_queues_missed_history_after_restart(self):
         history = [
