@@ -25,6 +25,8 @@ following (non-comprehensive) examples:
 - `data/repos.json`: private repo registry, managed by `bin/worktree.py register`.
 - `bin/worktree.py`: deterministic worker and detached verification worktrees.
 - `bin/abra`: one-shot headless runner; one resumed session per conversation key.
+- `triggers/`: shared trigger runtime and thin adapters that call `bin/abra`;
+  see `docs/triggers.md`.
 - `templates/`: briefs for native worker, scout, and verify subagents.
 - `operator/`: gitignored operator-owned drafts and notes handed off to abra.
 - `specialty/` (or `$ABRA_SPECIALTY_DIR`): optional pack that specializes abra;
@@ -36,7 +38,9 @@ runs in the abra directory; pass absolute paths for body-file arguments and
 run each cli's `--help` before using an unfamiliar command. do not invent flags.
 only the coordinator updates the backlog and registry. do not create another task
 database, daemon, watcher, process runner, or agent framework; `bin/abra` is the
-sanctioned one-shot headless entrypoint, not a daemon.
+sanctioned one-shot headless entrypoint, not a daemon. the only exception is
+deployer-run trigger listeners under `triggers/` that only call `bin/abra` (see
+`docs/triggers.md`).
 read `operator/` but never edit, move, or delete its files unless the operator asks;
 abra's own output stays in `data/<task-id>/`. when a task uses an operator file,
 record its path in the task body and snapshot the relevant content into
