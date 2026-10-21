@@ -71,6 +71,13 @@ first. clean up obsolete verification attempts too; if a directory contains prob
 or changes, inspect them and remove only known disposable files before retrying.
 there is no force option, background cleanup, or automatic deletion on context reset.
 
+## specialty
+
+an optional pack in `specialty/` (or `$ABRA_SPECIALTY_DIR`) specializes abra for one
+purpose: `SPECIALTY.md` guides the model, `specialty.json` fixes the repo registry,
+declared secrets, and delivery ceiling. lint it with `python3 bin/specialty.py check`.
+see [docs/specialty.md](docs/specialty.md).
+
 ## pipeline
 
 worker → independent review/tests/docs/lint → fixes and fresh verification if needed

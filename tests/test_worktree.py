@@ -1,9 +1,12 @@
 """exercise worktree behavior against real temporary repositories."""
 
 import importlib.util
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -17,6 +20,10 @@ class WorktreeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(worktree.specialty.ENV, None)
         self.root = Path(self.temporary.name) / "home"
         self.source = Path(self.temporary.name) / "source with spaces"
         self.source.mkdir()
@@ -170,6 +177,38 @@ class WorktreeTests(unittest.TestCase):
         (path / "cache").write_text("disposable\n")
         worktree.cleanup(self.root, "demo", "ignored", idle=True, yes=True)
         self.assertFalse(path.exists())
+
+    def write_specialty(self, directory):
+        directory.mkdir(parents=True)
+        (directory / "SPECIALTY.md").write_text("# example\n")
+        repos = {"locked": {"path": str(self.source.resolve()), "base": "main"}}
+        manifest = dict(name="example", description="", repos=repos)
+        (directory / "specialty.json").write_text(json.dumps(manifest))
+
+    def test_specialty_locks_registry(self):
+        self.write_specialty(self.root / "specialty")
+        self.assertEqual(list(worktree.read_registry(self.root)), ["locked"])
+        with self.assertRaises(ValueError):
+            worktree.resolve(worktree.read_registry(self.root), "demo")
+        with self.assertRaisesRegex(ValueError, "register is disabled"):
+            worktree.register(self.root, "other", self.source, "main", [], "")
+        result = worktree.create(self.root, "locked", "task-one")
+        self.assertEqual(result["branch"], "abra/task-one")
+        with self.assertRaises(ValueError):
+            worktree.create(self.root, "demo", "task-two")
+        removed = worktree.cleanup(self.root, "locked", "task-one", idle=True, yes=True)
+        self.assertTrue(removed["removed"])
+
+    def test_specialty_env_override_and_invalid_pack(self):
+        pack = Path(self.temporary.name) / "mounted"
+        self.write_specialty(pack)
+        os.environ[worktree.specialty.ENV] = str(pack)
+        self.assertEqual(list(worktree.read_registry(self.root)), ["locked"])
+        (pack / "specialty.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "missing keys"):
+            worktree.read_registry(self.root)
+        with self.assertRaisesRegex(ValueError, "register is disabled"):
+            worktree.register(self.root, "other", self.source, "main", [], "")
 
 
 if __name__ == "__main__":
