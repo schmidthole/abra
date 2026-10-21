@@ -36,7 +36,9 @@ thread. it returns true when the message was queued.
 
 invalid events are dropped with a log line and never reach `bin/abra`. a repeated
 `msg_id` (the conversation's last accepted message or one still pending) is ignored,
-so platform redelivery is safe.
+so platform redelivery is safe, including on an archived conversation (no resume
+text is posted). a conversation holds at most 200 pending messages; past that, new
+messages are dropped with a log line and acked `failed`.
 
 output, implemented by the adapter (called from runtime threads, so make them
 thread-safe; `reply` and `ack` from `submit` run while the runtime holds its lock,
@@ -71,7 +73,8 @@ exceptions raised by adapter methods are logged by type and never stop the runti
 
   `--session-id` is passed on the first turn of a session (and after resurrection);
   `--context-file` only when resurrecting. temp files are 0600 under
-  `data/triggers/tmp/` and removed after the call. argv lists only; no shell.
+  `data/triggers/tmp/` and removed after the call, including when writing them
+fails; leftovers from a crash are removed at startup. argv lists only; no shell.
 - exit 0: the stdout result text is posted with `reply` (nothing is posted when it
   is empty).
 - exit 75 (busy): the batch is acked `queued` again and retried after a backoff
@@ -99,7 +102,7 @@ not already present under `data/`. session ids are lowercase uuid4.
 
 `<root>/data/triggers/<adapter name>.json`, written atomically (temp file, fsync,
 rename) with mode 0600 in a 0700 directory, under a lock. a sibling `.lock` file is
-held for the process lifetime, so a second runtime for the same adapter on the same
+(0600) is held for the process lifetime, so a second runtime for the same adapter on the same
 root refuses to start. a corrupt store fails closed at startup.
 
 ```json
@@ -113,8 +116,11 @@ root refuses to start. a corrupt store fails closed at startup.
 `pending` holds accepted messages that have not completed a turn, including the
 batch of a turn interrupted by a restart; they survive restarts and are re-acked
 `queued` and run at startup. `fresh` means the next turn passes `--session-id`;
-`resumed` means it also passes `--context-file`. both clear after any completed
-turn (exit other than 75), because bin/abra may have stored a session by then.
+`resumed` means it also passes `--context-file`. `fresh` clears after any completed
+turn (exit other than 75), because bin/abra may have stored a session by then and
+rejects `--session-id` for a key with a session. `resumed` clears only after a turn
+exits 0, so a failed resurrection turn keeps the history for the next attempt;
+bin/abra ignores the context once a session is stored.
 
 ## archive and resurrection
 

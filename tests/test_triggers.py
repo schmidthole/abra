@@ -404,6 +404,74 @@ class TriggerTests(unittest.TestCase):
         self.assertNotIn("--context-file", argv)
         self.assertNotIn("--session-id", argv)
 
+    def test_failed_resurrection_turn_keeps_context_without_session_id(self):
+        self.configure(codes=[1, 0])
+        history = [runtime.Message("h0", "U1", "first message")]
+        self.write_store({"t:c1:1": self.entry(days_ago=100, last_msg_id="h0")})
+        adapter, instance = self.start(Adapter({"t:c1:1": history}))
+        instance.submit(event("message", "m1"))
+        self.assertTrue(instance.wait_idle(10))
+        self.assertEqual(adapter.acks("m1"), ["queued", "running", "failed"])
+        instance.submit(event("message", "m2"))
+        self.assertTrue(instance.wait_idle(10))
+        first, second = [run["argv"] for run in self.runs()]
+        self.assertIn("--session-id", first)
+        self.assertIn("--context-file", first)
+        self.assertIn("--context-file", second)
+        self.assertNotIn("--session-id", second)
+        self.assertIn("first message", self.runs()[1]["--context-file"])
+        self.assertFalse(self.store()["convs"]["t:c1:1"]["resumed"])
+        instance.submit(event("message", "m3"))
+        self.assertTrue(instance.wait_idle(10))
+        self.assertNotIn("--context-file", self.runs()[2]["argv"])
+
+    def test_pending_cap_drops_and_acks_failed(self):
+        self.configure(sleep=0.4)
+        with mock.patch.object(runtime, "MAX_PENDING", 2):
+            adapter, instance = self.start()
+            instance.submit(event("start", "m1"))
+            adapter.wait(lambda a: "running" in a.acks("m1"))
+            self.assertTrue(instance.submit(event("message", "m2")))
+            with self.assertLogs("abra.triggers", level="WARNING") as logs:
+                self.assertFalse(
+                    instance.submit(event("message", "m3", "secret words"))
+                )
+            self.assertEqual(adapter.acks("m3"), ["failed"])
+            self.assertNotIn("secret", "\n".join(logs.output))
+            self.assertTrue(instance.wait_idle(10))
+        self.assertEqual(len(self.runs()), 2)
+        self.assertEqual(
+            json.loads(self.runs()[1]["--messages-file"]),
+            [{"from": "U1", "text": "hello"}],
+        )
+        self.assertEqual(self.store()["convs"]["t:c1:1"]["last_msg_id"], "m2")
+
+    def test_redelivered_message_on_archived_conv_does_not_resurrect(self):
+        self.write_store({"t:c1:1": self.entry(days_ago=100, last_msg_id="h0")})
+        adapter, instance = self.start()
+        self.assertFalse(instance.submit(event("message", "h0")))
+        self.assertEqual(adapter.events, [])
+        entry = self.store()["convs"]["t:c1:1"]
+        self.assertTrue(entry["archived"])
+        self.assertIsNone(entry["session_id"])
+        self.assertEqual(self.runs(), [])
+
+    def test_temporary_files_cleaned_on_write_failure_and_startup(self):
+        scratch = self.root / "data/triggers/tmp"
+        scratch.mkdir(parents=True)
+        scratch.parent.chmod(0o755)
+        scratch.chmod(0o755)
+        (scratch / "leftover").write_text("old message")
+        adapter, instance = self.start()
+        self.assertEqual(list(scratch.iterdir()), [])
+        self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(scratch.parent.stat().st_mode & 0o777, 0o700)
+        lock = self.root / "data/triggers/test.lock"
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(TypeError):
+            instance._temporary("not bytes")
+        self.assertEqual(list(scratch.iterdir()), [])
+
     def test_catch_up_queues_missed_history_after_restart(self):
         history = [
             runtime.Message("m1", "U1", "seen"),

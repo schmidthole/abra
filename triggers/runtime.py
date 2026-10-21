@@ -28,6 +28,7 @@ UUID = re.compile(
 BASE32 = "abcdefghijklmnopqrstuvwxyz234567"
 MAX_TEXT = 32 * 1024
 MAX_BATCH = 50
+MAX_PENDING = 200
 MAX_CONTEXT = 256 * 1024
 BUSY = 75
 DAY = 24 * 3600
@@ -200,15 +201,27 @@ class Runtime:
     # lifecycle
 
     def start(self):
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        (self.directory / "tmp").mkdir(exist_ok=True, mode=0o700)
-        holder = open(self.path.with_suffix(".lock"), "a")
+        scratch = self.directory / "tmp"
+        for directory in (self.directory, scratch):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
+        descriptor = os.open(
+            self.path.with_suffix(".lock"),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        holder = os.fdopen(descriptor, "a")
         try:
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             holder.close()
             raise ValueError("another runtime already owns " + self.path.name)
         self.holder = holder
+        stale = [path for path in scratch.iterdir() if path.is_file()]
+        for path in stale:
+            path.unlink()
+        if stale:
+            log.info("removed %d stale temporary files", len(stale))
         with self.lock:
             self.convs = self._load()
         log.info("starting %s with %d conversations", self.path.name, len(self.convs))
@@ -281,6 +294,8 @@ class Runtime:
                         return False
                     entry = self._create(conv)
                 elif entry["archived"]:
+                    if self._duplicate(conv, entry, message["msg_id"]):
+                        return False
                     self._resurrect(conv, entry)
                 return self._enqueue(conv, entry, message)
         except OSError as error:
@@ -332,10 +347,24 @@ class Runtime:
         log.info("resurrecting %s as work item %s", conv, entry["work_id"])
         self._reply(conv, resume_text(self.name, entry["work_id"], entry["session_id"]))
 
-    def _enqueue(self, conv, entry, message):
+    def _duplicate(self, conv, entry, msg_id):
         pending = {m["msg_id"] for m in entry["pending"]}
-        if message["msg_id"] in pending or message["msg_id"] == entry["last_msg_id"]:
-            log.info("ignoring duplicate message %s for %s", message["msg_id"], conv)
+        if msg_id in pending or msg_id == entry["last_msg_id"]:
+            log.info("ignoring duplicate message %s for %s", msg_id, conv)
+            return True
+        return False
+
+    def _enqueue(self, conv, entry, message):
+        if self._duplicate(conv, entry, message["msg_id"]):
+            return False
+        if len(entry["pending"]) >= MAX_PENDING:
+            log.warning(
+                "dropping message %s for %s: %d messages already pending",
+                message["msg_id"],
+                conv,
+                MAX_PENDING,
+            )
+            self._ack(conv, message["msg_id"], "failed")
             return False
         previous = entry["last_msg_id"]
         entry["pending"].append(message)
@@ -414,7 +443,12 @@ class Runtime:
             self.retries.pop(conv, None)
             done = set(ids)
             entry["pending"] = [m for m in entry["pending"] if m["msg_id"] not in done]
-            entry.update(fresh=False, resumed=False, last_used=now())
+            # resumed stays set until a turn succeeds; bin/abra ignores the context
+            # once a session is stored. fresh clears because bin/abra rejects
+            # --session-id when the key already has a session.
+            entry.update(fresh=False, last_used=now())
+            if code == 0:
+                entry["resumed"] = False
             self._save()
         if code == 0:
             log.info("finished turn for %s", conv)
@@ -446,8 +480,12 @@ class Runtime:
 
     def _temporary(self, data):
         descriptor, path = tempfile.mkstemp(dir=self.directory / "tmp")
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+        except BaseException:
+            os.unlink(path)
+            raise
         return path
 
     def _run(self, conv, batch, work_id, session_id, prior):
