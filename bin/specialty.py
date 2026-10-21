@@ -15,6 +15,7 @@ ENV = "ABRA_SPECIALTY_DIR"
 DELIVERY = ("report", "local-commit", "draft-pr", "pr")
 MAX_MANIFEST = 64 * 1024
 MAX_FILE = 256 * 1024
+MAX_ENTRIES = 1000
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -121,7 +122,7 @@ def read_json(path, field, limit=MAX_FILE):
         )
     except UnicodeDecodeError:
         raise ValueError(field + " is not valid utf-8") from None
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         raise ValueError(field + " is not valid json") from None
 
 
@@ -155,6 +156,33 @@ def repos(value):
     return result
 
 
+def templates_tree(directory, templates):
+    """check every templates entry stays inside the pack and is size bounded."""
+    count = 0
+
+    def unreadable(error):
+        raise ValueError("templates has an unreadable entry") from None
+
+    # symlinked dirs are followed so their contents are checked too; the entry
+    # cap and broken or looping symlink refusal stop symlink cycles.
+    for current, dirs, files in os.walk(
+        templates, onerror=unreadable, followlinks=True
+    ):
+        for name in dirs + files:
+            count += 1
+            if count > MAX_ENTRIES:
+                raise ValueError(
+                    "templates has more than " + str(MAX_ENTRIES) + " entries"
+                )
+            path = Path(current) / name
+            field = "templates/" + path.relative_to(templates).as_posix()
+            if not path.exists():
+                raise ValueError(field + " is a broken or looping symlink")
+            resolved = inside(directory, field, field)
+            if name in files and resolved.is_file():
+                bounded(resolved, field)
+
+
 def load(root):
     """return the validated specialty manifest, or none when absent."""
     directory = locate(root)
@@ -186,11 +214,7 @@ def load(root):
     if templates.exists() or templates.is_symlink():
         if not inside(directory, "templates", "templates").is_dir():
             raise ValueError("templates must be a directory")
-        for entry in templates.iterdir():
-            field = "templates/" + entry.name
-            resolved = inside(directory, "templates/" + entry.name, field)
-            if resolved.is_file():
-                bounded(resolved, field)
+        templates_tree(directory, templates)
     delivery = manifest.get("delivery", "draft-pr")
     if delivery not in DELIVERY:
         raise ValueError("delivery must be one of: " + ", ".join(DELIVERY))

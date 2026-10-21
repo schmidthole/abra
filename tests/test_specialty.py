@@ -164,6 +164,40 @@ class SpecialtyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "templates/scout.md escapes"):
             specialty.load(self.root)
 
+    def test_rejects_nested_template_escape(self):
+        outside = Path(self.temporary.name) / "outside.md"
+        outside.write_text("secret\n")
+        (self.pack / "templates/sub/deeper").mkdir(parents=True)
+        (self.pack / "templates/sub/deeper/ok.md").write_text("# ok\n")
+        self.assertEqual(specialty.load(self.root)["name"], "example")
+        (self.pack / "templates/sub/deeper/big.md").write_text(
+            "x" * (specialty.MAX_FILE + 1)
+        )
+        with self.assertRaisesRegex(ValueError, "templates/sub/deeper/big.md exceeds"):
+            specialty.load(self.root)
+        (self.pack / "templates/sub/deeper/big.md").unlink()
+        (self.pack / "templates/sub/leak.md").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "templates/sub/leak.md escapes"):
+            specialty.load(self.root)
+        (self.pack / "templates/sub/leak.md").unlink()
+        (self.pack / "templates/sub/loop").symlink_to(
+            self.pack / "templates", target_is_directory=True
+        )
+        with self.assertRaisesRegex(ValueError, "looping symlink|more than|unreadable"):
+            specialty.load(self.root)
+
+    def test_rejects_deeply_nested_json(self):
+        nested = "[" * 20000 + "]" * 20000
+        (self.pack / "mcp.json").write_text(nested)
+        with self.assertRaisesRegex(ValueError, "mcp_config is not valid json"):
+            specialty.load(self.root)
+        (self.pack / "specialty.json").write_text(nested)
+        with self.assertRaisesRegex(ValueError, "specialty.json is not valid json"):
+            specialty.load(self.root)
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "error: specialty.json is not valid json\n")
+
     def test_rejects_bad_files(self):
         (self.pack / "SPECIALTY.md").unlink()
         with self.assertRaisesRegex(ValueError, "specialty.md is missing"):

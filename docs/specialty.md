@@ -55,9 +55,11 @@ repo names and aliases are slugs and must be unambiguous across the whole map.
 `jobs.<name>.schedule` is informational for whatever runner schedules jobs; abra does
 not run a scheduler. merging is never granted by a specialty.
 
-all relative paths (`mcp_config`, job prompts, `templates/` entries) must resolve
-inside the pack: absolute paths, `..`, and symlinks that escape are refused.
-`specialty.json` is limited to 64 KiB and every other checked file to 256 KiB.
+all relative paths (`mcp_config`, job prompts, every entry in the `templates/` tree)
+must resolve inside the pack: absolute paths, `..`, symlinks that escape, and broken
+or looping symlinks are refused. `specialty.json` is limited to 64 KiB, every other
+checked file to 256 KiB, and `templates/` to 1000 entries. json that is invalid or
+nested too deeply to parse is refused.
 
 ## precedence
 
