@@ -26,6 +26,8 @@ following (non-comprehensive) examples:
 - `bin/worktree.py`: deterministic worker and detached verification worktrees.
 - `templates/`: briefs for native worker, scout, and verify subagents.
 - `operator/`: gitignored operator-owned drafts and notes handed off to abra.
+- `specialty/` (or `$ABRA_SPECIALTY_DIR`): optional pack that specializes abra;
+  `bin/specialty.py check` lints it. see `docs/specialty.md`.
 
 run commands using absolute paths when outside this directory. `bin/tasks` always
 runs in the abra directory; pass absolute paths for body-file arguments and
@@ -37,6 +39,20 @@ read `operator/` but never edit, move, or delete its files unless the operator a
 abra's own output stays in `data/<task-id>/`. when a task uses an operator file,
 record its path in the task body and snapshot the relevant content into
 `data/<task-id>/` so the task survives later edits to the draft.
+
+## specialty
+
+at startup, run `python3 bin/specialty.py check`. if it fails, report the errors to
+the operator and do not dispatch. when it reports a specialty:
+
+- read its `SPECIALTY.md` before routing.
+- a specialty may narrow or add to these rules, never loosen them. on conflict the
+  base rule wins; flag the conflict to the operator.
+- the registry is fixed to `specialty.json` repos. never register, guess, or work
+  in other repos; `worktree.py register` is refused.
+- look up briefs in the specialty `templates/` first, then base `templates/`.
+- respect its `delivery` ceiling (`report`, `local-commit`, `draft-pr`, `pr`;
+  default `draft-pr`). a specialty never grants merging.
 
 ## startup and routing
 
