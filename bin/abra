@@ -339,9 +339,9 @@ def days(value):
     return int(value)
 
 
-def command(prompt, session, spec, env, new_session=None):
-    argv = [env.get("ABRA_CLAUDE_BIN", "claude"), "-p", prompt]
-    argv += ["--output-format", "json"]
+def command(session, spec, env, new_session=None):
+    """build harness argv; the prompt goes on stdin, never in argv."""
+    argv = [env.get("ABRA_CLAUDE_BIN", "claude"), "-p", "--output-format", "json"]
     if session:
         argv.append("--resume=" + session)
     elif new_session:
@@ -371,11 +371,16 @@ def preflight(root, env):
         raise ValueError("specialty check failed; refusing to invoke the harness")
 
 
-def attempt(root, argv, env):
-    """run the harness once; return (output, failure message or none)."""
+def attempt(root, argv, prompt, env):
+    """run the harness once with prompt on stdin; return (output, failure or none)."""
     try:
         result = subprocess.run(
-            argv, cwd=root, env=env, stdout=subprocess.PIPE, text=True
+            argv,
+            input=prompt,
+            cwd=root,
+            env=env,
+            stdout=subprocess.PIPE,
+            encoding="utf-8",
         )
     except OSError:
         raise ValueError("could not start the claude harness") from None
@@ -422,7 +427,7 @@ def execute(root, key, render, spec, env, new_session=None, history=None):
             log("using pre-assigned session id " + new_session)
         prompt = render(None if session else history)
         output, failure = attempt(
-            root, command(prompt, session, spec, env, new_session), env
+            root, command(session, spec, env, new_session), prompt, env
         )
         if failure and session:
             log("could not resume session for " + key + ": " + failure)
@@ -431,7 +436,7 @@ def execute(root, key, render, spec, env, new_session=None, history=None):
                 log("using context file for the retry")
             save_session(data, key, None)
             output, failure = attempt(
-                root, command(RESUME_NOTE + render(history), None, spec, env), env
+                root, command(None, spec, env), RESUME_NOTE + render(history), env
             )
             if failure:
                 raise ValueError(failure)

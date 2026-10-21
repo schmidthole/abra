@@ -93,7 +93,7 @@ bin/abra sessions prune --older-than 90
 ```
 
 `run` wraps the text in a delimited untrusted-data block naming the requester and
-key, invokes `claude -p --output-format json` in this directory, prints the result
+key, pipes it on stdin to `claude -p --output-format json` in this directory, prints the result
 text to stdout, and logs progress to stderr. session ids are stored per key in
 `data/sessions.json`. keys match `[A-Za-z0-9][A-Za-z0-9:._-]{0,127}` (uppercase is
 allowed for chat ids); requesters also allow `@` and spaces; event text is limited
@@ -146,10 +146,10 @@ that also fails, the key's session stays cleared.
 
 one key never runs twice at once. a busy key or full concurrency cap fails fast
 with exit code 75 instead of queueing, so the caller decides whether to retry.
-usage errors exit 2 and other failures exit 1. the prompt and `SPECIALTY.md` are
-passed as process arguments, visible in the host process list, so run on a
-single-tenant host or container. linux caps one argument at 128 kib, so a prompt with a
-large context file can fail to start the harness there (exit 1). there are no service, systemd, or cron files: scheduling,
+usage errors exit 2 and other failures exit 1. the prompt, including any batched
+messages and context file, is sent to the harness on stdin, not in its arguments;
+`SPECIALTY.md` is still passed as an argument. there are no service, systemd, or
+cron files: scheduling,
 retries, and process supervision belong to the deployer.
 
 ## pipeline
