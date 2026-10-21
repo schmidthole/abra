@@ -10,6 +10,7 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import stat
 import subprocess
 import tempfile
 import threading
@@ -202,6 +203,17 @@ class Runtime:
     # lifecycle
 
     def start(self):
+        # refuse symlinked or non-directory temp dirs before any chmod or sweep
+        for directory in (self.directory / "tmp", self.scratch):
+            try:
+                mode = os.lstat(directory).st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(mode):
+                raise ValueError(
+                    str(directory.relative_to(self.root))
+                    + " must be a real directory, not a symlink or file"
+                )
         for directory in (self.directory, self.directory / "tmp", self.scratch):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             directory.chmod(0o700)

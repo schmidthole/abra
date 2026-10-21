@@ -477,6 +477,39 @@ class TriggerTests(unittest.TestCase):
             instance._temporary("not bytes")
         self.assertEqual(list(scratch.iterdir()), [])
 
+    def test_symlinked_or_file_temp_dirs_refuse_to_start(self):
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        outside.chmod(0o755)
+        (outside / "keep").write_text("keep me")
+        directory = self.root / "data/triggers"
+        for relative in ("tmp", "tmp/test"):
+            for kind in ("symlink", "file"):
+                target = directory / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "symlink":
+                    target.symlink_to(outside)
+                else:
+                    target.write_text("")
+                with self.assertRaises(ValueError) as caught:
+                    runtime.Runtime(Adapter(), self.root).start()
+                self.assertIn("must be a real directory", str(caught.exception))
+                self.assertEqual(str(caught.exception), str(caught.exception).lower())
+                self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep"])
+                self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+                target.unlink()
+
+    def test_symlinked_triggers_directory_is_allowed(self):
+        volume = Path(self.temporary.name) / "volume"
+        volume.mkdir()
+        (self.root / "data").mkdir()
+        (self.root / "data/triggers").symlink_to(volume)
+        adapter, instance = self.start()
+        instance.submit(event("start", "m1"))
+        self.assertTrue(instance.wait_idle(10))
+        self.assertTrue((volume / "test.json").exists())
+        self.assertEqual(volume.stat().st_mode & 0o777, 0o700)
+
     def test_startup_sweep_leaves_other_adapters_temp_files(self):
         adapter, instance = self.start()
         directory = self.root / "data/triggers"
