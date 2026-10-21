@@ -397,6 +397,37 @@ class AbraTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.calls()), 2)
 
+    def test_real_specialty_check_gates_harness(self):
+        shutil.copy(SOURCE.parent / "specialty.py", self.root / "bin/specialty.py")
+        self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
+        repo = Path(self.temporary.name) / "repo"
+        repo.mkdir()
+        for args in (
+            ("init", "-q", "-b", "main"),
+            ("-c", "user.email=t@example.invalid", "-c", "user.name=t")
+            + ("commit", "-q", "--allow-empty", "-m", "initial"),
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True)
+        directory = self.specialty({"name": "demo", "description": "test"})
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("specialty check failed", result.stderr)
+        self.assertIn("missing keys", result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+        (directory / "mcp.json").write_text("{}")
+        manifest = {
+            "name": "demo",
+            "description": "test",
+            "repos": {"demo": {"path": str(repo.resolve()), "base": "main"}},
+            "mcp_config": "mcp.json",
+        }
+        (directory / "specialty.json").write_text(json.dumps(manifest))
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.calls()[1]
+        self.assertIn("--append-system-prompt", call)
+        self.assertIn("--strict-mcp-config", call)
+
     def test_per_key_lock_and_concurrency_cap(self):
         def start(key, **env):
             return subprocess.Popen(
