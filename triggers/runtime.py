@@ -199,7 +199,7 @@ class Runtime:
             del self.convs[conv]
             raise
         log.info("started %s as work item %s", conv, work_id)
-        self._reply(conv, announcement(self.name, work_id))
+        self._reply(conv, self._text(announcement, work_id))
         return entry
 
     def _mint(self):
@@ -326,6 +326,20 @@ class Runtime:
         return {"ok": True}
 
     # adapter calls never raise into the runtime
+
+    def _text(self, default, *args):
+        """a fixed text; an adapter may word it for its platform under the same name."""
+        custom = getattr(self.adapter, default.__name__, None)
+        try:
+            text = custom(self.name, *args) if callable(custom) else None
+        except Exception as error:
+            log.error("adapter text failed: %s", type(error).__name__)
+            text = None
+        return (
+            text
+            if isinstance(text, str) and text.strip()
+            else default(self.name, *args)
+        )
 
     def _reply(self, conv, text):
         try:

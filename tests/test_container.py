@@ -71,6 +71,7 @@ class EntrypointTests(unittest.TestCase):
             ("SOURCE", self.source),
             ("SSHD", str(self.sshd)),
             ("SLACK_PYTHON", sys.executable),
+            ("PYTHON", sys.executable),
         ):
             patcher = mock.patch.object(entrypoint, name, value)
             patcher.start()
@@ -100,7 +101,8 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(entrypoint.trigger({}), "none")
         self.assertEqual(entrypoint.trigger({"ABRA_TRIGGER": "none"}), "none")
         self.assertEqual(entrypoint.trigger({"ABRA_TRIGGER": "slack"}), "slack")
-        for value in ("SLACK", "linear", "slack ", "none;rm"):
+        self.assertEqual(entrypoint.trigger({"ABRA_TRIGGER": "linear"}), "linear")
+        for value in ("SLACK", "Linear", "jira", "slack ", "none;rm"):
             with self.assertRaisesRegex(entrypoint.SetupError, "unknown abra_trigger"):
                 entrypoint.trigger({"ABRA_TRIGGER": value})
 
@@ -192,6 +194,7 @@ class EntrypointTests(unittest.TestCase):
             "CLAUDE_CODE_OAUTH_TOKEN": "bad\\slash",
             "SLACK_BOT_TOKEN": "xoxb-secret",
             "SLACK_APP_TOKEN": "xapp-secret",
+            "LINEAR_API_KEY": "lin_api_secret",
             "OTHER": "value",
         }
         stderr = io.StringIO()
@@ -200,7 +203,15 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn(
             'SetEnv "ABRA_ROOT=/home/abra/abra" "GH_TOKEN=gh tok\'en $x #y"', text
         )
-        for hidden in ("xoxb", "xapp", "OTHER", "bad", "ANTHROPIC", "CLAUDE"):
+        for hidden in (
+            "xoxb",
+            "xapp",
+            "lin_api",
+            "OTHER",
+            "bad",
+            "ANTHROPIC",
+            "CLAUDE",
+        ):
             self.assertNotIn(hidden, text)
         self.assertIn("not sharing anthropic_api_key", stderr.getvalue())
         self.assertNotIn("quote", stderr.getvalue())
@@ -230,6 +241,24 @@ class EntrypointTests(unittest.TestCase):
             ],
         )
         self.assertEqual(listener_env["SLACK_BOT_TOKEN"], "xoxb-1")
+        env["LINEAR_API_KEY"] = "lin_api_1"
+        children = entrypoint.commands(env, self.root, "linear")
+        self.assertNotIn("LINEAR_API_KEY", children[0][1])
+        argv, listener_env, name = children[1]
+        self.assertEqual(name, "linear listener")
+        self.assertEqual(
+            argv,
+            [
+                sys.executable,
+                str(self.root / "triggers/linear.py"),
+                "--root",
+                str(self.root),
+                "--name",
+                "helper",
+            ],
+        )
+        self.assertEqual(listener_env["LINEAR_API_KEY"], "lin_api_1")
+        self.assertEqual(entrypoint.PYTHON, sys.executable)
 
     def test_missing_keys_exit_before_any_change(self):
         self.keys.unlink()
@@ -488,6 +517,21 @@ class ImageConfigTests(unittest.TestCase):
             self.dockerfile,
         )
         self.assertIn("CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude", self.dockerfile)
+
+    def test_linear_axi_built_from_pinned_commit(self):
+        commit = self.arg("LINEAR_AXI_COMMIT")
+        self.assertRegex(commit, r"^[0-9a-f]{40}$")
+        self.assertIn("https://github.com/schmidthole/linear-axi.git", self.dockerfile)
+        self.assertIn(
+            'test "$(git rev-parse HEAD)" = "${LINEAR_AXI_COMMIT}"', self.dockerfile
+        )
+        self.assertIn("npm ci --ignore-scripts", self.dockerfile)
+        self.assertIn("npm prune --omit=dev --ignore-scripts", self.dockerfile)
+        self.assertIn("ln -s /opt/linear-axi/dist/bin/linear-axi.js", self.dockerfile)
+        # the npm package named linear-axi is unrelated; never install it by name
+        self.assertNotRegex(self.dockerfile, r"(npx|npm install)[^\n]*linear-axi")
+        self.assertIn("LINEAR_API_KEY", entrypoint.SECRETS)
+        self.assertNotIn("LINEAR_API_KEY", entrypoint.SHARED)
 
     def test_retired_one_shot_trigger_settings_not_shared(self):
         for name in ("ABRA_ARCHIVE_DAYS", "ABRA_TRIGGER_WORKERS"):

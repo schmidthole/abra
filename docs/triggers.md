@@ -59,7 +59,10 @@ exceptions raised by adapter methods are logged by type and never stop the runti
 
 ## fixed texts
 
-no llm is involved in these; `<name>` is the configured bot name.
+no llm is involved in these; `<name>` is the configured bot name. an adapter
+may word them for its platform by defining `announcement(name, work_id)` or
+`error_text(name)` returning text (the linear adapter does: issues have no thread
+replies).
 
 - announcement, posted on `start` before the message is queued:
   `<name> is on it. this thread is now work item <work_id>. reply in this thread to add to it.`
@@ -132,6 +135,12 @@ the agent settings are in the table under resident session below.
 
 `triggers/slack.py` serves slack threads over socket mode. see
 [slack.md](slack.md) for setup and security notes.
+
+## linear adapter
+
+`triggers/linear.py` polls linear with linear-axi for todo issues assigned to the
+bot user, one issue per conversation. see [linear.md](linear.md) for setup, the
+outcome contract, and security notes.
 
 ## reference adapter
 
