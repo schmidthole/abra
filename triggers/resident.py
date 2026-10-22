@@ -37,6 +37,11 @@ UNATTENDED = ("bypassPermissions", "agent-full-access")
 REPLY_TOOL = "mcp__" + mcp_bridge.NAME + "__" + mcp_bridge.TOOL
 MAX_FINAL = 64 * 1024
 SOCKET_PATH = 100
+CHECKPOINT = (
+    "checkpoint: this session is about to be cleared because abra is idle. save"
+    " your notes now: update every unfinished task body so a fresh session can"
+    " continue from it, then end the turn without posting."
+)
 SELF_STARTED = ("agent_message_chunk", "agent_thought_chunk", "tool_call")
 BOOTSTRAP = (
     "new resident session. run the AGENTS.md startup and reconcile every"
@@ -131,6 +136,9 @@ class Resident(runtime.Runtime):
         timeout=300.0,
         wake_grace=20.0,
         heartbeat=1800.0,
+        idle_clear=600.0,
+        max_age=7 * 24 * 3600.0,
+        rotate_idle=60.0,
         inflight=None,
     ):
         super().__init__(adapter, root, name=name, catchup_hours=catchup_hours)
@@ -143,6 +151,9 @@ class Resident(runtime.Runtime):
         self.stop_timeout = stop_timeout
         self.wake_grace = wake_grace
         self.heartbeat = heartbeat
+        self.idle_clear = idle_clear
+        self.max_age = max_age
+        self.rotate_idle = rotate_idle
         self.inflight = inflight or self._inflight
         self.kill_timeout = kill_timeout
         self.timeout = timeout
@@ -411,6 +422,31 @@ class Resident(runtime.Runtime):
                 self.steer_busy = True
                 return (lambda: self._steer(batch)), None
         delays = []
+        if self.turn is None and self.session and self._quiet():
+            idle = moment - self.activity
+            age = time.time() - runtime.seconds(self.started)
+            due = []
+            if self.idle_clear:
+                due.append(self.idle_clear - idle)
+            if self.max_age and age >= self.max_age:
+                due.append(self.rotate_idle - idle)
+            if due and min(due) <= 0:
+                log.info("session is idle; checkpointing before clearing it")
+                turn = dict(
+                    batch=[],
+                    ids=set(),
+                    events=[CHECKPOINT],
+                    final=[],
+                    size=0,
+                    prompting=False,
+                    steer=False,
+                    checkpoint=True,
+                )
+                self.turn = turn
+                self.replied = set()
+                return (lambda: self._spawn(turn)), None
+            if due:
+                delays.append(min(due))
         if self.turn is None and self.wake_at is not None:
             delays.append(self.wake_at - moment)
         if self.turn is None and self.beat_at is not None and not self.beating:
@@ -419,6 +455,35 @@ class Resident(runtime.Runtime):
                 return self._beat, None
             delays.append(self.beat_at - moment)
         return None, (max(0.0, min(delays)) if delays else None)
+
+    def _quiet(self):
+        """nothing pending, queued, or running in the background; holds the lock."""
+        return not (
+            self.order
+            or self.events
+            or self.kick
+            or self.background
+            or self.tools
+            or self.wake_at is not None
+            or self.steer_busy
+            or any(entry["pending"] for entry in self.convs.values())
+        )
+
+    def _clear(self):
+        """close the session after a checkpoint; the next event starts a new one."""
+        if self.client.supports("close"):
+            try:
+                self.client.close_session(self.session)
+            except (acp.RemoteError, acp.ProtocolError, TimeoutError) as error:
+                log.warning("could not close the session: %s", type(error).__name__)
+        with self.lock:
+            self.session = None
+            self.started = None
+            self.background = set()
+            self.tools = set()
+            self._save_state()
+            self.changed.notify_all()
+        log.info("cleared the resident session; the next event starts a new one")
 
     # wake and heartbeat
 
@@ -545,6 +610,9 @@ class Resident(runtime.Runtime):
         self._end(turn, reason)
 
     def _end(self, turn, reason):
+        if turn.get("checkpoint") and reason in DONE:
+            # clear while the turn still blocks new prompts on the old session
+            self._clear()
         failed = reason is None or reason == "refusal"
         with self.lock:
             ids = turn["ids"]
@@ -830,6 +898,8 @@ def from_env(adapter, args, env, **options):
     for variable, key in (
         ("ABRA_WAKE_GRACE", "wake_grace"),
         ("ABRA_HEARTBEAT", "heartbeat"),
+        ("ABRA_IDLE_CLEAR", "idle_clear"),
+        ("ABRA_MAX_SESSION_AGE", "max_age"),
     ):
         value = env.get(variable, "")
         if value:

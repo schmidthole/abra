@@ -258,9 +258,19 @@ instead of one `bin/abra` turn per conversation. one adapter per instance.
 - heartbeat: every `ABRA_HEARTBEAT` seconds (default 1800, 0 turns it off) while
   idle, the runtime runs `bin/tasks list --state in_flight` and sends a heartbeat
   event only when tasks are in flight. no file watchers.
+- idle clear: when nothing is pending, queued, or running in the background and
+  the session has been idle for `ABRA_IDLE_CLEAR` seconds (default 600, 0 is off),
+  the runtime sends a checkpoint event ("save your notes": update every
+  unfinished task body), waits for it to end, closes the session, and forgets its
+  id. the next event starts a new session with the bootstrap event. a session
+  older than `ABRA_MAX_SESSION_AGE` seconds (default 7 days) is rotated the same
+  way after one quiet minute. messages that arrive during a checkpoint wait for
+  the new session.
 - crash: if the agent exits, the runtime stops dispatching and the adapter exits
-  non-zero for the orchestrator to restart it. sigterm stops intake, waits for the
-  running turn, closes the session, and kills the agent's process group.
+  non-zero for the orchestrator to restart it; pending messages are re-delivered
+  on the next start. sigterm stops intake, waits up to 60 seconds for the running
+  turn (its messages stay pending if it does not finish), closes the session, and
+  kills the agent's process group. the session id stays stored for the restart.
 
 | setting | effect |
 | --- | --- |
@@ -269,6 +279,8 @@ instead of one `bin/abra` turn per conversation. one adapter per instance.
 | `ABRA_AGENT_MODE` | `1` sets the unattended session mode (container only) |
 | `ABRA_WAKE_GRACE` | seconds to wait for a self-started turn, default 20 |
 | `ABRA_HEARTBEAT` | idle heartbeat period in seconds, default 1800; 0 is off |
+| `ABRA_IDLE_CLEAR` | idle seconds before checkpoint and clear, default 600; 0 is off |
+| `ABRA_MAX_SESSION_AGE` | session age in seconds before rotation, default 604800 |
 
 ## acp client
 

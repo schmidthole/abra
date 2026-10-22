@@ -466,6 +466,84 @@ class ResidentTests(unittest.TestCase):
         tasks.unlink()
         self.assertEqual(instance._inflight(), 0)
 
+    def test_idle_clear_checkpoints_then_starts_fresh(self):
+        instance = self.start(idle_clear=0.3)
+        instance.submit(event("start", "1", "hello"))
+        self.wait_for(lambda: len(self.received("session/close")) == 1)
+        self.assertIn("runtime event: " + resident.CHECKPOINT, self.prompts()[1])
+        self.wait_for(lambda: instance.session is None)
+        state = json.loads((self.root / "data/triggers/resident.json").read_text())
+        self.assertIsNone(state["session_id"])
+        instance.submit(event("message", "2", "back again"))
+        self.wait_for(lambda: len(self.prompts()) == 3)
+        self.assertEqual(len(self.received("session/new")), 2)
+        self.assertIn(resident.BOOTSTRAP, self.prompts()[2])
+        self.assertIn("back again", self.prompts()[2])
+
+    def test_no_clear_while_background_work_runs(self):
+        self.configure(background=5)
+        instance = self.start(idle_clear=0.2)
+        instance.submit(event("start", "1", "go do-background"))
+        self.wait_for(lambda: instance.background == {"bg1"})
+        time.sleep(1)
+        self.assertEqual(len(self.prompts()), 1)
+        self.assertEqual(self.received("session/close"), [])
+
+    def test_rotation_after_max_age(self):
+        state = self.root / "data/triggers"
+        state.mkdir(parents=True, mode=0o700)
+        instance = self.make(idle_clear=0, max_age=60, rotate_idle=0.2)
+        runtime.write_private(
+            state / "resident.json",
+            {
+                "version": 1,
+                "agent": instance.digest,
+                "session_id": "old-1",
+                "started": "2000-01-01T00:00:00Z",
+            },
+        )
+        instance.start()
+        self.wait_for(lambda: len(self.received("session/close")) == 1)
+        self.assertIn(resident.RESTART, self.prompts()[0])
+        self.assertIn(resident.CHECKPOINT, self.prompts()[1])
+        self.assertIsNone(instance.session)
+
+    def test_stop_waits_for_running_turn(self):
+        self.configure(slow=0.8)
+        instance = self.start()
+        instance.submit(event("start", "1", "work do-slow do-reply"))
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        instance.stop()
+        self.assertIn("re " + self.work_id(instance), self.adapter.replies())
+        self.assertEqual(instance.convs["t:c1:1"]["pending"], [])
+
+    def test_stop_timeout_keeps_messages_pending(self):
+        instance = self.start(stop_timeout=0.3)
+        instance.submit(event("start", "1", "wait do-hold"))
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        process = instance.client.proc
+        instance.stop()
+        self.assertIsNotNone(process.poll())
+        stored = json.loads((self.root / "data/triggers/test.json").read_text())
+        self.assertEqual(len(stored["convs"]["t:c1:1"]["pending"]), 1)
+
+    def test_stop_leaves_no_orphans(self):
+        instance = self.start()
+        instance.submit(event("start", "1", "do-spawn"))
+        self.assertTrue(instance.wait_idle(10))
+        pid = [e for e in self.received() if "spawned" in e][0]["spawned"]
+        os.kill(pid, 0)
+        instance.stop()
+
+        def gone():
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        self.wait_for(gone)
+
     def run_cli(self, *texts):
         lines = "".join(
             json.dumps(

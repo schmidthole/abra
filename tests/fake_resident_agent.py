@@ -155,6 +155,17 @@ def handle_turn(sid, text):
         update(sid, "tool_call", toolCallId="t1", title="read", status="completed")
         chunk(sid, "free text ")
         chunk(sid, "answer")
+    if "do-spawn" in text:
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(120)\n",
+            ]
+        )
+        record({"spawned": child.pid})
     if "do-background" in text:
         update(sid, "tool_call", toolCallId="bg1", title="agent", status="in_progress")
         threading.Thread(target=background, args=(sid,), daemon=True).start()
