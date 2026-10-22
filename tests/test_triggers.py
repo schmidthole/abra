@@ -13,14 +13,12 @@ import time
 import unittest
 from unittest import mock
 
-
 TRIGGERS = Path(__file__).resolve().parents[1] / "triggers"
 sys.path.insert(0, str(TRIGGERS))
 
 import runtime  # noqa: E402
 
-STUB = textwrap.dedent(
-    """\
+STUB = textwrap.dedent("""\
     import fcntl, json, os, sys, time
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
@@ -56,8 +54,7 @@ STUB = textwrap.dedent(
         print("partial secret-stdout")
         sys.exit(code)
     print("result " + str(runs))
-    """
-)
+    """)
 
 
 class Adapter:

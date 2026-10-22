@@ -12,7 +12,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import specialty  # noqa: e402
 
-
 ROOT = Path(__file__).resolve().parent.parent
 
 

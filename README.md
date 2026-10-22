@@ -187,7 +187,16 @@ script tests. use disposable projects and explicitly authorized github delivery.
 
 ## development
 
-install `black` for formatting, then run:
+`make format` uses the black version hash-pinned with its dependencies in
+`requirements-dev.txt`. those pins need python 3.11+ to install and run; abra
+itself and `make test` stay python 3.9 compatible. install it into a separate venv:
+
+```sh
+python3.12 -m venv ~/.venvs/abra-black   # any python 3.11+
+~/.venvs/abra-black/bin/pip install --require-hashes -r requirements-dev.txt
+```
+
+with that venv's `bin` on `PATH`, run:
 
 ```sh
 make format

@@ -9,7 +9,6 @@ import re
 import subprocess
 import sys
 
-
 ROOT = Path(__file__).resolve().parent.parent
 ENV = "ABRA_SPECIALTY_DIR"
 DELIVERY = ("report", "local-commit", "draft-pr", "pr")
