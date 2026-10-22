@@ -17,8 +17,13 @@ outbound https only and no public endpoint or webhook.
 - pickup: the adapter reads the issue (`linear-axi api`, one graphql query for
   the issue and its first 100 comments), checks that it is still in the todo
   state, assigned to the bot, and in an allowed team, then claims it by moving it
-  to the in-progress state. only after a successful claim is it submitted to the
-  runtime; a failed claim skips it until the next poll.
+  to the in-progress state. only after a confirmed claim is it submitted to the
+  runtime. state names compare case-insensitively, as linear-axi resolves them.
+  when the claim is not confirmed (an error or timeout), the adapter reads the
+  issue back: in progress with the bot counts as claimed and is submitted; still
+  todo is left for the next poll; any other state with the bot, or an unreadable
+  issue, is handed back (blocked label, reassigned to the creator), so a claimed
+  issue is never left stranded.
 - the conversation key is `linear:<identifier>` (for example `linear:ENG-123`), so
   an issue is one work item. each pickup is one message with msg id
   `todo-<updatedAt>`, the issue's update time as listed in todo. the runtime
@@ -122,7 +127,9 @@ removing the blocked label is up to the human; the adapter ignores labels.
 
 names match `[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}`. a missing or malformed key,
 setting, or `linear-axi` exits 1 naming the variable. at startup the adapter
-asks linear-axi for the bot's user id (`viewer`) and exits 1 when that fails.
+asks linear-axi for the bot's user id (`viewer`) and lists todo issues once per
+team (or once without a team), and exits 1 when either fails; an ambiguous or
+missing todo state without `LINEAR_TEAMS` exits 1 asking to set it.
 sigint or sigterm stops polling, lets the running turn finish (bounded), closes
 the agent session, and keeps pending messages stored. if the agent exits, the
 listener exits 1 so the supervisor restarts it.
@@ -143,9 +150,10 @@ listener exits 1 so the supervisor restarts it.
   4 mib; failures are logged by linear-axi error code and exit code only. logs
   name issue identifiers, states, counts, and user ids, never issue text or the
   key, and key-like values are masked in any log line.
-- comment output: `@` before a name gets a zero-width space, so abra's comments
-  cannot mention people. markdown, links, and issue identifiers are not
-  neutralized: linear renders them, and may link an identifier such as `ENG-1`.
+- comment output: only `@mentions` are neutralized: `@` before a name gets a
+  zero-width space (an email address shows it too). markdown, links (including
+  links to linear profiles), and issue identifiers pass through as written;
+  linear renders them and may link an identifier such as `ENG-1`.
 - the runtime store under `<root>/data/triggers/` and the agent's session files
   hold issue text in plaintext with mode 0600. keep the root on an encrypted
   volume on a single-tenant host or container.
@@ -155,8 +163,9 @@ listener exits 1 so the supervisor restarts it.
 - polling only; comments are not polled, so an answer counts only after the
   issue is reassigned to the bot and set to todo.
 - without `LINEAR_TEAMS`, linear-axi resolves the todo state name across all
-  teams and fails when more than one team has a state with that name; set
-  `LINEAR_TEAMS` in a workspace with several teams.
+  teams (archived teams included) and fails when more than one team has a
+  state with that name; the startup check then exits 1. set `LINEAR_TEAMS` in a
+  workspace with several teams.
 - each poll takes at most 50 todo issues per team; the rest wait for later polls.
 - only the first 100 comments of an issue are read.
 - moving an issue to another team changes its identifier, and so its

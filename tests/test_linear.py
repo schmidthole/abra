@@ -385,6 +385,63 @@ class AdapterTests(Base):
         self.assertEqual(item["assignee"], CREATOR)
         self.assertIn("hit an error on this issue", item["comments"][-1]["body"])
 
+    def test_state_names_compare_case_insensitively(self):
+        adapter = self.adapter(todo="todo", progress="in progress")
+        adapter.poll(self.instance)
+        self.assertEqual(self.state()["issues"]["ENG-1"]["state"], "In Progress")
+        self.assertEqual(len(self.instance.convs["linear:ENG-1"]["pending"]), 1)
+
+    def test_claim_applied_but_unconfirmed_is_read_back_and_submitted(self):
+        self.edit(lambda s: s.update(apply_fail=["issue state"]))
+        with self.assertLogs("abra.triggers", level="INFO") as logs:
+            self.adapter_ref.poll(self.instance)
+        self.assertIn("issue state failed: network_error", "\n".join(logs.output))
+        self.assertEqual(len(self.instance.convs["linear:ENG-1"]["pending"]), 1)
+        self.assertEqual(self.commands().count("issue state"), 1)
+
+    def test_unconfirmed_claim_is_never_stranded(self):
+        # moved somewhere unexpected while still with the bot: hand back
+        self.edit(lambda s: s["issues"]["ENG-1"].update(state="Done"))
+        self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual(
+            (item["labels"], item["assignee"]), (["abra-blocked"], CREATOR)
+        )
+        # still todo with the bot: left for the next poll
+        self.edit(lambda s: s["issues"]["ENG-1"].update(state="Todo", assignee=BOT))
+        self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        self.assertEqual(self.state()["issues"]["ENG-1"]["assignee"], BOT)
+        # unreadable: hand back without a known creator
+        self.edit(lambda s: s.update(fail=["api"]))
+        self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        self.assertIsNone(self.state()["issues"]["ENG-1"]["assignee"])
+        self.assertEqual(self.instance.convs, {})
+
+    def test_resume_compares_comment_times_not_strings(self):
+        self.edit(
+            lambda s: s["issues"]["ENG-1"].update(
+                comments=[
+                    comment("c1", "same second, earlier", "2026-10-22T14:05:00Z"),
+                    comment("c2", "later", "2026-10-22T14:05:00.900Z"),
+                ]
+            )
+        )
+        issue = self.adapter_ref.fetch("ENG-1")
+        text = self.adapter_ref.compose(issue, "2026-10-22T14:05:00.500Z")
+        self.assertIn("later", text)
+        self.assertNotIn("same second", text)
+
+    def test_startup_check_fails_closed_on_ambiguous_todo_state(self):
+        self.edit(lambda s: s.update(ambiguous=True))
+        with self.assertRaisesRegex(ValueError, "set linear_teams"):
+            self.adapter_ref.check()
+        self.adapter(teams=("ENG",)).check()
+        self.edit(lambda s: s.update(ambiguous=False, fail=["issue list"]))
+        with self.assertRaisesRegex(
+            ValueError, "could not list todo issues: api_error"
+        ):
+            self.adapter_ref.check()
+
     def test_invalid_listing_is_ignored(self):
         for item in (
             "x",
@@ -524,6 +581,13 @@ class MainTests(Base):
         self.assertEqual(code, 1)
         self.assertIn("could not identify the bot: api_error", "\n".join(logs.output))
         self.assertFalse((self.root / "data/triggers/resident.json").exists())
+
+    def test_ambiguous_todo_state_exits_1_at_startup(self):
+        self.edit(lambda s: s.update(ambiguous=True))
+        with self.assertLogs("abra.triggers", level="ERROR") as logs:
+            code = linear.main(["--root", str(self.root)], self.env)
+        self.assertEqual(code, 1)
+        self.assertIn("set linear_teams", "\n".join(logs.output))
 
     def drive(self):
         """wait for the agent's free text comment, then send sigterm."""

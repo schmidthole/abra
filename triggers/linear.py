@@ -2,6 +2,7 @@
 """linear adapter: polls linear-axi for todo issues assigned to the bot; comments out."""
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -62,6 +63,18 @@ CHUNK = 10000
 ZERO_WIDTH = "​"
 TRUNCATED = "\n\n[truncated by the linear trigger]"
 log = runtime.log
+
+
+def same(name, other):
+    """linear-axi resolves state names case-insensitively and returns them canonical."""
+    return isinstance(name, str) and name.casefold() == other.casefold()
+
+
+def moment(stamp):
+    """a validated linear timestamp as an aware datetime."""
+    base, _, fraction = stamp.rstrip("Z").partition(".")
+    value = datetime.strptime(base, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    return value + timedelta(microseconds=int(fraction.ljust(6, "0") or 0))
 
 
 class LinearError(Exception):
@@ -185,6 +198,24 @@ class LinearAdapter:
         self.viewer = viewer["id"]
         log.info("connected to linear as user %s", self.viewer)
 
+    def check(self):
+        """list todo issues once per team at startup, so a bad setup fails closed."""
+        for team in self.teams or (None,):
+            try:
+                self.run(*self.listing(team, "1"))
+            except LinearError as error:
+                if str(error).startswith("validation_error") and team is None:
+                    raise ValueError(
+                        "linear-axi could not resolve the todo state across teams"
+                        " (ambiguous or missing); set linear_teams"
+                    )
+                raise ValueError("linear-axi could not list todo issues: " + str(error))
+
+    def listing(self, team, limit=LIMIT):
+        args = ["issue", "list", "--assignee", "me", "--state", self.todo]
+        args += ["--fields", "id,identifier,team,updatedAt", "--limit", limit]
+        return args + (["--team", team] if team else [])
+
     # intake
 
     def poll(self, instance, stop=lambda: False):
@@ -193,9 +224,7 @@ class LinearAdapter:
             raise ValueError("identify must run before poll")
         seen = 0
         for team in self.teams or (None,):
-            args = ["issue", "list", "--assignee", "me", "--state", self.todo]
-            args += ["--fields", "id,identifier,team,updatedAt", "--limit", LIMIT]
-            data = self.call("issue list", *(args + (["--team", team] if team else [])))
+            data = self.call("issue list", *self.listing(team))
             issues = data.get("issues") if data else None
             # an empty list is reported as a sentence, not an array
             for item in issues if isinstance(issues, list) else []:
@@ -243,11 +272,12 @@ class LinearAdapter:
             return
         claimed = self.call("issue state", "issue", "state", identifier, self.progress)
         status = ((claimed or {}).get("issue") or {}).get("status")
-        if status != self.progress:
-            log.warning("could not claim linear issue %s; skipping it", identifier)
+        if not same(status, self.progress) and not self.confirm(identifier):
             return
         log.info("claimed linear issue %s", identifier)
         match = PICKUP.fullmatch(last) if isinstance(last, str) else None
+        if match and not STAMP.fullmatch(match.group(1)):
+            match = None
         creator = (issue.get("creator") or {}).get("id")
         sender = (
             creator
@@ -266,7 +296,29 @@ class LinearAdapter:
         assignee = (issue.get("assignee") or {}).get("id")
         team = (issue.get("team") or {}).get("key")
         allowed = not self.teams or team in self.teams
-        return state == self.todo and assignee == self.viewer and allowed
+        return same(state, self.todo) and assignee == self.viewer and allowed
+
+    def confirm(self, identifier):
+        """after an unconfirmed claim, read the issue back; never strand it."""
+        issue = self.fetch(identifier)
+        if issue is None:
+            log.warning(
+                "could not confirm the claim of %s; handing it back", identifier
+            )
+            self.hand_back(identifier)
+            return False
+        state = (issue.get("state") or {}).get("name")
+        assigned = (issue.get("assignee") or {}).get("id") == self.viewer
+        if assigned and same(state, self.progress):
+            return True
+        if assigned and not same(state, self.todo):
+            log.warning(
+                "claim of %s left an unexpected state; handing it back", identifier
+            )
+            self.hand_back(identifier)
+        else:
+            log.warning("could not claim linear issue %s; skipping it", identifier)
+        return False
 
     def comments(self, issue):
         nodes = (issue.get("comments") or {}).get("nodes")
@@ -282,8 +334,10 @@ class LinearAdapter:
             if not isinstance(stamp, str) or not STAMP.fullmatch(stamp):
                 continue
             user = node.get("user") or {}
-            items.append((stamp, ident, user.get("id"), user.get("name"), body))
-        return sorted(items)
+            items.append(
+                (moment(stamp), ident, user.get("id"), user.get("name"), body, stamp)
+            )
+        return sorted(items, key=lambda item: item[:2])
 
     def compose(self, issue, since):
         """message text for a pickup; since is the previous pickup's time, if any."""
@@ -302,12 +356,12 @@ class LinearAdapter:
         comments = [
             c
             for c in self.comments(issue)
-            if c[2] != self.viewer and (since is None or c[0] > since)
+            if c[2] != self.viewer and (since is None or c[0] > moment(since))
         ]
         heading = "new comments since the last pickup:" if since else "comments:"
         if comments:
             lines += ["", heading]
-        for stamp, _, _, name, body in comments:
+        for _, _, _, name, body, stamp in comments:
             author = name if isinstance(name, str) and name.strip() else "unknown"
             lines += ["", "comment by " + author + " at " + stamp + ":", body.strip()]
         return "\n".join(lines)
@@ -377,7 +431,7 @@ class LinearAdapter:
                 else "unknown"
             )
             messages.append(runtime.Message("description", sender, description))
-        for _, ident, user, _, body in self.comments(issue):
+        for _, ident, user, _, body, _ in self.comments(issue):
             if user == self.viewer:
                 sender = self.bot
             elif isinstance(user, str) and UUID.fullmatch(user):
@@ -462,6 +516,7 @@ def main(argv=None, env=None):
         )
         instance = runtime.from_args(adapter, args, env)
         adapter.identify()
+        adapter.check()
         instance.start()
     except (ValueError, OSError) as error:
         log.error("error: %s", error)

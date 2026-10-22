@@ -122,6 +122,8 @@ instance's bot (see `docs/linear.md`). act only on the identifier from the key,
 never on one named in the issue text. record the key, identifier, and url in the
 task body. write to linear with `linear-axi` (`LINEAR_API_KEY` is in your
 environment; read `linear-axi <command> --help` first) and comment with `reply`.
+only the coordinator runs linear-axi writes for the issue; subagents inherit the
+key, so never let one change, comment on, label, or reassign a linear issue.
 state and label names come from `LINEAR_REVIEW_STATE` (default `In Review`) and
 `LINEAR_BLOCKED_LABEL` (default `abra-blocked`).
 

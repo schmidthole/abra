@@ -5,6 +5,10 @@ implements the subset the adapter uses, with linear-axi's --json output shapes,
 and appends every call to calls.jsonl beside it. state.json holds "viewer" (the
 bot user id), "issues" keyed by identifier, and "fail": a list of command names
 ("issue state", "issue list", "api", ...) that exit 1 with an api error.
+"apply_fail" lists commands that apply their change and then exit 1, and
+"ambiguous" makes a todo listing without --team fail as linear-axi does when
+several teams share the state name. state names resolve case-insensitively to
+their canonical form, as in linear-axi.
 """
 
 import fcntl
@@ -16,6 +20,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "state.json"
 CALLS = HERE / "calls.jsonl"
+STATES = ("Todo", "In Progress", "In Review", "Done")
 
 
 def emit(value, code=0):
@@ -34,6 +39,13 @@ def flag(args, name):
         if arg == name and index + 1 < len(args):
             return args[index + 1]
     return None
+
+
+def canonical(name):
+    for known in STATES:
+        if known.lower() == (name or "").lower():
+            return known
+    error("Workflow state not found: " + str(name), "NOT_FOUND")
 
 
 def bump(state, issue):
@@ -69,7 +81,9 @@ def handle(state, args):
         }
         emit({"data": {"issue": data}})
     if command == "issue list":
-        state_name, team = flag(args, "--state"), flag(args, "--team")
+        state_name, team = canonical(flag(args, "--state")), flag(args, "--team")
+        if state.get("ambiguous") and team is None:
+            error("Ambiguous workflow state: " + state_name, "VALIDATION_ERROR", 2)
         found = [
             {
                 "id": issue["id"],
@@ -89,9 +103,11 @@ def handle(state, args):
     if issue is None:
         error("Issue not found", "NOT_FOUND")
     if command == "issue state":
-        issue["state"] = args[3]
+        issue["state"] = canonical(args[3])
         bump(state, issue)
-        emit({"result": "issue state updated", "issue": {"status": args[3]}})
+        if command in state.get("apply_fail", []):
+            error("Linear API request timed out", "NETWORK_ERROR")
+        emit({"result": "issue state updated", "issue": {"status": issue["state"]}})
     if command == "issue assign":
         issue["assignee"] = None if args[3] == "none" else args[3]
         bump(state, issue)
