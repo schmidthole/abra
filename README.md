@@ -162,8 +162,9 @@ one resident agent session over acp (claude via `claude-agent-acp`, codex via
 `codex-acp`, or any acp agent in `ABRA_AGENT_CMD`): tag the bot to start a work
 item, reply in the thread to add to it, and abra answers each thread with its
 `reply` tool. adapters are thin; `triggers/cli.py` is the json-lines reference adapter and
-`triggers/slack.py` serves slack threads ([docs/slack.md](docs/slack.md)). see
-[docs/triggers.md](docs/triggers.md).
+`triggers/slack.py` serves slack threads ([docs/slack.md](docs/slack.md)), and
+`triggers/linear.py` polls linear for issues assigned to the bot
+([docs/linear.md](docs/linear.md)). see [docs/triggers.md](docs/triggers.md).
 
 ## container
 

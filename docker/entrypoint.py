@@ -21,19 +21,20 @@ RUN = Path("/run/abra")
 SSHD = "/usr/sbin/sshd"
 SSHD_CONFIG = SOURCE / "docker/sshd_config"
 SLACK_PYTHON = "/opt/venvs/slack/bin/python"
+PYTHON = "/usr/bin/python3"
 KEYGEN = "ssh-keygen"
 DEFAULT_KEYS = "/etc/abra/ssh/authorized_keys"
 DEFAULT_ROOT = "/home/abra/abra"
 HOST_KEY = ".abra-sshd/ssh_host_ed25519_key"
 MAX_KEYS_BYTES = 64 * 1024
-TRIGGERS = ("", "none", "slack")
+TRIGGERS = ("", "none", "slack", "linear")
 KEY_TYPE = re.compile(
     r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)"
     r"|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)"
 )
 KEY_DATA = re.compile(r"[A-Za-z0-9+/]{16,16384}={0,3}")
-# variables ssh sessions need to run abra by hand; slack tokens are not put in the
-# ssh session env.
+# variables ssh sessions need to run abra by hand; slack tokens and the linear key
+# are not put in the ssh session env.
 SHARED = (
     "ABRA_ROOT",
     "ABRA_NAME",
@@ -55,6 +56,7 @@ SECRETS = (
     "GH_TOKEN",
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
+    "LINEAR_API_KEY",
 )
 # printable ascii without quotes or backslashes, so sshd_config quoting stays exact.
 SAFE_VALUE = re.compile(r"[\x20\x21\x23-\x5b\x5d-\x7e]{0,8192}")
@@ -72,7 +74,7 @@ def trigger(env):
     """the selected trigger, or none; unknown values fail closed."""
     value = env.get("ABRA_TRIGGER", "")
     if value not in TRIGGERS:
-        raise SetupError("unknown abra_trigger; expected one of: none, slack")
+        raise SetupError("unknown abra_trigger; expected one of: none, slack, linear")
     return value or "none"
 
 
@@ -241,6 +243,10 @@ def commands(env, root, selected):
         name = env.get("ABRA_NAME", "") or "abra"
         argv = [SLACK_PYTHON, str(root / "triggers/slack.py"), "--root", str(root)]
         children.append((argv + ["--name", name], dict(env), "slack listener"))
+    elif selected == "linear":
+        name = env.get("ABRA_NAME", "") or "abra"
+        argv = [PYTHON, str(root / "triggers/linear.py"), "--root", str(root)]
+        children.append((argv + ["--name", name], dict(env), "linear listener"))
     return children
 
 

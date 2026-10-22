@@ -14,6 +14,9 @@ ARG CLAUDE_CODE_VERSION=2.1.308
 # must match the pins in bin/tasks and bin/github
 ARG TASKS_AXI_VERSION=0.2.5
 ARG GH_AXI_VERSION=0.1.35
+# linear-axi is not published to npm (the npm package of that name is
+# unrelated); it is built from its source repo at this commit.
+ARG LINEAR_AXI_COMMIT=85b701f3bec4f83242a7fec170c8d0e9b9f7d722
 
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
@@ -70,6 +73,24 @@ RUN cd /opt/claude-agent-acp \
     && npm ci --omit=dev --ignore-scripts --no-fund --no-audit \
     && npm cache clean --force \
     && test -x node_modules/.bin/claude-agent-acp
+
+# linear-axi for the linear trigger and abra's linear writes: fetched by commit
+# and checked, every package from its lockfile with integrity hashes and install
+# scripts off, built with its typescript compiler, then dev packages pruned.
+RUN git init -q /opt/linear-axi \
+    && cd /opt/linear-axi \
+    && git fetch -q --depth 1 https://github.com/schmidthole/linear-axi.git "${LINEAR_AXI_COMMIT}" \
+    && git checkout -q FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${LINEAR_AXI_COMMIT}" \
+    && rm -rf .git \
+    && npm ci --ignore-scripts --no-fund --no-audit \
+    && ./node_modules/.bin/tsc -p tsconfig.json \
+    && npm prune --omit=dev --ignore-scripts --no-fund --no-audit \
+    && find node_modules -mindepth 1 -maxdepth 1 -type d -empty -delete \
+    && npm cache clean --force \
+    && chmod 0755 dist/bin/linear-axi.js \
+    && ln -s /opt/linear-axi/dist/bin/linear-axi.js /usr/local/bin/linear-axi \
+    && linear-axi --version
 
 # python tools in their own virtualenvs, hash-pinned: the slack adapter
 # dependencies, and black for `make format` from the repo's requirements-dev.txt.

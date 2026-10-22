@@ -18,6 +18,7 @@ only what abra needs, pinned:
 | claude code | npm, `@anthropic-ai/claude-code` | npm registry integrity |
 | claude-agent-acp | `/opt/claude-agent-acp`, `npm ci` from `docker/claude-agent-acp/package-lock.json`, install scripts off | lockfile integrity hash for every package |
 | tasks-axi, gh-axi | npx cache prefetched at the `bin/tasks` and `bin/github` pins | npm registry integrity |
+| linear-axi | `/opt/linear-axi`, built from github.com/schmidthole/linear-axi at `LINEAR_AXI_COMMIT`, `npm ci` with install scripts off, dev packages pruned; `linear-axi` on `PATH` | commit hash checked after fetch, lockfile integrity hash for every package |
 | slack adapter deps | venv `/opt/venvs/slack` | `docker/requirements-slack.txt` hashes |
 | black | venv `/opt/venvs/black`, on `PATH` | `requirements-dev.txt` hashes |
 
@@ -47,8 +48,8 @@ by that user.
 `tini` is pid 1 and reaps agent subprocesses. it runs `docker/entrypoint.py`,
 which:
 
-1. checks `ABRA_TRIGGER`: unset or `none` runs sshd only; `slack` also runs the
-   slack listener; anything else exits 1.
+1. checks `ABRA_TRIGGER`: unset or `none` runs sshd only; `slack` or `linear`
+   also runs that listener; anything else exits 1.
 2. reads the authorized keys file. a missing, empty, oversized, or malformed file
    exits 1 (fail closed). the keys are copied to `/run/abra/authorized_keys` (0600)
    at each start, so rotate keys by updating the secret and restarting.
@@ -58,7 +59,8 @@ which:
    afterwards.
 5. starts `sshd` on port 2222 and, with `ABRA_TRIGGER=slack`,
    `/opt/venvs/slack/bin/python $ABRA_ROOT/triggers/slack.py --root $ABRA_ROOT --name $ABRA_NAME`
-   (`ABRA_NAME` defaults to `abra`).
+   (`ABRA_NAME` defaults to `abra`), or with `ABRA_TRIGGER=linear`
+   `/usr/bin/python3 $ABRA_ROOT/triggers/linear.py --root $ABRA_ROOT --name $ABRA_NAME`.
 
 if sshd or the listener exits for any reason, the other is stopped and the
 container exits non-zero so the orchestrator restarts it; there is no restart
@@ -108,7 +110,8 @@ platform's secret store.
 | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | claude code auth (or run `claude` over ssh once to log in) |
 | `GH_TOKEN` | gh auth (or `gh auth login` over ssh) |
 | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | slack listener tokens, see [slack.md](slack.md) |
-| `ABRA_TRIGGER` | `none` (default) or `slack` |
+| `LINEAR_API_KEY` | linear bot key, plus the other `LINEAR_*` settings in [linear.md](linear.md) |
+| `ABRA_TRIGGER` | `none` (default), `slack`, or `linear` |
 | `ABRA_NAME` | bot name for the listener, default `abra` |
 | `ABRA_ROOT` | instance root, default `/home/abra/abra` |
 | `ABRA_AUTHORIZED_KEYS` | authorized keys path, default `/etc/abra/ssh/authorized_keys` |
@@ -129,13 +132,14 @@ this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand. the
 resident settings (`ABRA_AGENT_CMD`, `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`,
 `ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE`) and `CLAUDE_CODE_EXECUTABLE` are not
 shared; the trigger listener gets the container's full environment.
-the slack tokens are left out of the session environment, but this is not a
-security boundary. a value containing `"`, `\`, or control characters is not
+the slack tokens and `LINEAR_API_KEY` are left out of the session environment,
+but this is not a security boundary; export the linear key by hand in a session
+that needs `linear-axi`. a value containing `"`, `\`, or control characters is not
 shared and its name is logged.
 
 ssh sessions run as the same user as the entrypoint and the listener, so anyone
 holding an authorized key can read every secret given to the container (claude
-or anthropic, gh, and slack), for example from `/proc/<pid>/environ`. only
+or anthropic, gh, slack, and linear), for example from `/proc/<pid>/environ`. only
 authorize keys of people trusted with all of them, and scope the tokens to what
 abra needs.
 

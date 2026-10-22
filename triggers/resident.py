@@ -693,7 +693,7 @@ class Resident(runtime.Runtime):
         log.info("turn ended (%s) for %d conversations", acp.safe(reason), len(convs))
         if failed:
             for conv in convs:
-                self._reply(conv, runtime.error_text(self.name))
+                self._reply(conv, self._text(runtime.error_text))
             for conv, msg_id in dropped:
                 self._ack(conv, msg_id, "failed")
         elif fallback:
