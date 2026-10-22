@@ -1,0 +1,8 @@
+# hash-pinned copy of triggers/requirements-slack.txt for the container image.
+# keep versions in sync; tests/test_container.py checks this.
+slack_bolt==1.30.0 \
+    --hash=sha256:81f5bc46e79516d23d5e2a31dded6304dd1b8b6b72c0083f2f31d5d801e262c4 \
+    --hash=sha256:af38258d41f801ad9c74503090e0f39accd66c49f667f7e55c97fcdb0e51b886
+slack_sdk==3.45.0 \
+    --hash=sha256:1ab794452f238b59db0d8a4d346263d65190288add53ec67a05751d8e7402486 \
+    --hash=sha256:6356d4486d1a3ad156462c5544ab1b9c076ff426a250495c08f51b7ad71eb8fb

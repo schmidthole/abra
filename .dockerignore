@@ -1,0 +1,20 @@
+# keep local state, secrets, and caches out of the build context and image.
+.git
+data/
+operator/
+specialty/
+.worktrees/
+.sources/
+.cache/
+.claude/settings.local.json
+NOTES.md
+**/.env
+**/.env.*
+**/*.prod.*
+**/*production*
+**/prod-*
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/node_modules/
+**/.DS_Store

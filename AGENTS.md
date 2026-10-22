@@ -38,9 +38,11 @@ runs in the abra directory; pass absolute paths for body-file arguments and
 run each cli's `--help` before using an unfamiliar command. do not invent flags.
 only the coordinator updates the backlog and registry. do not create another task
 database, daemon, watcher, process runner, or agent framework; `bin/abra` is the
-sanctioned one-shot headless entrypoint, not a daemon. the only exception is
+sanctioned one-shot headless entrypoint, not a daemon. the only exceptions are
 deployer-run trigger listeners under `triggers/` that only call `bin/abra` (see
-`docs/triggers.md`).
+`docs/triggers.md`), and the container entrypoint `docker/entrypoint.py`, which
+starts sshd and at most one listener and exits when either does (see
+`docs/container.md`).
 read `operator/` but never edit, move, or delete its files unless the operator asks;
 abra's own output stays in `data/<task-id>/`. when a task uses an operator file,
 record its path in the task body and snapshot the relevant content into

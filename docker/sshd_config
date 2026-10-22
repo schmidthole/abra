@@ -1,0 +1,37 @@
+# sshd for the abra container. it runs as the abra user on an unprivileged
+# port, so only abra can log in, and only with a key.
+Port 2222
+HostKey /home/abra/.abra-sshd/ssh_host_ed25519_key
+PidFile /run/abra/sshd.pid
+AuthorizedKeysFile /run/abra/authorized_keys
+
+AllowUsers abra
+PermitRootLogin no
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+HostbasedAuthentication no
+PermitEmptyPasswords no
+UsePAM no
+StrictModes yes
+MaxAuthTries 3
+LoginGraceTime 30
+
+DisableForwarding yes
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PermitUserRC no
+
+ClientAliveInterval 60
+ClientAliveCountMax 3
+PrintMotd no
+LogLevel VERBOSE
+
+# runtime variables for ssh sessions, written by the entrypoint at start (0600).
+Include /run/abra/sshd_env
+Subsystem sftp internal-sftp

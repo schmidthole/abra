@@ -160,6 +160,12 @@ it. adapters are thin; `triggers/cli.py` is the json-lines reference adapter and
 `triggers/slack.py` serves slack threads ([docs/slack.md](docs/slack.md)). see
 [docs/triggers.md](docs/triggers.md).
 
+## container
+
+the `Dockerfile` builds a debian image for headless and trigger deployments:
+key-only sshd for operators, an optional trigger listener, and a persistent
+home volume holding the instance root. see [docs/container.md](docs/container.md).
+
 ## pipeline
 
 worker → independent review/tests/docs/lint → fixes and fresh verification if needed
