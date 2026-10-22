@@ -1,4 +1,4 @@
-# hash-pinned black and its dependencies for `make format`. black 26 needs python >= 3.10.
+# hash-pinned black and its dependencies for `make format`. these pins need python >= 3.11.
 black==26.10.1 \
     --hash=sha256:03c0ddd93bb392e71209903a691767eb366fe1a76deb9509ccbaae9e1f14bb52 \
     --hash=sha256:0ce08b367307b0fd91c9dd1d4084e62b05b3055475f951f0f34a46b6e2393b64 \

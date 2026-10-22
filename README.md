@@ -187,12 +187,12 @@ script tests. use disposable projects and explicitly authorized github delivery.
 
 ## development
 
-`make format` uses black 26.10.1, hash-pinned with its dependencies in
-`requirements-dev.txt`. black 26 needs python 3.10+ to run; abra itself and
-`make test` stay python 3.9 compatible. install it into a separate venv:
+`make format` uses the black version hash-pinned with its dependencies in
+`requirements-dev.txt`. those pins need python 3.11+ to install and run; abra
+itself and `make test` stay python 3.9 compatible. install it into a separate venv:
 
 ```sh
-python3.12 -m venv ~/.venvs/abra-black   # any python 3.10+
+python3.12 -m venv ~/.venvs/abra-black   # any python 3.11+
 ~/.venvs/abra-black/bin/pip install --require-hashes -r requirements-dev.txt
 ```
 
