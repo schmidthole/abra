@@ -17,6 +17,7 @@ import re
 import secrets
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -36,6 +37,7 @@ UNATTENDED = ("bypassPermissions", "agent-full-access")
 REPLY_TOOL = "mcp__" + mcp_bridge.NAME + "__" + mcp_bridge.TOOL
 MAX_FINAL = 64 * 1024
 SOCKET_PATH = 100
+SELF_STARTED = ("agent_message_chunk", "agent_thought_chunk", "tool_call")
 BOOTSTRAP = (
     "new resident session. run the AGENTS.md startup and reconcile every"
     " unfinished task from its notes; agents and processes from any previous"
@@ -127,6 +129,9 @@ class Resident(runtime.Runtime):
         stop_timeout=60.0,
         kill_timeout=5.0,
         timeout=300.0,
+        wake_grace=20.0,
+        heartbeat=1800.0,
+        inflight=None,
     ):
         super().__init__(adapter, root, name=name, catchup_hours=catchup_hours)
         argv = shlex.split(agent_cmd) if isinstance(agent_cmd, str) else agent_cmd
@@ -136,6 +141,9 @@ class Resident(runtime.Runtime):
         self.agent_mode = agent_mode
         self.env = dict(os.environ if env is None else env)
         self.stop_timeout = stop_timeout
+        self.wake_grace = wake_grace
+        self.heartbeat = heartbeat
+        self.inflight = inflight or self._inflight
         self.kill_timeout = kill_timeout
         self.timeout = timeout
         self.cli = load_cli()
@@ -161,6 +169,12 @@ class Resident(runtime.Runtime):
         self.steer_busy = False
         self.loading = False
         self.activity = time.monotonic()
+        self.tools = set()
+        self.background = set()
+        self.wake_at = None
+        self.finished = 0
+        self.beat_at = time.monotonic() + heartbeat if heartbeat else None
+        self.beating = False
 
     # lifecycle
 
@@ -362,7 +376,12 @@ class Resident(runtime.Runtime):
         """the next dispatcher action, or none and how long to wait; holds the lock."""
         if self.crashed.is_set() or self.stopping.is_set():
             return "stop", None
+        moment = time.monotonic()
+        if self.turn is None and self.wake_at is not None and moment >= self.wake_at:
+            self._wake()
         if self.turn is None and (self.order or self.events or self.kick):
+            if self.wake_at is not None:
+                self._wake()
             batch = self._take()
             turn = dict(
                 batch=batch,
@@ -391,7 +410,65 @@ class Resident(runtime.Runtime):
             if batch:
                 self.steer_busy = True
                 return (lambda: self._steer(batch)), None
-        return None, None
+        delays = []
+        if self.turn is None and self.wake_at is not None:
+            delays.append(self.wake_at - moment)
+        if self.turn is None and self.beat_at is not None and not self.beating:
+            if moment >= self.beat_at:
+                self.beating = True
+                return self._beat, None
+            delays.append(self.beat_at - moment)
+        return None, (max(0.0, min(delays)) if delays else None)
+
+    # wake and heartbeat
+
+    def _wake(self):
+        """queue one background-finished event; caller holds the lock."""
+        count, self.finished, self.wake_at = self.finished, 0, None
+        log.info("background work finished with no self-started turn; waking")
+        self.events.append(
+            "background work finished ("
+            + str(count)
+            + " tool calls). check the results, update the task notes, and post"
+            " progress with reply."
+        )
+
+    def _beat(self):
+        """heartbeat when idle; only while tasks-axi reports in-flight work."""
+        try:
+            count = self.inflight()
+        except Exception as error:
+            log.warning("heartbeat check failed: %s", type(error).__name__)
+            count = 0
+        with self.lock:
+            self.beating = False
+            self.beat_at = time.monotonic() + self.heartbeat
+            if count and self.turn is None and not self.order:
+                log.info("heartbeat with %d tasks in flight", count)
+                self.events.append(
+                    "heartbeat: "
+                    + str(count)
+                    + " tasks are in flight. check on running work and post"
+                    " progress with reply where it helps."
+                )
+            self.changed.notify_all()
+
+    def _inflight(self):
+        tasks = self.root / "bin/tasks"
+        if not os.access(tasks, os.X_OK):
+            return 0
+        result = subprocess.run(
+            [str(tasks), "list", "--state", "in_flight"],
+            cwd=self.root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        match = re.search(r"^count: ([0-9]{1,6})$", result.stdout, re.M)
+        return int(match.group(1)) if match and not result.returncode else 0
 
     def _take(self):
         """the longest arrival-order prefix that fits one prompt; marks it delivered."""
@@ -486,6 +563,9 @@ class Resident(runtime.Runtime):
             )
             self.turn = None
             self.activity = time.monotonic()
+            # tool calls still open after their turn are background work
+            self.background |= self.tools
+            self.tools = set()
             self.changed.notify_all()
         log.info("turn ended (%s) for %d conversations", acp.safe(reason), len(convs))
         if failed:
@@ -659,6 +739,7 @@ class Resident(runtime.Runtime):
             if self.loading or params.get("sessionId") != self.session:
                 return
             self.activity = time.monotonic()
+            self._track(kind, update)
             turn = self.turn
             if turn is None or not turn["prompting"]:
                 return
@@ -670,6 +751,30 @@ class Resident(runtime.Runtime):
                 if isinstance(text, str) and turn["size"] + len(text) <= MAX_FINAL:
                     turn["final"].append(text)
                     turn["size"] += len(text)
+
+    def _track(self, kind, update):
+        """follow tool calls that outlive their turn; caller holds the lock."""
+        call = update.get("toolCallId")
+        status = update.get("status")
+        idle = self.turn is None
+        if kind in ("tool_call", "tool_call_update") and isinstance(call, str):
+            if status in ("completed", "failed"):
+                self.tools.discard(call)
+                if call in self.background:
+                    self.background.discard(call)
+                    if idle:
+                        self.finished += 1
+                        self.wake_at = time.monotonic() + self.wake_grace
+                        self.changed.notify_all()
+                return
+            if kind == "tool_call":
+                self.tools.add(call)
+                return
+        if idle and self.wake_at is not None and kind in SELF_STARTED:
+            # the agent started a turn by itself; no wake needed
+            log.info("agent woke by itself after background work")
+            self.wake_at = None
+            self.finished = 0
 
     # resident store
 
@@ -722,5 +827,14 @@ def from_env(adapter, args, env, **options):
     if not command.strip():
         raise ValueError("abra_agent_cmd is required when abra_resident=1")
     settings = dict(agent_mode=env.get("ABRA_AGENT_MODE", "") == "1", env=env)
+    for variable, key in (
+        ("ABRA_WAKE_GRACE", "wake_grace"),
+        ("ABRA_HEARTBEAT", "heartbeat"),
+    ):
+        value = env.get(variable, "")
+        if value:
+            if not re.fullmatch(r"[0-9]{1,7}", value):
+                raise ValueError(variable.lower() + " must be a number of seconds")
+            settings[key] = int(value)
     settings.update(options)
     return Resident(adapter, args.root, command, name=args.name, **settings)

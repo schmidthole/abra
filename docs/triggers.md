@@ -251,6 +251,13 @@ instead of one `bin/abra` turn per conversation. one adapter per instance.
 - specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`,
   and the bootstrap event runs the AGENTS.md startup, which reads it for any agent.
   the pack's `mcp_config` stdio and http servers are passed in `mcpServers`.
+- wake: tool calls still open when their turn ends count as background work. when
+  one completes while no runtime prompt runs, the runtime waits `ABRA_WAKE_GRACE`
+  seconds (default 20); if the agent does not start a turn by itself (claude does,
+  codex does not), it sends one `background work finished` event.
+- heartbeat: every `ABRA_HEARTBEAT` seconds (default 1800, 0 turns it off) while
+  idle, the runtime runs `bin/tasks list --state in_flight` and sends a heartbeat
+  event only when tasks are in flight. no file watchers.
 - crash: if the agent exits, the runtime stops dispatching and the adapter exits
   non-zero for the orchestrator to restart it. sigterm stops intake, waits for the
   running turn, closes the session, and kills the agent's process group.
@@ -260,6 +267,8 @@ instead of one `bin/abra` turn per conversation. one adapter per instance.
 | `ABRA_RESIDENT` | `1` selects resident mode |
 | `ABRA_AGENT_CMD` | acp agent command, e.g. `npx @agentclientprotocol/claude-agent-acp` |
 | `ABRA_AGENT_MODE` | `1` sets the unattended session mode (container only) |
+| `ABRA_WAKE_GRACE` | seconds to wait for a self-started turn, default 20 |
+| `ABRA_HEARTBEAT` | idle heartbeat period in seconds, default 1800; 0 is off |
 
 ## acp client
 

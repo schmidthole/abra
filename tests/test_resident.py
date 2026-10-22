@@ -81,6 +81,7 @@ class ResidentTests(unittest.TestCase):
         options.setdefault("stop_timeout", 5)
         options.setdefault("kill_timeout", 2)
         options.setdefault("timeout", 20)
+        options.setdefault("heartbeat", 0)
         instance = resident.Resident(
             adapter or self.adapter,
             self.root,
@@ -412,6 +413,58 @@ class ResidentTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(unknown.returncode, 1)
+
+    def test_wakes_agent_that_does_not_wake_itself(self):
+        self.configure(background=0.2)
+        instance = self.start(wake_grace=0.3)
+        instance.submit(event("start", "1", "go do-background"))
+        self.wait_for(lambda: len(self.prompts()) == 2)
+        self.assertIn(
+            "runtime event: background work finished (1 tool calls)", self.prompts()[1]
+        )
+        time.sleep(1)
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertEqual(instance.background, set())
+
+    def test_no_wake_when_agent_wakes_itself(self):
+        self.configure(background=0.2, wake=True)
+        instance = self.start(wake_grace=0.5)
+        instance.submit(event("start", "1", "go do-background"))
+        self.wait_for(lambda: instance.background == set() and instance.finished == 0)
+        time.sleep(1.2)
+        self.assertEqual(len(self.prompts()), 1)
+        self.assertIsNone(instance.wake_at)
+
+    def test_heartbeat_only_with_tasks_in_flight(self):
+        counts = []
+
+        def busy():
+            counts.append(2)
+            return 2
+
+        instance = self.start(heartbeat=0.3, inflight=busy)
+        self.wait_for(lambda: len(self.prompts()) >= 1)
+        self.assertIn(
+            "runtime event: heartbeat: 2 tasks are in flight", self.prompts()[0]
+        )
+        instance.stop()
+        self.log.unlink()
+        (self.root / "data/triggers/resident.json").unlink()
+        idle = self.start(heartbeat=0.2, inflight=lambda: 0)
+        time.sleep(1)
+        self.assertEqual(self.prompts(), [])
+        self.assertIsNotNone(idle.beat_at)
+
+    def test_inflight_count_from_tasks_cli(self):
+        tasks = self.root / "bin/tasks"
+        tasks.write_text("#!/bin/sh\necho 'count: 3'\necho 'tasks[3]{id}:'\n")
+        tasks.chmod(0o755)
+        instance = self.make()
+        self.assertEqual(instance._inflight(), 3)
+        tasks.write_text("#!/bin/sh\necho 'count: 3'\nexit 2\n")
+        self.assertEqual(instance._inflight(), 0)
+        tasks.unlink()
+        self.assertEqual(instance._inflight(), 0)
 
     def run_cli(self, *texts):
         lines = "".join(
