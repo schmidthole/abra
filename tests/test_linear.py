@@ -407,15 +407,35 @@ class AdapterTests(Base):
         self.assertEqual(
             (item["labels"], item["assignee"]), (["abra-blocked"], CREATOR)
         )
-        # still todo with the bot: left for the next poll
+        self.assertEqual(len(item["comments"]), 1)
+        self.assertIn("hit an error on this issue", item["comments"][0]["body"])
+        # still todo with the bot: left for the next poll, no comment
         self.edit(lambda s: s["issues"]["ENG-1"].update(state="Todo", assignee=BOT))
         self.assertFalse(self.adapter_ref.confirm("ENG-1"))
-        self.assertEqual(self.state()["issues"]["ENG-1"]["assignee"], BOT)
-        # unreadable: hand back without a known creator
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual((item["assignee"], len(item["comments"])), (BOT, 1))
+        # unreadable: comment and hand back without a known creator
         self.edit(lambda s: s.update(fail=["api"]))
         self.assertFalse(self.adapter_ref.confirm("ENG-1"))
-        self.assertIsNone(self.state()["issues"]["ENG-1"]["assignee"])
+        item = self.state()["issues"]["ENG-1"]
+        self.assertIsNone(item["assignee"])
+        self.assertEqual(len(item["comments"]), 2)
         self.assertEqual(self.instance.convs, {})
+
+    def test_hand_back_proceeds_when_the_error_comment_fails(self):
+        self.edit(
+            lambda s: (
+                s["issues"]["ENG-1"].update(state="Done"),
+                s.update(fail=["issue comment"]),
+            )
+        )
+        with self.assertLogs("abra.triggers", level="WARNING"):
+            self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual(item["comments"], [])
+        self.assertEqual(
+            (item["labels"], item["assignee"]), (["abra-blocked"], CREATOR)
+        )
 
     def test_resume_compares_comment_times_not_strings(self):
         self.edit(
@@ -594,10 +614,11 @@ class MainTests(Base):
         try:
             deadline = time.time() + 20
             while time.time() < deadline:
-                bodies = [
-                    c["body"] for c in self.state()["issues"]["ENG-1"]["comments"]
-                ]
-                if "free text answer" in bodies:
+                try:
+                    comments = self.state()["issues"]["ENG-1"]["comments"]
+                except (OSError, ValueError):
+                    comments = []
+                if "free text answer" in [c["body"] for c in comments]:
                     break
                 time.sleep(0.05)
         finally:

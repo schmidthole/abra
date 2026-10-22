@@ -149,7 +149,10 @@ def main():
         try:
             handle(state, args)
         except SystemExit:
-            STATE.write_text(json.dumps(state, indent=2))
+            # atomic, so readers never see a half-written file
+            temporary = STATE.with_suffix(".tmp")
+            temporary.write_text(json.dumps(state, indent=2))
+            os.replace(temporary, STATE)
             raise
 
 

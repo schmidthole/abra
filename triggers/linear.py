@@ -207,7 +207,7 @@ class LinearAdapter:
                 if str(error).startswith("validation_error") and team is None:
                     raise ValueError(
                         "linear-axi could not resolve the todo state across teams"
-                        " (ambiguous or missing); set linear_teams"
+                        " (ambiguous); set linear_teams"
                     )
                 raise ValueError("linear-axi could not list todo issues: " + str(error))
 
@@ -288,8 +288,7 @@ class LinearAdapter:
         event = runtime.Event("start", conv, msg_id, sender, text)
         if not instance.submit(event):
             log.error("could not submit linear issue %s; handing it back", identifier)
-            self.reply(conv, self.error_text(self.bot))
-            self.hand_back(identifier)
+            self.give_up(identifier)
 
     def claimable(self, issue):
         state = (issue.get("state") or {}).get("name")
@@ -305,7 +304,7 @@ class LinearAdapter:
             log.warning(
                 "could not confirm the claim of %s; handing it back", identifier
             )
-            self.hand_back(identifier)
+            self.give_up(identifier)
             return False
         state = (issue.get("state") or {}).get("name")
         assigned = (issue.get("assignee") or {}).get("id") == self.viewer
@@ -315,7 +314,7 @@ class LinearAdapter:
             log.warning(
                 "claim of %s left an unexpected state; handing it back", identifier
             )
-            self.hand_back(identifier)
+            self.give_up(identifier)
         else:
             log.warning("could not claim linear issue %s; skipping it", identifier)
         return False
@@ -365,6 +364,14 @@ class LinearAdapter:
             author = name if isinstance(name, str) and name.strip() else "unknown"
             lines += ["", "comment by " + author + " at " + stamp + ":", body.strip()]
         return "\n".join(lines)
+
+    def give_up(self, identifier):
+        """fixed error comment (best effort), then the cannot-complete hand-back."""
+        try:
+            self.reply("linear:" + identifier, self.error_text(self.bot))
+        except Exception as error:
+            log.warning("error comment failed: %s", type(error).__name__)
+        self.hand_back(identifier)
 
     def hand_back(self, identifier):
         """cannot-complete hand-back: blocked label, then reassign to the creator."""

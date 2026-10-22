@@ -128,8 +128,9 @@ removing the blocked label is up to the human; the adapter ignores labels.
 names match `[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}`. a missing or malformed key,
 setting, or `linear-axi` exits 1 naming the variable. at startup the adapter
 asks linear-axi for the bot's user id (`viewer`) and lists todo issues once per
-team (or once without a team), and exits 1 when either fails; an ambiguous or
-missing todo state without `LINEAR_TEAMS` exits 1 asking to set it.
+team (or once without a team), and exits 1 when either fails. a todo state name
+shared by several teams without `LINEAR_TEAMS` exits 1 asking to set it; a todo
+state that does not exist exits 1 with linear-axi's `not_found` code.
 sigint or sigterm stops polling, lets the running turn finish (bounded), closes
 the agent session, and keeps pending messages stored. if the agent exits, the
 listener exits 1 so the supervisor restarts it.
