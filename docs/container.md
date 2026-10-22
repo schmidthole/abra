@@ -18,7 +18,7 @@ only what abra needs, pinned:
 | claude code | npm, `@anthropic-ai/claude-code` | npm registry integrity |
 | tasks-axi, gh-axi | npx cache prefetched at the `bin/tasks` and `bin/github` pins | npm registry integrity |
 | slack adapter deps | venv `/opt/venvs/slack` | `docker/requirements-slack.txt` hashes |
-| black | venv `/opt/venvs/black`, on `PATH` | `docker/requirements-black.txt` hashes |
+| black | venv `/opt/venvs/black`, on `PATH` | `requirements-dev.txt` hashes |
 
 versions are `ARG`s at the top of the `Dockerfile`. debian packages are upgraded
 at build time from the pinned release's security archive, so a rebuild picks up

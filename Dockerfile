@@ -61,14 +61,14 @@ RUN npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUD
     && claude --version
 
 # python tools in their own virtualenvs, hash-pinned: the slack adapter
-# dependencies and black for `make format`.
-COPY docker/requirements-slack.txt docker/requirements-black.txt /tmp/requirements/
+# dependencies, and black for `make format` from the repo's requirements-dev.txt.
+COPY docker/requirements-slack.txt requirements-dev.txt /tmp/requirements/
 RUN python3 -m venv /opt/venvs/slack \
     && /opt/venvs/slack/bin/pip install --no-cache-dir --disable-pip-version-check \
         --require-hashes --only-binary=:all: -r /tmp/requirements/requirements-slack.txt \
     && python3 -m venv /opt/venvs/black \
     && /opt/venvs/black/bin/pip install --no-cache-dir --disable-pip-version-check \
-        --require-hashes --only-binary=:all: -r /tmp/requirements/requirements-black.txt \
+        --require-hashes --only-binary=:all: -r /tmp/requirements/requirements-dev.txt \
     && ln -s /opt/venvs/black/bin/black /usr/local/bin/black \
     && rm -rf /tmp/requirements \
     && black --version
@@ -82,9 +82,11 @@ RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash abra \
 ENV ABRA_ROOT=/home/abra/abra \
     DISABLE_AUTOUPDATER=1 \
     npm_config_cache=/opt/abra-npm \
+    npm_config_prefer_offline=true \
     npm_config_update_notifier=false
 
-# prefetch the npx packages the wrappers pin, so they run without fetching.
+# prefetch the npx packages the wrappers pin; prefer_offline serves them from
+# this cache without contacting the registry.
 USER abra
 RUN npx --yes "tasks-axi@${TASKS_AXI_VERSION}" --help > /dev/null \
     && npx --yes "gh-axi@${GH_AXI_VERSION}" --help > /dev/null

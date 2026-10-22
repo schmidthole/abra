@@ -16,7 +16,6 @@ import time
 import unittest
 from unittest import mock
 
-
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "docker/entrypoint.py"
 SPEC = importlib.util.spec_from_file_location("entrypoint", SCRIPT)
@@ -87,8 +86,7 @@ class EntrypointTests(unittest.TestCase):
                 handle.write("slack " + " ".join(sys.argv[1:]) + "\\n")
             time.sleep(0.5)
             sys.exit(%d)
-            """
-            % code,
+            """ % code,
         )
 
     def main(self, env=None):
@@ -297,9 +295,7 @@ class EntrypointTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
     def test_sigterm_stops_children_cleanly(self):
         wrapper = self.base / "wrapper.py"
-        wrapper.write_text(
-            textwrap.dedent(
-                """\
+        wrapper.write_text(textwrap.dedent("""\
                 import importlib.util, sys
                 from pathlib import Path
                 spec = importlib.util.spec_from_file_location("entrypoint", sys.argv[1])
@@ -310,9 +306,7 @@ class EntrypointTests(unittest.TestCase):
                 module.SOURCE = Path(sys.argv[4])
                 module.SSHD = sys.argv[5]
                 sys.exit(module.main())
-                """
-            )
-        )
+                """))
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -441,6 +435,8 @@ class ImageConfigTests(unittest.TestCase):
         github = (REPO / "bin/github").read_text()
         self.assertIn("tasks-axi@" + self.arg("TASKS_AXI_VERSION") + " ", tasks)
         self.assertIn("gh-axi@" + self.arg("GH_AXI_VERSION") + " ", github)
+        self.assertIn("npm_config_prefer_offline=true", self.dockerfile)
+        self.assertIn("npm_config_prefer_offline", entrypoint.SHARED)
 
     def test_versions_and_checksums_pinned(self):
         self.assertRegex(self.arg("NODE_VERSION"), r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -457,13 +453,14 @@ class ImageConfigTests(unittest.TestCase):
 
         image = REPO / "docker/requirements-slack.txt"
         self.assertEqual(pins(image), pins(REPO / "triggers/requirements-slack.txt"))
-        for path in (image, REPO / "docker/requirements-black.txt"):
+        for path in (image, REPO / "requirements-dev.txt"):
             entries = re.split(r"\n(?=[A-Za-z])", path.read_text().split("\n", 1)[1])
             entries = [entry for entry in entries if not entry.startswith("#")]
             self.assertTrue(entries, path)
             for entry in entries:
                 self.assertRegex(entry, r"==[^\s]+ \\\n    --hash=sha256:[0-9a-f]{64}")
-        self.assertIn("black==", (REPO / "docker/requirements-black.txt").read_text())
+        self.assertIn("black==", (REPO / "requirements-dev.txt").read_text())
+        self.assertIn("requirements-dev.txt", self.dockerfile)
         self.assertGreaterEqual(self.dockerfile.count("--require-hashes"), 2)
 
     def test_runs_as_abra_under_tini_without_baked_secrets(self):

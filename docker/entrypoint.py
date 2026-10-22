@@ -15,7 +15,6 @@ import subprocess
 import sys
 import tempfile
 
-
 HOME = Path("/home/abra")
 SOURCE = Path("/opt/abra")
 RUN = Path("/run/abra")
@@ -48,6 +47,7 @@ SHARED = (
     "GH_TOKEN",
     "DISABLE_AUTOUPDATER",
     "npm_config_cache",
+    "npm_config_prefer_offline",
     "npm_config_update_notifier",
 )
 SECRETS = (
