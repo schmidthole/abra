@@ -126,14 +126,21 @@ def handle_turn(sid, text):
         time.sleep(float(config.get("slow", 0.5)))
     if "do-permission" in text:
         outcomes = []
-        for tool in ("mcp__abra__reply", "Bash"):
+        reply_tool = "mcp__abra__reply"
+        server = {"name": "abra", "source": "config"}
+        for claude in (
+            {"toolName": reply_tool, "mcpServer": server},
+            {"toolName": "Bash"},
+            {"toolName": reply_tool, "mcpServer": server, "parentToolUseId": "t0"},
+            {"toolName": reply_tool, "mcpServer": {"name": "other"}},
+        ):
             response = ask(
                 "session/request_permission",
                 {
                     "sessionId": sid,
                     "toolCall": {
-                        "toolCallId": tool,
-                        "_meta": {"claudeCode": {"toolName": tool}},
+                        "toolCallId": claude["toolName"],
+                        "_meta": {"claudeCode": claude},
                     },
                     "options": [
                         {"optionId": "a1", "name": "allow", "kind": "allow_once"},
@@ -173,6 +180,8 @@ def handle_turn(sid, text):
         return {"code": -32000, "message": "secret failure detail"}
     if "do-refuse" in text:
         return "refusal"
+    if "do-cancel" in text:
+        return "cancelled"
     return "end_turn"
 
 

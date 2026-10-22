@@ -286,12 +286,10 @@ class ResidentTests(unittest.TestCase):
         instance.submit(event("start", "1", "do-permission"))
         self.assertTrue(instance.wait_idle(10))
         outcomes = [e for e in self.received() if "permission" in e][0]["permission"]
+        rejected = {"outcome": "selected", "optionId": "r1"}
         self.assertEqual(
             outcomes,
-            [
-                {"outcome": "selected", "optionId": "a1"},
-                {"outcome": "selected", "optionId": "r1"},
-            ],
+            [{"outcome": "selected", "optionId": "a1"}, rejected, rejected, rejected],
         )
         self.assertEqual(self.received("session/set_mode"), [])
 
@@ -542,6 +540,80 @@ class ResidentTests(unittest.TestCase):
             return False
 
         self.wait_for(gone)
+
+    def test_agent_cancel_retries_once_then_fails(self):
+        instance = self.start()
+        instance.submit(event("start", "1", "keep do-cancel"))
+        self.wait_for(lambda: self.adapter.acks("1")[-1:] == ["failed"])
+        self.assertTrue(instance.wait_idle(10))
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertEqual(self.adapter.acks("1"), ["running", "running", "failed"])
+        self.assertEqual(
+            self.adapter.replies("t:c1:1")[1:], [runtime.error_text("abra")]
+        )
+        self.assertEqual(instance.convs["t:c1:1"]["pending"], [])
+        self.assertEqual(instance.retried, set())
+
+    def test_unexpected_turn_error_fails_batch_and_continues(self):
+        instance = self.start()
+        real = instance.cli.resident_prompt
+        calls = []
+
+        def broken(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("secret detail")
+            return real(*args)
+
+        instance.cli.resident_prompt = broken
+        instance.submit(event("start", "1", "first"))
+        self.wait_for(lambda: self.adapter.acks("1") == ["failed"])
+        instance.submit(event("message", "2", "second do-reply"))
+        self.assertTrue(instance.wait_idle(10))
+        self.assertFalse(instance.crashed.is_set())
+        self.assertEqual(self.adapter.acks("2"), ["running"])
+
+    def test_internal_error_ending_a_turn_crashes(self):
+        instance = self.start()
+
+        def broken(ids):
+            raise RuntimeError("boom")
+
+        instance._forget = broken
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.crashed.wait(10))
+        self.assertEqual(
+            len(
+                json.loads((self.root / "data/triggers/test.json").read_text())[
+                    "convs"
+                ]["t:c1:1"]["pending"]
+            ),
+            1,
+        )
+
+    def test_job_survives_restart_until_delivered(self):
+        pack = self.root / "specialty"
+        (pack / "jobs").mkdir(parents=True)
+        (pack / "specialty.json").write_text(
+            json.dumps({"jobs": {"nightly": {"prompt": "jobs/nightly.md"}}})
+        )
+        (pack / "jobs/nightly.md").write_text("summarize the day\n")
+        self.configure(slow=1.0)
+        instance = self.start(stop_timeout=0.2)
+        instance.submit(event("start", "1", "wait do-slow"))
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        self.assertEqual(
+            instance.bridge({"op": "job", "name": "nightly"}), {"ok": True}
+        )
+        state = json.loads((self.root / "data/triggers/resident.json").read_text())
+        self.assertEqual(len(state["jobs"]), 1)
+        instance.stop()
+        self.log.unlink()
+        restarted = self.start()
+        self.assertTrue(restarted.wait_idle(10))
+        self.assertIn("summarize the day", "".join(self.prompts()))
+        state = json.loads((self.root / "data/triggers/resident.json").read_text())
+        self.assertEqual(state["jobs"], [])
 
     def run_cli(self, *texts):
         lines = "".join(

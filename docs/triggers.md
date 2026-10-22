@@ -187,20 +187,29 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   turn's messages all came from one conversation and abra did not reply to it, the
   turn's final text (after its last tool call) is posted there.
 - markers: `running` (eyes on slack) when a message reaches the agent; `failed`
-  (x) with the fixed error text when the prompt errors or is refused. no queued or
+  (x) with the fixed error text when the prompt errors or is refused. when the
+  agent itself ends a turn `cancelled` (claude-agent-acp does after a rejected
+  permission), its messages get one more turn, then fail the same way. an
+  unexpected error while preparing a turn fails that batch; an internal error in
+  the dispatcher stops the runtime like a crash. no queued or
   done markers. messages stay pending in the store until their turn ends, so a
   crash re-delivers them (at least once).
 - permissions: the runtime answers permission requests itself and allows only the
-  bridge's reply tool (`mcp__abra__reply`, as claude-agent-acp names it), once;
-  everything else is rejected. with `ABRA_AGENT_MODE=1` (container only) it sets
+  bridge's reply tool, once: claude-agent-acp's `toolName` must be
+  `mcp__abra__reply`, its `mcpServer` (when given) must be `abra`, and a call from
+  a subagent (`parentToolUseId`) is rejected, so only the coordinator posts.
+  everything else is rejected. other agents do not send these fields, so outside
+  agent mode (for example codex) abra cannot post and only the single-conversation
+  free-text fallback reaches the thread. with `ABRA_AGENT_MODE=1` (container only) it sets
   the session mode to `bypassPermissions` (claude) or `agent-full-access` (codex)
   when offered; codex-acp can also start that way with `INITIAL_AGENT_MODE`.
 - jobs: `bin/abra job NAME` hands the job to a running resident runtime over the
   bridge socket (named with its token in `data/triggers/bridge.json`, 0600; the
   socket moves to a private temp directory when the root's path is too long for a
   unix socket); the runtime reads
-  the job prompt from the specialty and sends it as a runtime event. with no
-  runtime listening, the job runs one-shot as before.
+  the job prompt from the specialty and sends it as a runtime event. waiting jobs
+  (at most 20) are kept in `resident.json` until a turn delivers them, so a crash
+  does not lose them. with no runtime listening, the job runs one-shot as before.
 - specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`,
   and the bootstrap event runs the AGENTS.md startup, which reads it for any agent.
   the pack's `mcp_config` stdio and http servers are passed in `mcpServers`.

@@ -37,6 +37,7 @@ DONE = ("end_turn", "max_tokens", "max_turn_requests")
 UNATTENDED = ("bypassPermissions", "agent-full-access")
 REPLY_TOOL = "mcp__" + mcp_bridge.NAME + "__" + mcp_bridge.TOOL
 MAX_FINAL = 64 * 1024
+MAX_JOBS = 20
 SOCKET_PATH = 100
 CHECKPOINT = (
     "checkpoint: this session is about to be cleared because abra is idle. save"
@@ -170,6 +171,8 @@ class Resident(runtime.Runtime):
         self.events = []
         self.turn = None
         self.steering = True
+        self.retried = set()
+        self.jobs = []
         self.steer_busy = False
         self.loading = False
         self.activity = time.monotonic()
@@ -207,6 +210,10 @@ class Resident(runtime.Runtime):
                 self._schedule(conv)
         self._catch_up()
         state = self._load_state()
+        jobs = state.get("jobs")
+        if isinstance(jobs, list):
+            self.jobs = [j for j in jobs if isinstance(j, str)][:MAX_JOBS]
+            self.events.extend(self.jobs)
         if state.get("agent") == self.digest and state.get("session_id"):
             self.stored = state["session_id"]
             self.started = state.get("started")
@@ -354,6 +361,11 @@ class Resident(runtime.Runtime):
         with self.lock:
             if self.stopping.is_set():
                 raise ValueError("the runtime is stopping")
+            if len(self.jobs) >= MAX_JOBS:
+                raise ValueError("too many jobs are waiting")
+            # stored until a turn delivers it, so a crash does not lose it
+            self.jobs.append(event)
+            self._save_state()
             self.events.append(event)
             self.changed.notify_all()
         log.info("queued job %s as a runtime event", name)
@@ -374,7 +386,10 @@ class Resident(runtime.Runtime):
             try:
                 action()
             except Exception as error:
-                log.error("resident dispatch failed: %s", type(error).__name__)
+                # an internal error: stop like a crash so the supervisor restarts
+                # the runtime; pending messages stay stored
+                self._crash("dispatch failed (" + type(error).__name__ + ")")
+                return
 
     def _next(self):
         """the next dispatcher action, or none and how long to wait; holds the lock."""
@@ -598,9 +613,12 @@ class Resident(runtime.Runtime):
         except acp.AgentExited:
             self._crash("agent exited during a turn")
             return
-        except (acp.AcpError, TimeoutError, ValueError, OSError) as error:
+        except Exception as error:
             log.warning("resident turn failed: %s", type(error).__name__)
-        self._end(turn, reason)
+        try:
+            self._end(turn, reason)
+        except Exception as error:
+            self._crash("ending a turn failed (" + type(error).__name__ + ")")
 
     def _end(self, turn, reason):
         if turn.get("checkpoint") and reason in DONE:
@@ -609,12 +627,38 @@ class Resident(runtime.Runtime):
         failed = reason is None or reason == "refusal"
         with self.lock:
             ids = turn["ids"]
-            convs = list(dict.fromkeys(conv for conv, _ in sorted_ids(turn)))
+            ordered = sorted_ids(turn)
+            dropped = ordered
             if reason == "cancelled":
-                self.order[:0] = [i for i in sorted_ids(turn) if i not in self.order]
-            else:
-                self._forget(ids)
+                # the runtime cancels only when stopping; an agent-side cancel (for
+                # example after a rejected permission) gets one retry per message
+                retry = [
+                    i
+                    for i in ordered
+                    if self.stopping.is_set() or i not in self.retried
+                ]
+                dropped = [i for i in ordered if i not in retry]
+                self.retried.update(retry)
+                self.order[:0] = [i for i in retry if i not in self.order]
+                failed = bool(dropped)
+            self._forget(set(dropped))
+            self.retried -= set(dropped)
+            convs = list(dict.fromkeys(conv for conv, _ in dropped))
             self.delivered -= ids
+            jobs = [e for e in turn["events"] if e in self.jobs]
+            again = []
+            if reason == "cancelled":
+                again = [
+                    e for e in jobs if self.stopping.is_set() or e not in self.retried
+                ]
+                self.retried.update(again)
+                if not self.stopping.is_set():
+                    self.events[:0] = [e for e in again if e not in self.events]
+            done = [e for e in jobs if e not in again]
+            if done:
+                self.jobs = [j for j in self.jobs if j not in done]
+                self.retried -= set(done)
+                self._save_state()
             final = "".join(turn["final"]).strip()
             fallback = (
                 reason in DONE
@@ -632,7 +676,7 @@ class Resident(runtime.Runtime):
         if failed:
             for conv in convs:
                 self._reply(conv, runtime.error_text(self.name))
-            for conv, msg_id in sorted_ids(turn):
+            for conv, msg_id in dropped:
                 self._ack(conv, msg_id, "failed")
         elif fallback:
             log.info("posting the final text to %s (no reply this turn)", convs[0])
@@ -782,8 +826,15 @@ class Resident(runtime.Runtime):
         call = params.get("toolCall") if isinstance(params, dict) else None
         meta = call.get("_meta") if isinstance(call, dict) else None
         claude = meta.get("claudeCode") if isinstance(meta, dict) else None
-        tool = claude.get("toolName") if isinstance(claude, dict) else None
-        if tool != REPLY_TOOL:
+        claude = claude if isinstance(claude, dict) else {}
+        server = claude.get("mcpServer")
+        if claude.get("toolName") != REPLY_TOOL:
+            return None
+        if isinstance(server, dict) and server.get("name") != mcp_bridge.NAME:
+            return None
+        if claude.get("parentToolUseId"):
+            # a subagent's call: only the coordinator posts
+            log.warning("rejected a reply from a subagent")
             return None
         for option in params.get("options") or ():
             if isinstance(option, dict) and option.get("kind") == "allow_once":
@@ -865,6 +916,7 @@ class Resident(runtime.Runtime):
                     "session_id": self.session,
                     "started": self.started,
                     "last_prompt": self.last_prompt,
+                    "jobs": self.jobs,
                 },
             )
         except OSError as error:
