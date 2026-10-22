@@ -352,6 +352,51 @@ class AcpTests(unittest.TestCase):
         thread.join(10)
         self.assertEqual(len(errors), 1)
 
+    def test_deeply_nested_line_is_dropped(self):
+        client, sid = self.session()
+        with self.assertLogs("abra.acp", "INFO") as logs:
+            self.assertEqual(client.prompt(sid, "deep", timeout=10), "end_turn")
+        self.assertEqual(self.texts(), ["survived"])
+        self.assertIn("dropped invalid line (RecursionError)", "\n".join(logs.output))
+        self.assertTrue(client.threads[0].is_alive())
+
+    def test_exit_while_child_holds_stdout(self):
+        client, sid = self.session()
+        with self.assertRaises(acp.AgentExited):
+            client.prompt(sid, "orphan", timeout=15)
+        self.assertTrue(self.exited.wait(10))
+        self.assertEqual(self.exits, [5])
+        for thread in client.threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+
+    def test_malformed_permission_request_is_answered(self):
+        client, sid = self.session()
+        client.prompt(sid, "bad-permission", timeout=10)
+        self.assertEqual(json.loads(self.texts()[-1]), -32602)
+
+    def test_agent_controlled_names_are_not_logged(self):
+        client, sid = self.session()
+        with self.assertLogs("abra.acp", "INFO") as logs:
+            reason = client.prompt(sid, "evil", timeout=10)
+        self.assertEqual(reason, "end_turn\nforged-stop")
+        self.assertEqual(json.loads(self.texts()[-1]), -32601)
+        text = "\n".join(logs.output)
+        self.assertNotIn("forged", text)
+        self.assertIn("<unsafe>", text)
+
+    def test_on_exit_gets_code_after_close(self):
+        client, _ = self.session()
+        client.close()
+        self.assertTrue(self.exited.wait(5))
+        self.assertEqual(self.exits, [client.proc.returncode])
+        self.assertIsNotNone(self.exits[0])
+
+    def test_remote_error_str_omits_agent_message(self):
+        error = acp.RemoteError(-32000, "secret detail", {"x": 1})
+        self.assertEqual(str(error), "acp error -32000")
+        self.assertEqual(error.message, "secret detail")
+
     def test_callback_failures_do_not_stop_the_client(self):
         def broken(params):
             raise ValueError("secret-callback")

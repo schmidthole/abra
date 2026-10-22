@@ -2,9 +2,13 @@
 
 one reader thread parses agent output and one dispatcher thread handles it in
 arrival order: session/update notifications go to on_update, agent requests are
-answered, and responses wake the waiting call. callbacks (on_update, permission,
-on_exit) run on the dispatcher thread; they must not block on client requests
-(that would deadlock), though cancel() is safe because it only writes.
+answered, and responses wake the waiting call. a waiter thread reaps the agent;
+when it exits, its process group is killed and pending calls fail.
+
+callbacks (on_update, permission, on_exit) run on the dispatcher thread and must
+return quickly: while one runs, no update, response, or agent request is handled.
+they must never block on client requests (that would deadlock) or wait on a human;
+cancel() is safe because it only writes.
 """
 
 import itertools
@@ -12,17 +16,21 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
+import time
 
 PROTOCOL_VERSION = 1
 MAX_LINE = 8 * 1024 * 1024
 METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 STEERING = "_session/steering"
 REJECT_KINDS = ("reject_once", "reject_always")
 DEFAULT = object()
+SAFE = re.compile(r"[A-Za-z0-9_./$-]{1,64}")
 
 log = logging.getLogger("abra.acp")
 
@@ -35,7 +43,8 @@ class RemoteError(AcpError):
     """the agent answered a request with a json-rpc error."""
 
     def __init__(self, code, message, data=None):
-        super().__init__("acp error " + str(code) + ": " + str(message))
+        # the agent's message and data stay off str() so logging the error is safe
+        super().__init__("acp error " + str(code))
         self.code = code
         self.message = message
         self.data = data
@@ -55,6 +64,11 @@ class ProtocolError(AcpError):
 
 class AgentExited(AcpError):
     """the agent closed its output or exited, or the client was closed."""
+
+
+def safe(value):
+    """an agent-controlled name for logs: allowlisted characters or a placeholder."""
+    return value if isinstance(value, str) and SAFE.fullmatch(value) else "<unsafe>"
 
 
 def reject(params):
@@ -132,7 +146,11 @@ class Client:
             start_new_session=True,
         )
         log.info("acp: started agent pid %d", self.proc.pid)
-        for target, name in ((self._read, "reader"), (self._dispatch, "dispatcher")):
+        for target, name in (
+            (self._read, "reader"),
+            (self._dispatch, "dispatcher"),
+            (self._wait, "waiter"),
+        ):
             thread = threading.Thread(target=target, name="acp-" + name, daemon=True)
             thread.start()
             self.threads.append(thread)
@@ -145,19 +163,12 @@ class Client:
         self.close()
 
     def close(self):
-        """close stdin, terminate the agent process group, reap, and stop threads."""
+        """send nothing; close stdin, sigterm the process group, sigkill it after
+        kill_timeout, reap, and stop the threads."""
         with self.lock:
             self.closed = True
         if self.proc is None:
             return
-        self._terminate()
-        current = threading.current_thread()
-        for thread in self.threads:
-            if thread is not current:
-                thread.join(self.kill_timeout + 5)
-
-    def _terminate(self):
-        """sigterm the group, wait, then sigkill the group so no child survives."""
         # a writer stuck on a full pipe holds the lock; the signals below free it.
         if self.write_lock.acquire(timeout=1):
             try:
@@ -166,25 +177,47 @@ class Client:
                 pass
             finally:
                 self.write_lock.release()
-        pgid = self.proc.pid
-        self._signal(pgid, signal.SIGTERM)
-        try:
-            self.proc.wait(self.kill_timeout)
-        except subprocess.TimeoutExpired:
+        self._signal(signal.SIGTERM)
+        waiter = self.threads[2]
+        waiter.join(self.kill_timeout)
+        if waiter.is_alive():
             log.warning("acp: agent ignored sigterm; sending sigkill")
-            self._signal(pgid, signal.SIGKILL)
-            self.proc.wait()
-        # the group outlives its leader while any member is alive, so this
-        # reaches grandchildren that ignored sigterm.
-        self._signal(pgid, signal.SIGKILL)
-        self.returncode = self.proc.returncode
+            self._signal(signal.SIGKILL)
+        current = threading.current_thread()
+        for thread in self.threads:
+            if thread is not current:
+                thread.join(self.kill_timeout + 5)
 
-    @staticmethod
-    def _signal(pgid, sig):
+    def _signal(self, sig):
         try:
-            os.killpg(pgid, sig)
+            os.killpg(self.proc.pid, sig)
         except (ProcessLookupError, PermissionError):
             pass
+
+    # waiter thread
+
+    def _wait(self):
+        """reap the agent, then kill what is left of its group and end the session."""
+        self.proc.wait()
+        self.returncode = self.proc.returncode
+        log.info("acp: agent process exited")
+        if self.write_lock.acquire(timeout=1):
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            finally:
+                self.write_lock.release()
+        # the group outlives its leader while any member is alive, so these reach
+        # children that kept running or kept stdout open.
+        self._signal(signal.SIGTERM)
+        reader = self.threads[0]
+        reader.join(self.kill_timeout)
+        self._signal(signal.SIGKILL)
+        reader.join(self.kill_timeout)
+        if reader.is_alive():
+            log.warning("acp: agent output is still open after exit")
+        self.inbox.put(None)
 
     # requests
 
@@ -280,20 +313,23 @@ class Client:
             return isinstance(steering, dict) and steering.get("supported") is True
         raise ValueError("unknown capability " + repr(name))
 
-    def new_session(self, cwd, mcp_servers=()):
-        result = self._result("session/new", self._setup(None, cwd, mcp_servers))
+    def new_session(self, cwd, mcp_servers=(), meta=None):
+        params = self._setup(None, cwd, mcp_servers, meta)
+        result = self._result("session/new", params)
         if not isinstance(result.get("sessionId"), str) or not result["sessionId"]:
             raise ProtocolError("session/new returned no session id")
         return result
 
-    def load_session(self, session_id, cwd, mcp_servers=()):
+    def load_session(self, session_id, cwd, mcp_servers=(), meta=None):
         """replays history as session/update notifications before returning."""
         self._require("load", "session/load")
-        return self._result("session/load", self._setup(session_id, cwd, mcp_servers))
+        params = self._setup(session_id, cwd, mcp_servers, meta)
+        return self._result("session/load", params)
 
-    def resume_session(self, session_id, cwd, mcp_servers=()):
+    def resume_session(self, session_id, cwd, mcp_servers=(), meta=None):
         self._require("resume", "session/resume")
-        return self._result("session/resume", self._setup(session_id, cwd, mcp_servers))
+        params = self._setup(session_id, cwd, mcp_servers, meta)
+        return self._result("session/resume", params)
 
     def close_session(self, session_id):
         self._require("close", "session/close")
@@ -313,7 +349,7 @@ class Client:
         reason = result.get("stopReason")
         if not isinstance(reason, str):
             raise ProtocolError("session/prompt returned no stop reason")
-        log.info("acp: prompt ended with %s", reason)
+        log.info("acp: prompt ended with %s", safe(reason))
         return reason
 
     def cancel(self, session_id):
@@ -332,7 +368,7 @@ class Client:
         outcome = self._result(STEERING, params).get("outcome")
         if not isinstance(outcome, str):
             raise ProtocolError("steering returned no outcome")
-        log.info("acp: steering outcome %s", outcome)
+        log.info("acp: steering outcome %s", safe(outcome))
         return outcome
 
     def _require(self, name, method):
@@ -340,7 +376,7 @@ class Client:
             raise Unsupported(method + " is not advertised by the agent")
 
     @staticmethod
-    def _setup(session_id, cwd, mcp_servers):
+    def _setup(session_id, cwd, mcp_servers, meta):
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             raise ValueError("cwd must be an absolute path")
         servers = list(mcp_servers)
@@ -349,6 +385,10 @@ class Client:
         params = {"cwd": cwd, "mcpServers": servers}
         if session_id is not None:
             params["sessionId"] = _sid(session_id)
+        if meta is not None:
+            if not isinstance(meta, dict):
+                raise ValueError("meta must be an object")
+            params["_meta"] = meta
         return params
 
     # reader thread
@@ -369,7 +409,7 @@ class Client:
                     continue
                 try:
                     message = json.loads(line)
-                except ValueError as exc:
+                except (ValueError, RecursionError) as exc:
                     log.warning("acp: dropped invalid line (%s)", type(exc).__name__)
                     continue
                 if not isinstance(message, dict):
@@ -378,13 +418,17 @@ class Client:
                     )
                     continue
                 self.inbox.put(message)
-        except (OSError, ValueError) as exc:
-            log.warning("acp: reader failed (%s)", type(exc).__name__)
-        stream.close()
-        log.info("acp: agent output closed")
-        if not self.closed:
-            self._terminate()
-        self.inbox.put(None)
+        except Exception as exc:
+            log.error("acp: reader failed (%s)", type(exc).__name__)
+        finally:
+            # without a reader the session is over: kill the group so the waiter
+            # reaps it and fails pending calls.
+            stream.close()
+            log.info("acp: agent output closed")
+            self._signal(signal.SIGTERM)
+            if self.proc.poll() is None:
+                time.sleep(0.1)
+                self._signal(signal.SIGKILL)
 
     # dispatcher thread
 
@@ -419,7 +463,7 @@ class Client:
             elif method == "session/update":
                 self._update(message.get("params"))
             else:
-                log.info("acp: ignored %s notification", method)
+                log.info("acp: ignored %s notification", safe(method))
             return
         if "id" in message and ("result" in message or "error" in message):
             self._resolve(message)
@@ -466,22 +510,29 @@ class Client:
         pending.done.set()
 
     def _answer(self, request_id, method, params):
-        log.info("acp: agent requested %s", method)
+        name = safe(method)
+        log.info("acp: agent requested %s", name)
         if method == "session/request_permission":
-            reply = {"result": {"outcome": self._decide(params)}}
+            try:
+                reply = {"result": {"outcome": self._decide(params)}}
+            except Exception as exc:
+                log.warning("acp: invalid permission request (%s)", type(exc).__name__)
+                reply = {"error": {"code": INVALID_PARAMS, "message": "invalid params"}}
         else:
             reply = {"error": {"code": METHOD_NOT_FOUND, "message": "method not found"}}
-            log.info("acp: answered %s with %d", method, METHOD_NOT_FOUND)
+            log.info("acp: answered %s with %d", name, METHOD_NOT_FOUND)
         reply.update(jsonrpc="2.0", id=request_id)
         try:
             self._write(reply)
         except AgentExited:
-            log.warning("acp: could not answer %s: agent stdin is closed", method)
+            log.warning("acp: could not answer %s: agent stdin is closed", name)
 
     def _decide(self, params):
         """ask the policy hook; anything but a valid offered option id rejects."""
         options = params.get("options") if isinstance(params, dict) else None
-        options = [o for o in options or () if isinstance(o, dict)]
+        if not isinstance(options, list):
+            raise ValueError("options must be a list")
+        options = [o for o in options if isinstance(o, dict)]
         offered = [o.get("optionId") for o in options]
         try:
             choice = self.permission(params)

@@ -227,12 +227,16 @@ runtime above does not use it yet.
   exception, rejects (default: reject all). other agent requests (`fs/*`,
   `terminal/*`, unknown) get -32601.
 - callbacks run on one dispatcher thread in arrival order, so a prompt returns
-  only after its updates were delivered. they must not make blocking client calls.
-- lines over `max_line` (8 mib) and invalid json are dropped and logged by type.
-  logs carry method names, ids, sizes, and error codes, never content.
-- agent exit fails pending calls with `AgentExited` and calls `on_exit(code)`.
-  `close()` sends nothing, closes stdin, sigterms the process group, sigkills it
-  after `kill_timeout`, and reaps.
+  only after its updates were delivered. they must return quickly: never make
+  blocking client calls or wait on a human from a callback.
+- lines over `max_line` (8 mib), invalid or too deeply nested json, and non-objects
+  are dropped and logged by type. logs carry allowlisted method names, ids, sizes,
+  and error codes, never content. `RemoteError` keeps the agent's message in
+  `.message`, not in `str()`.
+- a waiter thread reaps the agent: when it exits (even if a child keeps stdout
+  open), the rest of its process group is killed, pending calls fail with
+  `AgentExited`, and `on_exit(code)` runs. `close()` sends nothing, closes stdin,
+  sigterms the process group, sigkills it after `kill_timeout`, and reaps.
 
 ## mcp bridge
 

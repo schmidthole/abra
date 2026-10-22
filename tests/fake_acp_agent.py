@@ -140,6 +140,32 @@ def prompt(request_id, params):
             ]
         )
         update(sid, str(child.pid))
+    elif text == "deep":
+        raw("[" * 200000 + "\n")
+        update(sid, "survived")
+    elif text == "orphan":
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(120)\n",
+            ]
+        )
+        os._exit(5)
+    elif text == "bad-permission":
+        reply = ask(
+            "session/request_permission",
+            {"sessionId": sid, "toolCall": {"toolCallId": "c"}, "options": 5},
+        )
+        update(sid, json.dumps(reply.get("error", {}).get("code")))
+    elif text == "evil":
+        send({"method": "evil\nforged-notification", "params": {}})
+        reply = ask("evil\nforged-request", {})
+        update(sid, json.dumps(reply.get("error", {}).get("code")))
+        send({"id": request_id, "result": {"stopReason": "end_turn\nforged-stop"}})
+        return
     elif text == "error":
         send({"id": request_id, "error": {"code": -32000, "message": "boom"}})
         return
