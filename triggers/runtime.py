@@ -1,6 +1,6 @@
 """shared trigger runtime: turns conversation events into bin/abra turns."""
 
-from collections import namedtuple
+from collections import deque, namedtuple
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -25,12 +25,15 @@ WORK = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+){0,31}")
 UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
+TOOL_USE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 BASE32 = "abcdefghijklmnopqrstuvwxyz234567"
 MAX_TEXT = 32 * 1024
 MAX_BATCH = 50
 MAX_PENDING = 200
 MAX_CONTEXT = 256 * 1024
 BUSY = 75
+REPLY_LIMIT = 20
+REPLY_WINDOW = 60
 DAY = 24 * 3600
 STAMP = "%Y-%m-%dT%H:%M:%SZ"
 STATES = ("queued", "running", "done", "failed")
@@ -198,6 +201,8 @@ class Runtime:
         self.timers = {}
         self.threads = []
         self.holder = None
+        self.replies = {}
+        self.replied = set()
 
     # lifecycle
 
@@ -614,6 +619,52 @@ class Runtime:
                     count += self._enqueue(conv, entry, message)
                 if count:
                     log.info("caught up %d missed messages for %s", count, conv)
+
+    # bridge requests from the agent's reply tool
+
+    def bridge(self, request):
+        """answer one authenticated bridge request; valueerror rejects it."""
+        if request.get("op") != "reply":
+            raise ValueError("unknown op")
+        work_id = request.get("work_id")
+        text = request.get("text")
+        use = request.get("tool_use_id")
+        use = use if isinstance(use, str) and TOOL_USE.fullmatch(use) else "none"
+        if not isinstance(work_id, str) or not WORK.fullmatch(work_id):
+            raise ValueError("invalid work id")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be non-empty")
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("text is not valid unicode") from None
+        if size > MAX_TEXT:
+            raise ValueError("text exceeds " + str(MAX_TEXT) + " bytes")
+        with self.lock:
+            conv = next(
+                (c for c, e in self.convs.items() if e["work_id"] == work_id), None
+            )
+            if conv is None:
+                log.warning("bridge reply for unknown work item (tool use %s)", use)
+                raise ValueError("unknown work id")
+            recent = self.replies.setdefault(conv, deque())
+            moment = time.monotonic()
+            while recent and moment - recent[0] > REPLY_WINDOW:
+                recent.popleft()
+            if len(recent) >= REPLY_LIMIT:
+                log.warning("bridge reply rate limited for %s (tool use %s)", conv, use)
+                raise ValueError("rate limited; wait before replying again")
+            recent.append(moment)
+            self.replied.add(conv)
+        log.info(
+            "bridge reply for %s in %s: %d bytes (tool use %s)",
+            work_id,
+            conv,
+            size,
+            use,
+        )
+        self._reply(conv, text)
+        return {"ok": True}
 
     # adapter calls never raise into the runtime
 

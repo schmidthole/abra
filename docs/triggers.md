@@ -233,3 +233,18 @@ runtime above does not use it yet.
 - agent exit fails pending calls with `AgentExited` and calls `on_exit(code)`.
   `close()` sends nothing, closes stdin, sigterms the process group, sigkills it
   after `kill_timeout`, and reaps.
+
+## mcp bridge
+
+`triggers/mcp_bridge.py` gives a resident agent one tool, `reply(work_id, text)`.
+the agent spawns it as a stdio mcp server (`mcpServers` in session/new); each call
+is relayed to the runtime over a unix socket in `data/triggers/` (directory 0700,
+socket 0600) with a random per-start token from the shim's environment, compared
+in constant time. the runtime:
+
+- accepts only `[a-z0-9]+(-[a-z0-9]+)*` work ids that it minted, and resolves the
+  conversation from its own store; no tool takes a channel, thread, or user id.
+- refuses empty text and text over 32 kib, and allows at most 20 replies per
+  conversation per minute.
+- posts through the adapter, which escapes output as for any reply.
+- logs the work id, conversation key, size, and tool use id; never text or token.
