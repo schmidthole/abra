@@ -16,6 +16,7 @@ only what abra needs, pinned:
 | node and npm | nodejs.org release tarball | sha256 in the `Dockerfile` |
 | gh | official signed apt repo (cli.github.com) | keyring sha256, apt signatures |
 | claude code | npm, `@anthropic-ai/claude-code` | npm registry integrity |
+| claude-agent-acp | `/opt/claude-agent-acp`, `npm ci` from `docker/claude-agent-acp/package-lock.json`, install scripts off | lockfile integrity hash for every package |
 | tasks-axi, gh-axi | npx cache prefetched at the `bin/tasks` and `bin/github` pins | npm registry integrity |
 | slack adapter deps | venv `/opt/venvs/slack` | `docker/requirements-slack.txt` hashes |
 | black | venv `/opt/venvs/black`, on `PATH` | `requirements-dev.txt` hashes |
@@ -111,15 +112,23 @@ platform's secret store.
 | `ABRA_NAME` | bot name for the listener, default `abra` |
 | `ABRA_ROOT` | instance root, default `/home/abra/abra` |
 | `ABRA_AUTHORIZED_KEYS` | authorized keys path, default `/etc/abra/ssh/authorized_keys` |
-| `ABRA_AGENT_MODE`, `ABRA_MAX_CONCURRENCY`, `ABRA_SPECIALTY_DIR`, `ABRA_ARCHIVE_DAYS`, `ABRA_TRIGGER_WORKERS` | as in [README.md](../README.md), [triggers.md](triggers.md), and [specialty.md](specialty.md) |
+| `ABRA_AGENT_CMD` | acp agent the listener hosts, default the image's `claude-agent-acp`, which runs the image's claude (`CLAUDE_CODE_EXECUTABLE`) |
+| `ABRA_AGENT_MODE` | `1` sets the resident session to `bypassPermissions` (and makes `bin/abra` skip prompts); recommended here, since the container is the sandbox |
+| `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`, `ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE` | resident session timing, see [triggers.md](triggers.md) |
+| `ABRA_MAX_CONCURRENCY`, `ABRA_SPECIALTY_DIR` | as in [README.md](../README.md) and [specialty.md](specialty.md) |
 
 ### environment in ssh sessions
 
 sshd starts sessions with a clean environment, so the entrypoint writes an
-`Include`d sshd file, `/run/abra/sshd_env` (0600), that sets these variables for
-every ssh session: the `ABRA_*` settings above, `ANTHROPIC_API_KEY`,
-`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, and the image's npm and claude settings.
-this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand.
+`Include`d sshd file, `/run/abra/sshd_env` (0600), that sets exactly these
+variables for every ssh session, when set: `ABRA_ROOT`, `ABRA_NAME`,
+`ABRA_TRIGGER`, `ABRA_SPECIALTY_DIR`, `ABRA_AGENT_MODE`, `ABRA_MAX_CONCURRENCY`,
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `DISABLE_AUTOUPDATER`,
+`npm_config_cache`, `npm_config_prefer_offline`, and `npm_config_update_notifier`.
+this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand. the
+resident settings (`ABRA_AGENT_CMD`, `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`,
+`ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE`) and `CLAUDE_CODE_EXECUTABLE` are not
+shared; the trigger listener gets the container's full environment.
 the slack tokens are left out of the session environment, but this is not a
 security boundary. a value containing `"`, `\`, or control characters is not
 shared and its name is logged.
@@ -144,7 +153,10 @@ abra needs.
   root filesystem must stay writable (`/run/abra` and the npm cache).
 - container port 2222 behind a `ClusterIP` service; reach it with
   `kubectl port-forward` or a private network, not a public load balancer.
-- set `terminationGracePeriodSeconds` long enough for running turns.
+- set `terminationGracePeriodSeconds` above 60 seconds: on sigterm the listener
+  waits up to 60 seconds for the running turn, closes the agent session, and kills
+  the agent's process group. a restart resumes the stored session; background
+  agents that were running are gone and abra reconciles them from task notes.
 
 ## configure over ssh
 
@@ -161,7 +173,8 @@ bin/github --help
 clone the repos abra works on under the volume (for example `~/repos`) and
 register them as described in [README.md](../README.md) or the specialty's
 `specialty.json`. a running listener does not need a restart for specialty or
-registry changes; each `bin/abra` turn reads them.
+registry changes: abra reads them as it works, and the next session (after an
+idle clear or restart) starts with the startup checks.
 
 ## upgrade
 
@@ -184,12 +197,14 @@ the image and the instance root upgrade separately.
 
 ## security
 
-- the volume holds the trigger store and temp files with message text in
-  plaintext, claude sessions, and any gh or claude login. it must be encrypted at
+- the volume holds the trigger store with message text in plaintext, claude
+  sessions (the resident session included), and any gh or claude login. it must be encrypted at
   rest and not shared with other workloads.
 - expose port 2222 only to operators (localhost binding, private network, or port
   forwarding). the host key is generated per volume; pin it in `known_hosts`.
 - secrets come only from the runtime environment and mounted secrets. none is in
   an image layer, and the entrypoint never prints their values.
-- `ABRA_AGENT_MODE=1` makes `bin/abra` skip claude permission prompts; the
-  container is then the sandbox, so keep its tokens narrowly scoped.
+- `ABRA_AGENT_MODE=1` makes the resident session and `bin/abra` skip claude
+  permission prompts; the container is then the sandbox, so keep its tokens
+  narrowly scoped. without it, the runtime rejects every permission request except
+  abra's own reply tool.

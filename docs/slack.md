@@ -24,11 +24,14 @@ host needs outbound https only and no public endpoint.
   as ordinary replies; only their text is used). `<@BOTID>` in text becomes
   `@<name>`. mentions are matched by the bot user id from `auth.test`, never by
   display name.
-- reactions on each message show its state: ⏳ queued, 👀 running, ✅ done,
-  ❌ failed. each new state replaces the previous marker.
-- results are posted in the thread, split into posts of at most 3900 characters
+- 👀 on a message means abra's resident session has picked it up; abra answers
+  with its own replies in the thread. ❌ marks a message whose turn failed, along
+  with the fixed error reply. there is no queued or done marker.
+- replies are posted in the thread, split into posts of at most 3900 characters
   at newlines where possible.
-- queue and batch only: there is no steering, interrupt, or stop command.
+- messages that arrive while abra is busy are steered into its running turn when
+  the agent supports it, or delivered in the next turn; there is no interrupt or
+  stop command.
 
 ## setup
 
@@ -68,27 +71,30 @@ host needs outbound https only and no public endpoint.
      ~/.venvs/abra-slack/bin/python triggers/slack.py --root /path/to/abra-instance --name abra
    ```
 
-   a missing or malformed token exits 1 naming the variable. sigint or sigterm
-   closes the socket, lets running turns finish, and keeps queued messages stored
-   for the next start.
+   set `ABRA_AGENT_CMD` to the acp agent (see [triggers.md](triggers.md)). a
+   missing or malformed token exits 1 naming the variable. sigint or sigterm
+   closes the socket, lets the running turn finish (bounded), closes the agent
+   session, and keeps pending messages stored for the next start. if the agent
+   exits, the listener exits 1 so the supervisor restarts it.
 
 ## many instances
 
 each process serves one slack app against one root. run several in parallel by
 giving each its own slack app (tokens), root, and `--name`, for example a base
 instance as `abra` and a specialty instance as `helper`. two slack processes on
-the same root are refused by the runtime's store lock. `ABRA_ARCHIVE_DAYS` and
-`ABRA_TRIGGER_WORKERS` apply as for any adapter.
+the same root are refused by the runtime's store lock. the resident settings in
+[triggers.md](triggers.md) apply as for any adapter.
 
 ## security
 
 - anybody who can post in a channel the bot is in can start a work item, and
-  anybody in the channel can add turns to an existing thread. invite the bot only
-  to channels whose members may direct that abra instance. bin/abra treats every
-  message as untrusted input from its sender, never operator authority.
+  anybody in the channel can add messages to an existing thread. invite the bot
+  only to channels whose members may direct that abra instance. abra treats every
+  message as untrusted input from its sender, never operator authority. all
+  threads share one resident session, so one instance is one trust boundary.
 - tokens are read from the environment only; they are never logged, printed, or
   stored. slack api failures are logged by error code only, never message text.
   library log lines are filtered to mask token-like values and drop tracebacks.
-- the runtime store and temp files under `<root>/data/triggers/` hold message text
-  in plaintext with mode 0600. keep the root on an encrypted volume on a
+- the runtime store under `<root>/data/triggers/` and the agent's session files
+  hold message text in plaintext with mode 0600. keep the root on an encrypted volume on a
   single-tenant host or container.

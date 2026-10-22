@@ -60,6 +60,17 @@ RUN npm install --global --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUD
     && npm cache clean --force \
     && claude --version
 
+# the acp adapter the resident trigger runtime drives. every package is pinned
+# with its registry integrity hash in docker/claude-agent-acp/package-lock.json;
+# install scripts are skipped, and it runs the image's claude through
+# CLAUDE_CODE_EXECUTABLE.
+COPY docker/claude-agent-acp/package.json docker/claude-agent-acp/package-lock.json \
+    /opt/claude-agent-acp/
+RUN cd /opt/claude-agent-acp \
+    && npm ci --omit=dev --ignore-scripts --no-fund --no-audit \
+    && npm cache clean --force \
+    && test -x node_modules/.bin/claude-agent-acp
+
 # python tools in their own virtualenvs, hash-pinned: the slack adapter
 # dependencies, and black for `make format` from the repo's requirements-dev.txt.
 COPY docker/requirements-slack.txt requirements-dev.txt /tmp/requirements/
@@ -80,6 +91,8 @@ RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash abra \
     && install -d -o abra -g abra -m 0755 /opt/abra-npm
 
 ENV ABRA_ROOT=/home/abra/abra \
+    ABRA_AGENT_CMD=/opt/claude-agent-acp/node_modules/.bin/claude-agent-acp \
+    CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude \
     DISABLE_AUTOUPDATER=1 \
     npm_config_cache=/opt/abra-npm \
     npm_config_prefer_offline=true \

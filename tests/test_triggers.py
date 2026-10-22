@@ -1,60 +1,25 @@
-"""exercise the trigger runtime against a stub bin/abra in temporary roots."""
+"""exercise the trigger runtime's intake, store, and catch-up against a fake acp agent."""
 
 import json
 import os
 from pathlib import Path
-import re
+import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 import threading
 import time
 import unittest
 from unittest import mock
 
-TRIGGERS = Path(__file__).resolve().parents[1] / "triggers"
+TESTS = Path(__file__).resolve().parent
+TRIGGERS = TESTS.parent / "triggers"
 sys.path.insert(0, str(TRIGGERS))
 
+import resident  # noqa: E402
 import runtime  # noqa: E402
 
-STUB = textwrap.dedent("""\
-    import fcntl, json, os, sys, time
-    from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
-    config = json.loads((root / "stub.json").read_text())
-    args = sys.argv[1:]
-    record = {"argv": args, "start": time.time()}
-    for flag in ("--messages-file", "--context-file"):
-        if flag in args:
-            path = args[args.index(flag) + 1]
-            record[flag] = open(path, encoding="utf-8").read()
-            record[flag + "-mode"] = os.stat(path).st_mode & 0o777
-    with open(root / "calls.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        log = root / "calls.log"
-        count = len(log.read_text().splitlines()) if log.exists() else 0
-        with open(log, "a") as handle:
-            handle.write(json.dumps({"index": count, "start": True}) + "\\n")
-    if args[:2] == ["sessions", "prune"]:
-        record["end"] = time.time()
-        with open(root / "prune.log", "a") as handle:
-            handle.write(json.dumps(record) + "\\n")
-        print("old:1")
-        sys.exit(0)
-    time.sleep(config.get("sleep", 0))
-    record["end"] = time.time()
-    with open(root / "runs.log", "a") as handle:
-        handle.write(json.dumps(record) + "\\n")
-    codes = config.get("codes", [])
-    runs = len((root / "runs.log").read_text().splitlines())
-    code = codes[runs - 1] if runs - 1 < len(codes) else 0
-    if code:
-        print("traceback secret-stderr-detail", file=sys.stderr)
-        print("partial secret-stdout")
-        sys.exit(code)
-    print("result " + str(runs))
-    """)
+FAKE = TESTS / "fake_resident_agent.py"
 
 
 class Adapter:
@@ -79,15 +44,6 @@ class Adapter:
     def history(self, conv):
         return list(self.histories.get(conv, []))
 
-    def wait(self, predicate, timeout=10):
-        with self.changed:
-            self.assert_true(self.changed.wait_for(lambda: predicate(self), timeout))
-
-    @staticmethod
-    def assert_true(value):
-        if not value:
-            raise AssertionError("timed out waiting for adapter events")
-
     def replies(self, conv=None):
         return [e[2] for e in self.events if e[0] == "reply" and conv in (None, e[1])]
 
@@ -101,44 +57,48 @@ def event(kind, msg_id, text="hello", conv="t:c1:1", sender="U1"):
 
 class TriggerTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        # short paths keep the unix socket under the platform limit
+        self.temporary = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name) / "home"
+        self.root = Path(self.temporary.name).resolve() / "home"
         (self.root / "bin").mkdir(parents=True)
-        stub = self.root / "bin/abra"
-        stub.write_text("#!" + sys.executable + "\n" + STUB)
-        stub.chmod(0o755)
-        self.configure()
+        shutil.copy(TESTS.parent / "bin/abra", self.root / "bin/abra")
+        self.log = Path(self.temporary.name) / "agent.log"
+        self.config = Path(self.temporary.name) / "agent.json"
+        self.config.write_text(json.dumps({"log": str(self.log)}))
+        self.command = [sys.executable, str(FAKE), str(self.config)]
         self.runtimes = []
         self.addCleanup(self.stop_all)
 
-    def configure(self, **config):
-        (self.root / "stub.json").write_text(json.dumps(config))
-
     def stop_all(self):
         for instance in self.runtimes:
-            if instance.threads:
-                instance.stop()
+            instance.stop()
+
+    def make(self, adapter=None, **options):
+        options.setdefault("heartbeat", 0)
+        options.setdefault("stop_timeout", 5)
+        options.setdefault("kill_timeout", 2)
+        instance = resident.Resident(
+            adapter or Adapter(), self.root, self.command, **options
+        )
+        self.runtimes.append(instance)
+        return instance
 
     def start(self, adapter=None, **options):
         adapter = adapter or Adapter()
-        options.setdefault("backoff", lambda attempt: 0.01)
-        instance = runtime.Runtime(adapter, self.root, name="abra", **options)
-        self.runtimes.append(instance)
+        instance = self.make(adapter, **options)
         instance.start()
         return adapter, instance
 
-    def runs(self):
-        path = self.root / "runs.log"
-        if not path.exists():
+    def prompts(self):
+        if not self.log.exists():
             return []
-        return [json.loads(line) for line in path.read_text().splitlines()]
-
-    def prunes(self):
-        path = self.root / "prune.log"
-        if not path.exists():
-            return []
-        return [json.loads(line) for line in path.read_text().splitlines()]
+        entries = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [
+            "".join(b["text"] for b in e["params"]["prompt"])
+            for e in entries
+            if e.get("method") == "session/prompt"
+        ]
 
     def store(self):
         return json.loads((self.root / "data/triggers/test.json").read_text())
@@ -154,101 +114,13 @@ class TriggerTests(unittest.TestCase):
         )
         entry = dict(
             work_id="abra-wxyz",
-            session_id="11111111-1111-4111-8111-111111111111",
             created=stamp,
             last_used=stamp,
             last_msg_id="m1",
-            archived=False,
             pending=[],
         )
         entry.update(fields)
         return entry
-
-    def test_start_announces_before_run_with_work_and_session_ids(self):
-        adapter, instance = self.start()
-        self.assertTrue(instance.submit(event("start", "m1")))
-        self.assertTrue(instance.wait_idle(10))
-        first = adapter.events[0]
-        self.assertEqual(first[0], "reply")
-        match = re.fullmatch(
-            r"abra is on it\. this thread is now work item (abra-[a-z2-7]{4}) \(session"
-            r" ([0-9a-f-]{36})\)\. reply in this thread to add to it\.",
-            first[2],
-        )
-        self.assertIsNotNone(match, first[2])
-        work_id, session_id = match.groups()
-        self.assertRegex(session_id, runtime.UUID.pattern)
-        self.assertEqual(adapter.events[1], ("ack", "t:c1:1", "m1", "queued"))
-        self.assertEqual(adapter.acks("m1"), ["queued", "running", "done"])
-        self.assertEqual(adapter.replies()[-1], "result 1")
-        argv = self.runs()[0]["argv"]
-        self.assertEqual(argv[:3], ["run", "--key", "t:c1:1"])
-        self.assertEqual(argv[argv.index("--work-id") + 1], work_id)
-        self.assertEqual(argv[argv.index("--session-id") + 1], session_id)
-        self.assertNotIn("--context-file", argv)
-        self.assertEqual(
-            json.loads(self.runs()[0]["--messages-file"]),
-            [{"from": "U1", "text": "hello"}],
-        )
-        self.assertEqual(self.runs()[0]["--messages-file-mode"], 0o600)
-        instance.submit(event("message", "m2"))
-        self.assertTrue(instance.wait_idle(10))
-        argv = self.runs()[1]["argv"]
-        self.assertNotIn("--session-id", argv)
-        self.assertEqual(argv[argv.index("--work-id") + 1], work_id)
-
-    def test_messages_during_a_turn_batch_into_one_next_turn(self):
-        self.configure(sleep=0.4)
-        adapter, instance = self.start()
-        instance.submit(event("start", "m1"))
-        adapter.wait(lambda a: "running" in a.acks("m1"))
-        for index, msg_id in enumerate(("m2", "m3", "m4")):
-            instance.submit(event("message", msg_id, "text " + str(index), sender="U2"))
-            self.assertEqual(adapter.acks(msg_id), ["queued"])
-        self.assertTrue(instance.wait_idle(10))
-        runs = self.runs()
-        self.assertEqual(len(runs), 2)
-        self.assertEqual(
-            json.loads(runs[1]["--messages-file"]),
-            [{"from": "U2", "text": "text " + str(i)} for i in range(3)],
-        )
-        for msg_id in ("m2", "m3", "m4"):
-            self.assertEqual(adapter.acks(msg_id), ["queued", "running", "done"])
-
-    def test_busy_requeues_with_backoff_and_no_failed_ack(self):
-        self.configure(codes=[75, 75, 0])
-        delays = []
-        adapter, instance = self.start(
-            backoff=lambda attempt: delays.append(attempt) or 0.01
-        )
-        instance.submit(event("start", "m1"))
-        self.assertTrue(instance.wait_idle(10))
-        self.assertEqual(delays, [0, 1])
-        self.assertEqual(len(self.runs()), 3)
-        self.assertEqual(
-            adapter.acks("m1"),
-            ["queued", "running", "queued", "running", "queued", "running", "done"],
-        )
-        self.assertEqual(adapter.replies()[1:], ["result 3"])
-        self.assertIn("--session-id", self.runs()[2]["argv"])
-
-    def test_error_posts_fixed_reply_without_stderr_or_stdout(self):
-        for code in (1, 2, 9):
-            self.configure(codes=[code])
-            (self.root / "runs.log").unlink(missing_ok=True)
-            adapter, instance = self.start()
-            conv = "t:err:" + str(code)
-            instance.submit(event("start", "m1", conv=conv))
-            self.assertTrue(instance.wait_idle(10))
-            self.assertEqual(adapter.acks("m1"), ["queued", "running", "failed"])
-            self.assertEqual(
-                adapter.replies()[1:],
-                ["abra hit an error on this turn. reply here to try again."],
-            )
-            for text in adapter.replies():
-                self.assertNotIn("secret", text)
-            self.assertEqual(self.store()["convs"][conv]["pending"], [])
-            instance.stop()
 
     def test_unknown_conv_message_ignored_and_known_start_is_message(self):
         adapter, instance = self.start()
@@ -261,7 +133,7 @@ class TriggerTests(unittest.TestCase):
         announcements = [r for r in adapter.replies() if "is on it" in r]
         self.assertEqual(len(announcements), 1)
         self.assertEqual(len(self.store()["convs"]), 1)
-        self.assertEqual(len(self.runs()), 2)
+        self.assertEqual(len(self.prompts()), 2)
         self.assertFalse(instance.submit(event("message", "m2")))
 
     def test_invalid_events_rejected(self):
@@ -284,22 +156,6 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(adapter.events, [])
         self.assertFalse((self.root / "data/triggers/test.json").exists())
 
-    def test_one_turn_per_conv_and_concurrency_up_to_worker_cap(self):
-        self.configure(sleep=0.3)
-        adapter, instance = self.start(workers=2)
-        for conv in ("a", "b", "c"):
-            instance.submit(event("start", conv + "1", conv="t:" + conv + ":1"))
-        adapter.wait(lambda a: "running" in a.acks("a1"))
-        instance.submit(event("message", "a2", conv="t:a:1"))
-        self.assertTrue(instance.wait_idle(10))
-        runs = self.runs()
-        self.assertEqual(len(runs), 4)
-        spans = [(r["start"], r["end"], r["argv"][2]) for r in runs]
-        peak = max(sum(s <= start < e for s, e, _ in spans) for start, _, _ in spans)
-        self.assertEqual(peak, 2)
-        mine = sorted(s[:2] for s in spans if s[2] == "t:a:1")
-        self.assertLessEqual(mine[0][1], mine[1][0])
-
     def test_store_is_private_and_atomic(self):
         adapter, instance = self.start()
         instance.submit(event("start", "m1"))
@@ -316,118 +172,43 @@ class TriggerTests(unittest.TestCase):
         self.assertTrue(instance.wait_idle(10))
         leftovers = [p.name for p in path.parent.iterdir() if p.suffix == ".tmp"]
         self.assertEqual(leftovers, [])
-        self.assertEqual(list((path.parent / "tmp/test").iterdir()), [])
         entry = self.store()["convs"]["t:c1:1"]
-        for field in ("work_id", "session_id", "created", "last_used"):
-            self.assertIsInstance(entry[field], str)
+        self.assertEqual(
+            sorted(entry), ["created", "last_msg_id", "last_used", "pending", "work_id"]
+        )
         self.assertEqual(entry["last_msg_id"], "m2")
-        self.assertIs(entry["archived"], False)
+
+    def assert_first_survives(self, first, refused):
+        handoff = self.root / "data/triggers/bridge.json"
+        inflight = self.root / "data/triggers/.resident.jsonlive.tmp"
+        inflight.write_text("in flight")
+        before = handoff.read_text()
+        with self.assertRaises(ValueError) as caught:
+            self.start(refused)
+        self.assertEqual(handoff.read_text(), before)
+        self.assertTrue(inflight.exists())
+        self.assertTrue(first.socket_path.exists())
+        first.submit(event("start", "m1"))
+        self.assertTrue(first.wait_idle(10))
+        return str(caught.exception)
 
     def test_second_runtime_on_same_store_refused(self):
-        self.start()
-        with self.assertRaises(ValueError):
-            self.start()
+        _, first = self.start()
+        self.assert_first_survives(first, Adapter())
 
-    def test_pending_persists_across_restart(self):
-        self.configure(codes=[75])
-        adapter, instance = self.start(backoff=lambda attempt: 3600)
-        instance.submit(event("start", "m1"))
-        adapter.wait(
-            lambda a: a.acks("m1")[-1:] == ["queued"] and len(a.acks("m1")) == 3
-        )
-        instance.stop()
-        self.assertEqual(len(self.store()["convs"]["t:c1:1"]["pending"]), 1)
-        adapter, instance = self.start()
-        self.assertTrue(instance.wait_idle(10))
-        self.assertEqual(adapter.acks("m1"), ["queued", "running", "done"])
-        self.assertEqual(adapter.replies(), ["result 2"])
-        self.assertIn("--session-id", self.runs()[1]["argv"])
-        self.assertEqual(self.store()["convs"]["t:c1:1"]["pending"], [])
+    def test_second_adapter_on_same_root_refused(self):
+        _, first = self.start()
 
-    def test_archive_marks_conv_and_prunes_with_configured_days(self):
-        self.write_store(
-            {"t:old:1": self.entry(days_ago=31), "t:new:1": self.entry(days_ago=1)}
-        )
-        adapter, instance = self.start(archive_days=30)
-        convs = self.store()["convs"]
-        self.assertTrue(convs["t:old:1"]["archived"])
-        self.assertIsNone(convs["t:old:1"]["session_id"])
-        self.assertEqual(convs["t:old:1"]["work_id"], "abra-wxyz")
-        self.assertFalse(convs["t:new:1"]["archived"])
-        self.assertEqual(
-            [p["argv"] for p in self.prunes()],
-            [["sessions", "prune", "--older-than", "30"]],
-        )
-        self.assertEqual(self.runs(), [])
+        class Other(Adapter):
+            name = "other"
 
-    def test_resurrection_passes_trimmed_context_and_posts_resume_text(self):
-        big = "y" * 20000
-        history = [runtime.Message("h0", "U1", "first message")]
-        history += [runtime.Message("h" + str(i), "U2", big) for i in range(1, 40)]
-        history += [runtime.Message("b1", "abra", "bot said this")]
-        history += [runtime.Message("m9", "U3", "new message")]
-        self.write_store({"t:c1:1": self.entry(days_ago=100, last_msg_id="h39")})
-        adapter = Adapter({"t:c1:1": history})
-        adapter, instance = self.start(adapter)
-        self.assertTrue(self.store()["convs"]["t:c1:1"]["archived"])
-        instance.submit(event("message", "m9", "new message", sender="U3"))
-        self.assertTrue(instance.wait_idle(10))
-        resume = adapter.events[0]
-        self.assertEqual(resume[0], "reply")
-        match = re.fullmatch(
-            r"abra is resuming work item abra-wxyz \(session ([0-9a-f-]{36})\)\.",
-            resume[2],
-        )
-        self.assertIsNotNone(match, resume[2])
-        self.assertNotEqual(match.group(1), "11111111-1111-4111-8111-111111111111")
-        run = self.runs()[0]
-        argv = run["argv"]
-        self.assertEqual(argv[argv.index("--session-id") + 1], match.group(1))
-        self.assertEqual(argv[argv.index("--work-id") + 1], "abra-wxyz")
-        prior = run["--context-file"]
-        self.assertEqual(run["--context-file-mode"], 0o600)
-        self.assertLessEqual(len(prior.encode("utf-8")), 256 * 1024)
-        self.assertIn("data/abra-wxyz/", prior)
-        self.assertIn("[h0] U1:\nfirst message", prior)
-        self.assertIn("[h39] U2:", prior)
-        self.assertIn("[b1] abra:\nbot said this", prior)
-        self.assertNotIn("[h1] U2:", prior)
-        self.assertIn("messages omitted", prior)
-        self.assertNotIn("new message", prior)
-        self.assertEqual(adapter.replies()[-1], "result 1")
-        instance.submit(event("message", "m10"))
-        self.assertTrue(instance.wait_idle(10))
-        argv = self.runs()[1]["argv"]
-        self.assertNotIn("--context-file", argv)
-        self.assertNotIn("--session-id", argv)
-
-    def test_failed_resurrection_turn_keeps_context_without_session_id(self):
-        self.configure(codes=[1, 0])
-        history = [runtime.Message("h0", "U1", "first message")]
-        self.write_store({"t:c1:1": self.entry(days_ago=100, last_msg_id="h0")})
-        adapter, instance = self.start(Adapter({"t:c1:1": history}))
-        instance.submit(event("message", "m1"))
-        self.assertTrue(instance.wait_idle(10))
-        self.assertEqual(adapter.acks("m1"), ["queued", "running", "failed"])
-        instance.submit(event("message", "m2"))
-        self.assertTrue(instance.wait_idle(10))
-        first, second = [run["argv"] for run in self.runs()]
-        self.assertIn("--session-id", first)
-        self.assertIn("--context-file", first)
-        self.assertIn("--context-file", second)
-        self.assertNotIn("--session-id", second)
-        self.assertIn("first message", self.runs()[1]["--context-file"])
-        self.assertFalse(self.store()["convs"]["t:c1:1"]["resumed"])
-        instance.submit(event("message", "m3"))
-        self.assertTrue(instance.wait_idle(10))
-        self.assertNotIn("--context-file", self.runs()[2]["argv"])
+        message = self.assert_first_survives(first, Other())
+        self.assertIn("another resident runtime", message)
 
     def test_pending_cap_drops_and_acks_failed(self):
-        self.configure(sleep=0.4)
         with mock.patch.object(runtime, "MAX_PENDING", 2):
             adapter, instance = self.start()
-            instance.submit(event("start", "m1"))
-            adapter.wait(lambda a: "running" in a.acks("m1"))
+            instance.submit(event("start", "m1", "wait do-hold"))
             self.assertTrue(instance.submit(event("message", "m2")))
             with self.assertLogs("abra.triggers", level="WARNING") as logs:
                 self.assertFalse(
@@ -435,66 +216,23 @@ class TriggerTests(unittest.TestCase):
                 )
             self.assertEqual(adapter.acks("m3"), ["failed"])
             self.assertNotIn("secret", "\n".join(logs.output))
-            self.assertTrue(instance.wait_idle(10))
-        self.assertEqual(len(self.runs()), 2)
-        self.assertEqual(
-            json.loads(self.runs()[1]["--messages-file"]),
-            [{"from": "U1", "text": "hello"}],
-        )
         self.assertEqual(self.store()["convs"]["t:c1:1"]["last_msg_id"], "m2")
 
-    def test_redelivered_message_on_archived_conv_does_not_resurrect(self):
-        self.write_store({"t:c1:1": self.entry(days_ago=100, last_msg_id="h0")})
-        adapter, instance = self.start()
-        self.assertFalse(instance.submit(event("message", "h0")))
-        self.assertEqual(adapter.events, [])
-        entry = self.store()["convs"]["t:c1:1"]
-        self.assertTrue(entry["archived"])
-        self.assertIsNone(entry["session_id"])
-        self.assertEqual(self.runs(), [])
-
-    def test_temporary_files_cleaned_on_write_failure_and_startup(self):
+    def test_stale_temporary_files_removed_and_modes_fixed(self):
         directory = self.root / "data/triggers"
-        scratch = directory / "tmp/test"
-        scratch.mkdir(parents=True)
-        for path in (directory, scratch.parent, scratch):
-            path.chmod(0o755)
-        (scratch / "leftover").write_text("old message")
-        (directory / ".test.jsonabc.tmp").write_text("old store")
+        directory.mkdir(parents=True)
+        directory.chmod(0o755)
+        for name in (".test.jsonabc.tmp", ".resident.jsonx.tmp", ".bridge.jsony.tmp"):
+            (directory / name).write_text("old")
         lock = directory / "test.lock"
         lock.write_text("")
         lock.chmod(0o644)
-        adapter, instance = self.start()
-        self.assertEqual(list(scratch.iterdir()), [])
-        self.assertFalse((directory / ".test.jsonabc.tmp").exists())
-        for path in (directory, scratch.parent, scratch):
-            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+        self.start()
+        self.assertEqual(
+            sorted(p.name for p in directory.iterdir() if p.suffix == ".tmp"), []
+        )
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
         self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
-        with self.assertRaises(TypeError):
-            instance._temporary("not bytes")
-        self.assertEqual(list(scratch.iterdir()), [])
-
-    def test_symlinked_or_file_temp_dirs_refuse_to_start(self):
-        outside = Path(self.temporary.name) / "outside"
-        outside.mkdir()
-        outside.chmod(0o755)
-        (outside / "keep").write_text("keep me")
-        directory = self.root / "data/triggers"
-        for relative in ("tmp", "tmp/test"):
-            for kind in ("symlink", "file"):
-                target = directory / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if kind == "symlink":
-                    target.symlink_to(outside)
-                else:
-                    target.write_text("")
-                with self.assertRaises(ValueError) as caught:
-                    runtime.Runtime(Adapter(), self.root).start()
-                self.assertIn("must be a real directory", str(caught.exception))
-                self.assertEqual(str(caught.exception), str(caught.exception).lower())
-                self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep"])
-                self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
-                target.unlink()
 
     def test_symlinked_triggers_directory_is_allowed(self):
         volume = Path(self.temporary.name) / "volume"
@@ -508,22 +246,30 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(volume.stat().st_mode & 0o777, 0o700)
 
     def test_startup_sweep_leaves_other_adapters_temp_files(self):
-        adapter, instance = self.start()
         directory = self.root / "data/triggers"
-        mine = directory / "tmp/test/in-flight"
-        mine.write_text("running turn")
-        theirs = directory / "tmp/other"
-        theirs.mkdir()
-        (theirs / "leftover").write_text("old message")
-        (directory / ".other.jsonxyz.tmp").write_text("old store")
+        directory.mkdir(parents=True)
+        theirs = directory / ".other.jsonxyz.tmp"
+        theirs.write_text("old store")
+        self.start()
+        self.assertTrue(theirs.exists())
 
-        class Other(Adapter):
-            name = "other"
-
-        self.start(Other())
-        self.assertTrue(mine.exists())
-        self.assertEqual(list(theirs.iterdir()), [])
-        self.assertFalse((directory / ".other.jsonxyz.tmp").exists())
+    def test_legacy_one_shot_store_loads(self):
+        legacy = self.entry(
+            session_id="11111111-1111-4111-8111-111111111111",
+            archived=True,
+            fresh=True,
+            resumed=True,
+            pending=[{"msg_id": "m2", "sender": "U1", "text": "left over"}],
+        )
+        self.write_store({"t:c1:1": legacy})
+        adapter, instance = self.start()
+        self.assertTrue(instance.wait_idle(10))
+        self.assertIn("left over", self.prompts()[0])
+        entry = self.store()["convs"]["t:c1:1"]
+        self.assertNotIn("archived", entry)
+        self.assertNotIn("session_id", entry)
+        self.assertEqual(entry["pending"], [])
+        self.assertTrue(instance.submit(event("message", "m3")))
 
     def test_catch_up_queues_missed_history_after_restart(self):
         history = [
@@ -535,30 +281,24 @@ class TriggerTests(unittest.TestCase):
         self.write_store(
             {
                 "t:c1:1": self.entry(),
-                "t:stale:1": self.entry(days_ago=2),
+                "t:stale:1": self.entry(days_ago=2, work_id="abra-old1"),
             }
         )
         adapter = Adapter({"t:c1:1": history, "t:stale:1": history})
         adapter, instance = self.start(adapter)
         self.assertTrue(instance.wait_idle(10))
-        runs = self.runs()
-        self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0]["argv"][2], "t:c1:1")
-        self.assertEqual(
-            json.loads(runs[0]["--messages-file"]),
-            [
-                {"from": "U2", "text": "missed one"},
-                {"from": "U3", "text": "missed two"},
-            ],
-        )
-        self.assertNotIn("--session-id", runs[0]["argv"])
+        prompts = self.prompts()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("conversation: t:c1:1", prompts[0])
+        self.assertNotIn("t:stale:1", prompts[0])
+        self.assertLess(prompts[0].index("missed one"), prompts[0].index("missed two"))
+        self.assertNotIn("bot reply", prompts[0])
         self.assertEqual(self.store()["convs"]["t:c1:1"]["last_msg_id"], "m3")
 
     def test_logs_never_contain_message_text(self):
-        self.configure(codes=[1])
         with self.assertLogs("abra.triggers", level="INFO") as logs:
             adapter, instance = self.start()
-            instance.submit(event("start", "m1", "private words here"))
+            instance.submit(event("start", "m1", "private words do-fail"))
             self.assertTrue(instance.wait_idle(10))
         output = "\n".join(record.getMessage() for record in logs.records)
         self.assertIn("t:c1:1", output)
@@ -569,23 +309,17 @@ class TriggerTests(unittest.TestCase):
 
     def test_invalid_config_rejected(self):
         adapter = Adapter()
-        cases = [
-            dict(archive_days=0),
-            dict(archive_days=-1),
-            dict(archive_days=True),
-            dict(workers=0),
-            dict(workers=-2),
-            dict(catchup_hours=-1),
-            dict(name="bad\nname"),
-        ]
-        for case in cases:
+        for case in (dict(catchup_hours=-1), dict(name="bad\nname")):
             with self.assertRaises(ValueError, msg=case):
-                runtime.Runtime(adapter, self.root, **case)
+                resident.Resident(adapter, self.root, self.command, **case)
+        for command in ("", "   ", [], [""]):
+            with self.assertRaises(ValueError):
+                resident.Resident(adapter, self.root, command)
         with self.assertRaises(ValueError):
-            runtime.Runtime(adapter, self.root / "missing")
+            resident.Resident(adapter, self.root / "missing", self.command)
         (self.root / "bin/abra").unlink()
         with self.assertRaises(ValueError):
-            runtime.Runtime(adapter, self.root)
+            resident.Resident(adapter, self.root, self.command)
 
     def test_corrupt_store_fails_closed(self):
         directory = self.root / "data/triggers"
@@ -593,22 +327,37 @@ class TriggerTests(unittest.TestCase):
         (directory / "test.json").write_text("[" * 100000)
         with self.assertRaises(ValueError):
             self.start()
+        self.assertFalse((directory / "bridge.json").exists())
 
     def test_env_settings(self):
         class Args:
             root = str(self.root)
             name = "Bot One"
 
-        instance = runtime.from_args(
-            Adapter(), Args, {"ABRA_ARCHIVE_DAYS": "7", "ABRA_TRIGGER_WORKERS": "3"}
-        )
-        self.assertEqual((instance.archive_days, instance.workers), (7, 3))
+        env = {
+            "ABRA_AGENT_CMD": "agent --acp",
+            "ABRA_WAKE_GRACE": "5",
+            "ABRA_HEARTBEAT": "0",
+            "ABRA_IDLE_CLEAR": "60",
+            "ABRA_MAX_SESSION_AGE": "3600",
+        }
+        instance = runtime.from_args(Adapter(), Args, env)
         self.assertEqual(instance.slug, "bot-one")
-        for env in ({"ABRA_ARCHIVE_DAYS": "0"}, {"ABRA_TRIGGER_WORKERS": "x"}):
+        self.assertEqual(
+            (
+                instance.wake_grace,
+                instance.heartbeat,
+                instance.idle_clear,
+                instance.max_age,
+            ),
+            (5, 0, 60, 3600),
+        )
+        self.assertFalse(instance.agent_mode)
+        for bad in ({}, {"ABRA_AGENT_CMD": "x", "ABRA_IDLE_CLEAR": "-1"}):
             with self.assertRaises(ValueError):
-                runtime.from_args(Adapter(), Args, env)
+                runtime.from_args(Adapter(), Args, bad)
 
-    def test_cli_adapter_end_to_end(self):
+    def test_cli_adapter_rejects_bad_input_and_root(self):
         lines = [
             {
                 "kind": "message",
@@ -627,6 +376,7 @@ class TriggerTests(unittest.TestCase):
             },
         ]
         stdin = "\n".join(l if isinstance(l, str) else json.dumps(l) for l in lines)
+        env = dict(os.environ, ABRA_AGENT_CMD=" ".join(self.command))
         result = subprocess.run(
             [
                 sys.executable,
@@ -639,31 +389,24 @@ class TriggerTests(unittest.TestCase):
             input=stdin + "\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
+            env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         records = [json.loads(line) for line in result.stdout.splitlines()]
-        self.assertEqual(records[0]["type"], "reply")
         self.assertTrue(records[0]["text"].startswith("helper is on it."))
         self.assertIn("work item helper-", records[0]["text"])
         acks = [r["state"] for r in records if r["type"] == "ack"]
-        self.assertEqual(acks, ["queued", "running", "done"])
-        self.assertEqual(
-            records[-2], {"type": "reply", "conv": "t:x:1", "text": "result 1"}
-        )
+        self.assertEqual(acks, ["running"])
         self.assertIn("ignoring invalid event on line 2", result.stderr)
         self.assertNotIn("do it", result.stderr)
         self.assertTrue((self.root / "data/triggers/cli.json").exists())
         missing = subprocess.run(
-            [
-                sys.executable,
-                str(TRIGGERS / "cli.py"),
-                "--root",
-                str(self.root / "nope"),
-            ],
+            [sys.executable, str(TRIGGERS / "cli.py"), "--root", str(self.root / "no")],
             input="",
             capture_output=True,
             text=True,
+            env=env,
         )
         self.assertEqual(missing.returncode, 1)
         self.assertNotIn("Traceback", missing.stderr)

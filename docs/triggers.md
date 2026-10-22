@@ -1,27 +1,29 @@
 # triggers
 
 a trigger connects an external conversation system (slack, linear, jira, zendesk)
-to an abra instance. each system gets a thin adapter; all session, queue, archive,
-and recovery behavior lives in the shared runtime, `triggers/runtime.py` (stdlib
-only). the runtime only ever calls `<root>/bin/abra`; it never runs claude itself.
-
-v1 is queue + batch only: there is no mid-turn steering, interrupt, or stop command.
+to an abra instance. each system gets a thin adapter; intake, the store, and
+recovery live in the shared runtime (`triggers/runtime.py` and
+`triggers/resident.py`, stdlib only). the runtime hosts one long-lived agent
+session over acp (agent client protocol) that serves every conversation; abra
+posts back with a `reply` tool. `bin/abra run` stays for one-shot use by hand and
+is not used by triggers.
 
 ## model
 
-- a conversation (slack thread, linear issue comments, ticket) is one session.
-  its key, `conv`, matches `[A-Za-z0-9][A-Za-z0-9:._-]{0,127}`, for example
-  `slack:<channel>:<thread_ts>`, and is passed to `bin/abra run --key`.
-- a new session starts only when the bot is tagged outside a known conversation.
-  the tagged message is the first message of the session.
-- every later message in the conversation, from anybody in it, adds to the session.
-- each conversation is one work item: abra uses its work id as the tasks-axi task id
-  and `data/<work_id>/` for reports.
+- a conversation (slack thread, linear issue comments, ticket) has a key, `conv`,
+  matching `[A-Za-z0-9][A-Za-z0-9:._-]{0,127}`, for example
+  `slack:<channel>:<thread_ts>`.
+- a conversation starts only when the bot is tagged outside a known conversation.
+  the tagged message is its first message; every later message in it, from anybody
+  in it, is delivered to the same resident session.
+- each conversation is one work item: abra uses its work id as the tasks-axi task
+  id and `data/<work_id>/` for reports. the session sees every conversation, so
+  work can be shared across threads of the same instance.
 
 ## adapter api
 
-one adapter per process. the adapter has a `name` attribute (`[a-z0-9]+(-[a-z0-9]+)*`,
-for example `slack`), which names its store.
+one adapter per process and per instance. the adapter has a `name` attribute
+(`[a-z0-9]+(-[a-z0-9]+)*`, for example `slack`), which names its store.
 
 intake: call `runtime.submit(Event(kind, conv, msg_id, sender, text))` from any
 thread. it returns true when the message was queued.
@@ -34,145 +36,97 @@ thread. it returns true when the message was queued.
 - `sender`: platform user id, `[A-Za-z0-9][A-Za-z0-9@:._ -]{0,127}`.
 - `text`: non-empty; one message must encode to at most 32 kib.
 
-invalid events are dropped with a log line and never reach `bin/abra`. a repeated
-`msg_id` (the conversation's last accepted message or one still pending) is ignored,
-so platform redelivery is safe, including on an archived conversation (no resume
-text is posted). a conversation holds at most 200 pending messages; past that, new
-messages are dropped with a log line and acked `failed`.
+invalid events are dropped with a log line and never reach the agent. a repeated
+`msg_id` (the conversation's last accepted message or one still pending) is
+ignored, so platform redelivery is safe. a conversation holds at most 200 pending
+messages; past that, new messages are dropped with a log line and acked `failed`.
+events submitted while the runtime is stopping are ignored (catch-up picks them up
+on the next start).
 
 output, implemented by the adapter (called from runtime threads, so make them
 thread-safe; `reply` and `ack` from `submit` run while the runtime holds its lock,
 so keep them quick):
 
 - `reply(conv, text)`: post text into the conversation. the adapter chunks to its
-  platform limits.
-- `ack(conv, msg_id, state)`: state is `queued`, `running`, `done`, or `failed`.
-  replace the previous marker on that message (slack: ⏳ 👀 ✅ ❌).
+  platform limits and escapes platform control sequences.
+- `ack(conv, msg_id, state)`: state is `running` when the message reaches the
+  agent, or `failed`. replace the previous marker on that message (slack: 👀 ❌).
 - `history(conv) -> list[Message(msg_id, sender, text)]`: full ordered history,
-  used for resurrection and restart catch-up. report the bot's own posts with
-  `sender` equal to the runtime's bot name: catch-up skips them and resurrection
-  keeps them as context.
+  used for restart catch-up. report the bot's own posts with `sender` equal to the
+  runtime's bot name: catch-up skips them.
 
 exceptions raised by adapter methods are logged by type and never stop the runtime.
-
-## turns, queue, and batch
-
-- at most one turn runs per conversation; different conversations run concurrently
-  up to `workers`.
-- a message is acked `queued` when accepted. messages that arrive while a turn runs
-  stay queued and all go into the next turn, in order, as one `--messages-file`.
-  a batch holds at most 50 messages and 32 kib (bin/abra's limits); any remainder
-  runs in the following turn.
-- a turn acks its messages `running`, then `done` (exit 0) or `failed`.
-- the turn call is
-
-  ```sh
-  <root>/bin/abra run --key <conv> --messages-file <tmp> --work-id <work_id> \
-    [--session-id <uuid>] [--context-file <tmp>]
-  ```
-
-  `--session-id` is passed on the first turn of a session (and after resurrection);
-  `--context-file` only when resurrecting. temp files are 0600 under
-  `data/triggers/tmp/<adapter name>/` (0700) and removed after the call, including
-  when writing them fails. at startup the runtime removes only its own adapter's
-  leftover temp files and stale store temp files. it refuses to start if
-  `data/triggers/tmp` or its adapter directory is a symlink or not a directory
-  (a symlinked `data/triggers` is allowed). argv lists only; no shell.
-- exit 0: the stdout result text is posted with `reply` (nothing is posted when it
-  is empty).
-- exit 75 (busy): the batch is acked `queued` again and retried after a backoff
-  (5s doubling, capped at 300s). there is no `failed` ack.
-- any other exit: the fixed error reply is posted and the batch is acked `failed`.
-  the messages are not retried; a new reply starts a new turn.
-
-bin/abra's stderr is inherited by the runtime's stderr (the deployer's log). stderr,
-tracebacks, and stdout from failed calls are never posted to the conversation.
 
 ## fixed texts
 
 no llm is involved in these; `<name>` is the configured bot name.
 
-- announcement, posted on `start` before the message is queued or any agent runs:
-  `<name> is on it. this thread is now work item <work_id> (session <uuid>). reply in this thread to add to it.`
-- resume, posted when an archived conversation gets a message:
-  `<name> is resuming work item <work_id> (session <uuid>).`
-- error: `<name> hit an error on this turn. reply here to try again.`
+- announcement, posted on `start` before the message is queued:
+  `<name> is on it. this thread is now work item <work_id>. reply in this thread to add to it.`
+- error, posted to each conversation of a turn that errors or is refused:
+  `<name> hit an error on this turn. reply here to try again.`
 
 work ids are `<slug(name)>-<4 lowercase base32 chars>`, unique in the store and
-not already present under `data/`. session ids are lowercase uuid4.
+not already present under `data/`.
 
 ## store
 
 `<root>/data/triggers/<adapter name>.json`, written atomically (temp file, fsync,
 rename) with mode 0600 in a 0700 directory, under a lock. a sibling `.lock` file
 (0600) is held for the process lifetime, so a second runtime for the same adapter
-on the same root refuses to start. a corrupt store fails closed at startup.
+on the same root refuses to start, and `resident.lock` refuses a second runtime
+of any adapter on the root. a corrupt store fails closed at startup. stale
+temp files of this store and of `resident.json` and `bridge.json` are removed at
+startup.
 
 ```json
 {"version": 1, "convs": {"slack:C1:1712.1": {
-  "work_id": "abra-k3q7", "session_id": "<uuid or null>",
-  "created": "2026-10-21T12:00:00Z", "last_used": "2026-10-21T12:05:00Z",
-  "last_msg_id": "1712.9", "archived": false,
-  "fresh": false, "resumed": false, "pending": []}}}
+  "work_id": "abra-k3q7", "created": "2026-10-21T12:00:00Z",
+  "last_used": "2026-10-21T12:05:00Z", "last_msg_id": "1712.9", "pending": []}}}
 ```
 
-`pending` holds accepted messages that have not completed a turn, including the
-batch of a turn interrupted by a restart; they survive restarts and are re-acked
-`queued` and run at startup. `fresh` means the next turn passes `--session-id`;
-`resumed` means it also passes `--context-file`. `fresh` clears after any completed
-turn (exit other than 75), because bin/abra may have stored a session by then and
-rejects `--session-id` for a key with a session. `resumed` clears only after a turn
-exits 0, so a failed resurrection turn keeps the history for the next attempt;
-bin/abra ignores the context once a session is stored.
-
-## archive and resurrection
-
-- at startup and every 24h, conversations idle longer than `archive_days` (no
-  pending work, `last_used` older than the cutoff) are marked archived: `work_id` is
-  kept and `session_id` cleared. then `bin/abra sessions prune --older-than
-  <archive_days>` runs.
-- a message on an archived conversation resurrects it: a new uuid is minted, the
-  resume text is posted, and the next turn passes `--session-id` plus a context file
-  built from `history(conv)`: a note pointing at `data/<work_id>/`, then the first
-  message and the most recent messages that fit in 256 kib, with a count of omitted
-  messages between them. messages in the current batch are left out of the context.
+`pending` holds accepted messages whose turn has not ended; they survive restarts
+and are delivered again at startup (at least once). stores written by the old
+one-shot runtime load as is: their `session_id`, `archived`, `fresh`, and
+`resumed` fields are dropped.
 
 ## catch-up
 
-at startup, for each non-archived conversation used within `catchup_hours` (24),
-history messages after `last_msg_id` are queued (bot posts skipped). if
-`last_msg_id` is not in the history, catch-up is skipped for that conversation.
+at startup, for each conversation used within `catchup_hours` (24), history
+messages after `last_msg_id` are queued (bot posts skipped). if `last_msg_id` is
+not in the history, catch-up is skipped for that conversation.
 
 ## security
 
 - all event fields and history are untrusted. inputs are validated against fixed
-  patterns and size bounds; invalid events are dropped. bin/abra wraps every message
-  and the context in nonce-delimited untrusted blocks naming the sender.
-- logs name conv keys, work ids, msg ids, sender ids, counts, and exit codes only;
-  never message text or history content. log lines are lowercase.
-- the store and temp files contain message text in plaintext (0600). keep instance
-  roots on an encrypted volume on a single-tenant host or container.
-- anybody who can post in a conversation the bot was tagged into can add turns.
-  scope the bot's platform membership accordingly; bin/abra treats every message
-  as a request from its sender, never as operator authority.
+  patterns and size bounds; invalid events are dropped. every message reaches the
+  agent in a nonce-delimited untrusted block naming its sender.
+- logs name conv keys, work ids, msg ids, sender ids, counts, sizes, and error
+  codes only; never message text, agent output, or tokens. log lines are lowercase.
+- the store, `resident.json`, and the agent's own session files contain message
+  text in plaintext (0600). keep instance roots on an encrypted volume on a
+  single-tenant host or container.
+- anybody who can post in a conversation the bot was tagged into can add messages.
+  scope the bot's platform membership accordingly; abra treats every message as a
+  request from its sender, never as operator authority.
+- one instance is one trust boundary: every conversation shares the resident
+  session's context.
 
 ## running against an instance root
 
-any abra root works, base or specialty; many runtimes can run in parallel against
-different roots or with different adapters.
+any abra root works, base or specialty; one runtime per root.
 
 ```sh
-python3 triggers/cli.py --root /path/to/abra-instance --name helper
+ABRA_AGENT_CMD="npx @agentclientprotocol/claude-agent-acp" \
+  python3 triggers/cli.py --root /path/to/abra-instance --name helper
 ```
 
 | setting | effect |
 | --- | --- |
 | `--root` | abra instance root; must contain an executable `bin/abra` |
 | `--name` | bot name used in fixed texts and work ids, default `abra` |
-| `ABRA_ARCHIVE_DAYS` | days before an idle conversation is archived, default 90 |
-| `ABRA_TRIGGER_WORKERS` | concurrent turns, default 2 |
 
-bin/abra's own `ABRA_MAX_CONCURRENCY` still applies; busy exits are retried.
+the agent settings are in the table under resident session below.
 
 ## slack adapter
 
@@ -183,16 +137,17 @@ bin/abra's own `ABRA_MAX_CONCURRENCY` still applies; busy exits are retried.
 
 `triggers/cli.py` reads json-lines events on stdin and writes replies and acks as
 json lines on stdout. history is served from the events and replies it has seen.
-at end of input it waits for queued work to finish, then exits.
+at end of input it waits until nothing is pending or running, then exits; it
+exits 1 if the agent stopped. sigint or sigterm stops it like the slack adapter.
 
 ```sh
 printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": "U1", "text": "hello"}' \
-  | python3 triggers/cli.py --root "$PWD"
+  | ABRA_AGENT_CMD="npx @agentclientprotocol/claude-agent-acp" python3 triggers/cli.py --root "$PWD"
 ```
 
 ```json
 {"type": "reply", "conv": "cli:demo:1", "text": "abra is on it. ..."}
-{"type": "ack", "conv": "cli:demo:1", "msg_id": "1", "state": "queued"}
+{"type": "ack", "conv": "cli:demo:1", "msg_id": "1", "state": "running"}
 ```
 
 ## writing an adapter
@@ -204,6 +159,137 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
 3. map platform events: a bot mention outside a known conversation is `start`;
    every other message in a thread or conversation is `message`. ignore the bot's
    own posts at intake.
-4. call `submit` for each event; call `stop()` on shutdown. pending work stays
-   stored and resumes on the next start.
+4. call `submit` for each event; call `stop()` on shutdown and exit non-zero when
+   `runtime.crashed` is set. pending work stays stored and resumes on the next
+   start.
 5. keep platform credentials in the deployer's secret store, never in the repo.
+
+## resident session
+
+- start: runs the specialty check, opens the bridge socket, spawns `ABRA_AGENT_CMD`
+  (split like a shell would, run as an argv list with cwd = the instance root, in
+  its own process group) and initializes it. a stored session for the same command
+  (`data/triggers/resident.json`, 0600) is resumed (session/resume, else
+  session/load) with a restart event; otherwise a new session starts lazily with
+  the bootstrap event when the first message arrives.
+- inbox: messages from all conversations queue in arrival order. at most one
+  runtime prompt is outstanding; the next prompt batches every waiting message
+  (up to 50 messages or 256 kib), grouped by conversation.
+- steering: while a prompt runs, new messages are sent with `_session/steering`
+  (`idleBehavior: promptRequired`). `injected` adds them to the running turn;
+  `startedNewTurn` means the agent took them in a turn the runtime does not await,
+  so they count as handled; `promptRequired`, `failed`, or an error leave them for
+  the next prompt; -32601 turns steering off.
+- framing: `bin/abra`'s `resident_prompt` (shared with the one-shot framing): a
+  trusted header and `runtime event:` lines, then per conversation its key and work
+  id and one nonce-fenced untrusted block per message with `msg_id` and `from`.
+- replies: abra posts with `reply(work_id, text)` through the mcp bridge. if a
+  turn's messages all came from one conversation and abra did not reply to it, the
+  turn's final text (after its last tool call) is posted there.
+- markers: `running` (eyes on slack) when a message reaches the agent; `failed`
+  (x) with the fixed error text when the prompt errors or is refused. when the
+  agent itself ends a turn `cancelled` (claude-agent-acp does after a rejected
+  permission), its messages get one more turn, then fail the same way. an
+  unexpected error while preparing a turn fails that batch; an internal error in
+  the dispatcher stops the runtime like a crash. no queued or
+  done markers. messages stay pending in the store until their turn ends, so a
+  crash re-delivers them (at least once).
+- permissions: the runtime answers permission requests itself and allows only the
+  bridge's reply tool, once: claude-agent-acp's `toolName` must be
+  `mcp__abra__reply`, its `mcpServer` must be present and named `abra`, and the
+  request must carry the resident session's id. the session check does not tell
+  subagents apart: abra does not advertise the acp `subagents` capability, so
+  claude-agent-acp sends their requests with the root session id too. a request
+  carrying `parentToolUseId` (a subagent's call) is rejected, but that is best
+  effort, since the adapter can miss it. "only the coordinator posts" therefore
+  rests on the AGENTS.md rule plus this check; a reply that slips through still
+  reaches only this instance's work ids and is rate limited. everything else is
+  rejected. other agents do not send these fields, so outside
+  agent mode (for example codex) abra cannot post and only the single-conversation
+  free-text fallback reaches the thread. with `ABRA_AGENT_MODE=1` (container only) it sets
+  the session mode to `bypassPermissions` (claude) or `agent-full-access` (codex)
+  when offered; codex-acp can also start that way with `INITIAL_AGENT_MODE`.
+- jobs: `bin/abra job NAME` hands the job to a running resident runtime over the
+  bridge socket (named with its token in `data/triggers/bridge.json`, 0600; the
+  socket moves to a private temp directory when the root's path is too long for a
+  unix socket); the runtime reads
+  the job prompt from the specialty and sends it as a runtime event. waiting jobs
+  (at most 20) are kept in `resident.json` until a turn delivers them, so a crash
+  does not lose them. with no runtime listening, the job runs one-shot as before.
+- specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`,
+  and the bootstrap event runs the AGENTS.md startup, which reads it for any agent.
+  the pack's `mcp_config` stdio and http servers are passed in `mcpServers`.
+- wake: tool calls still open when their turn ends count as background work. when
+  one completes while no runtime prompt runs, the runtime waits `ABRA_WAKE_GRACE`
+  seconds (default 20); if the agent does not start a turn by itself (claude does,
+  codex does not), it sends one `background work finished` event.
+- heartbeat: every `ABRA_HEARTBEAT` seconds (default 1800, 0 turns it off) while
+  a session is live and idle, the runtime runs `bin/tasks list --state in_flight` and sends a heartbeat
+  event only when tasks are in flight. no file watchers.
+- idle clear: when nothing is pending, queued, or running in the background and
+  the session has been idle for `ABRA_IDLE_CLEAR` seconds (default 600, 0 is off),
+  the runtime sends a checkpoint event ("save your notes": update every
+  unfinished task body), waits for it to end however it ends, closes the
+  session, and forgets its id. the instance then stays cold (no heartbeat) until
+  the next event, which starts a new session with the bootstrap event. a session
+  older than `ABRA_MAX_SESSION_AGE` seconds (default 7 days) is rotated the same
+  way after one quiet minute. messages that arrive during a checkpoint wait for
+  the new session.
+- crash: if the agent exits, the runtime stops dispatching and the adapter exits
+  non-zero for the orchestrator to restart it; pending messages are re-delivered
+  on the next start. sigterm stops intake, waits up to 60 seconds for the running
+  turn (its messages stay pending if it does not finish), closes the session, and
+  kills the agent's process group. the session id stays stored for the restart.
+
+| setting | effect |
+| --- | --- |
+| `ABRA_AGENT_CMD` | acp agent command (required), e.g. `npx @agentclientprotocol/claude-agent-acp`; the container sets it |
+| `ABRA_AGENT_MODE` | `1` sets the unattended session mode (container only) |
+| `ABRA_WAKE_GRACE` | seconds to wait for a self-started turn, default 20 |
+| `ABRA_HEARTBEAT` | idle heartbeat period in seconds, default 1800; 0 is off |
+| `ABRA_IDLE_CLEAR` | idle seconds before checkpoint and clear, default 600; 0 is off |
+| `ABRA_MAX_SESSION_AGE` | session age in seconds before rotation, default 604800 |
+
+## acp client
+
+`triggers/acp.py` is a stdlib acp v1 client (agent client protocol, json-rpc 2.0
+over newline-delimited stdio) for driving an agent adapter such as
+`claude-agent-acp` or `codex-acp`. the resident session runs on it.
+
+- `Client(argv, ...)` spawns the adapter (argv list, no shell) in its own process
+  group. `start()`, `initialize()` (protocol version 1, no fs or terminal
+  capabilities), then `new_session`, `load_session`, `resume_session`, `prompt`
+  (blocks until the stop reason), `cancel`, `set_mode`, `close_session`, and
+  `steer` (`_session/steering`; returns the outcome, raises `MethodNotFound` when
+  the agent lacks it). load, resume, and close raise `Unsupported` without sending
+  when the agent did not advertise them.
+- `on_update(params)` receives every `session/update`, during or outside a prompt.
+  `permission(params)` returns an offered option id; anything else, including an
+  exception, rejects (default: reject all). other agent requests (`fs/*`,
+  `terminal/*`, unknown) get -32601.
+- callbacks run on one dispatcher thread in arrival order, so a prompt returns
+  only after its updates were delivered. they must return quickly: never make
+  blocking client calls or wait on a human from a callback.
+- lines over `max_line` (8 mib), invalid or too deeply nested json, and non-objects
+  are dropped and logged by type. logs carry allowlisted method names, ids, sizes,
+  and error codes, never content. `RemoteError` keeps the agent's message in
+  `.message`, not in `str()`.
+- a waiter thread reaps the agent: when it exits (even if a child keeps stdout
+  open), the rest of its process group is killed, pending calls fail with
+  `AgentExited`, and `on_exit(code)` runs. `close()` sends nothing, closes stdin,
+  sigterms the process group, sigkills it after `kill_timeout`, and reaps.
+
+## mcp bridge
+
+`triggers/mcp_bridge.py` gives a resident agent one tool, `reply(work_id, text)`.
+the agent spawns it as a stdio mcp server (`mcpServers` in session/new); each call
+is relayed to the runtime over a unix socket in `data/triggers/` (directory 0700,
+socket 0600) with a random per-start token from the shim's environment, compared
+in constant time. the runtime:
+
+- accepts only `[a-z0-9]+(-[a-z0-9]+)*` work ids that it minted, and resolves the
+  conversation from its own store; no tool takes a channel, thread, or user id.
+- refuses empty text and text over 32 kib, and allows at most 20 replies per
+  conversation per minute.
+- posts through the adapter, which escapes output as for any reply.
+- logs the work id, conversation key, size, and tool use id; never text or token.

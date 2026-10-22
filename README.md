@@ -98,9 +98,12 @@ text to stdout, and logs progress to stderr. session ids are stored per key in
 `data/sessions.json`. keys match `[A-Za-z0-9][A-Za-z0-9:._-]{0,127}` (uppercase is
 allowed for chat ids); requesters also allow `@` and spaces; event text is limited
 to 32 kib of utf-8. `job <name>` reads `jobs.<name>.prompt` from the specialty's
-`specialty.json` and uses the key `job:<name>:<utc yyyy-mm-dd>`.
+`specialty.json` and uses the key `job:<name>:<utc yyyy-mm-dd>`. when a resident
+trigger runtime is running on this root (`data/triggers/bridge.json`), the job is
+handed to its session as a runtime event instead of running one-shot.
 
-`run` options for trigger runtimes that batch a conversation's queued messages:
+`run` options for callers that batch a conversation's queued messages (the
+trigger runtime no longer uses them; it hosts a resident session):
 
 - `--messages-file M` replaces `--text`/`--text-file`: a json array of 1 to 50
   objects with exactly `from` (requester pattern) and non-empty `text`, at most
@@ -154,9 +157,11 @@ retries, and process supervision belong to the deployer.
 
 ## triggers
 
-`triggers/` holds a shared runtime that turns chat or ticket conversations into
-`bin/abra` turns: tag the bot to start a work item, reply in the thread to add to
-it. adapters are thin; `triggers/cli.py` is the json-lines reference adapter and
+`triggers/` holds a shared runtime that feeds chat or ticket conversations into
+one resident agent session over acp (claude via `claude-agent-acp`, codex via
+`codex-acp`, or any acp agent in `ABRA_AGENT_CMD`): tag the bot to start a work
+item, reply in the thread to add to it, and abra answers each thread with its
+`reply` tool. adapters are thin; `triggers/cli.py` is the json-lines reference adapter and
 `triggers/slack.py` serves slack threads ([docs/slack.md](docs/slack.md)). see
 [docs/triggers.md](docs/triggers.md).
 

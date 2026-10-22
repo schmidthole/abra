@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -465,6 +466,32 @@ class ImageConfigTests(unittest.TestCase):
         self.assertIn("black==", (REPO / "requirements-dev.txt").read_text())
         self.assertIn("requirements-dev.txt", self.dockerfile)
         self.assertGreaterEqual(self.dockerfile.count("--require-hashes"), 2)
+
+    def test_acp_adapter_pinned_by_lockfile(self):
+        directory = REPO / "docker/claude-agent-acp"
+        manifest = json.loads((directory / "package.json").read_text())
+        dependencies = manifest["dependencies"]
+        self.assertEqual(list(dependencies), ["@agentclientprotocol/claude-agent-acp"])
+        version = dependencies["@agentclientprotocol/claude-agent-acp"]
+        self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
+        lock = json.loads((directory / "package-lock.json").read_text())
+        packages = lock["packages"]
+        adapter = packages["node_modules/@agentclientprotocol/claude-agent-acp"]
+        self.assertEqual(adapter["version"], version)
+        for name, entry in packages.items():
+            if name:
+                self.assertRegex(entry.get("integrity", ""), r"^sha512-", name)
+                self.assertFalse(entry.get("hasInstallScript"), name)
+        self.assertIn("npm ci --omit=dev --ignore-scripts", self.dockerfile)
+        self.assertIn(
+            "ABRA_AGENT_CMD=/opt/claude-agent-acp/node_modules/.bin/claude-agent-acp",
+            self.dockerfile,
+        )
+        self.assertIn("CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude", self.dockerfile)
+
+    def test_retired_one_shot_trigger_settings_not_shared(self):
+        for name in ("ABRA_ARCHIVE_DAYS", "ABRA_TRIGGER_WORKERS"):
+            self.assertNotIn(name, entrypoint.SHARED)
 
     def test_runs_as_abra_under_tini_without_baked_secrets(self):
         users = re.findall(r"^USER (\S+)$", self.dockerfile, re.M)
