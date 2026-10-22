@@ -174,6 +174,11 @@ python3 triggers/cli.py --root /path/to/abra-instance --name helper
 
 bin/abra's own `ABRA_MAX_CONCURRENCY` still applies; busy exits are retried.
 
+## slack adapter
+
+`triggers/slack.py` serves slack threads over socket mode. see
+[slack.md](slack.md) for setup and security notes.
+
 ## reference adapter
 
 `triggers/cli.py` reads json-lines events on stdin and writes replies and acks as

@@ -1,0 +1,33 @@
+# slack app manifest template for triggers/slack.py.
+# replace every "abra" below with the bot name you pass as --name.
+display_information:
+  name: abra
+  description: abra trigger bot. tag it to start a work item; reply in the thread to add to it.
+features:
+  bot_user:
+    display_name: abra
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      # receive app_mention events (starting a work item)
+      - app_mentions:read
+      # message.channels events and conversations.replies in public channels
+      - channels:history
+      # message.groups events and conversations.replies in private channels
+      - groups:history
+      # post the announcement, results, and error replies in the thread
+      - chat:write
+      # add and remove the queued, running, done, and failed markers
+      - reactions:write
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
