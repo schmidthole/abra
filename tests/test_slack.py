@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -94,8 +95,10 @@ class SlackAdapterTests(unittest.TestCase):
     def test_identify_uses_bot_user_id_and_fails_closed(self):
         self.assertEqual((self.adapter.user_id, self.adapter.bot_id), ("UBOT", "BBOT"))
         self.client.failures["auth_test"] = ["invalid_auth"]
-        with self.assertRaises(ValueError):
-            slack.SlackAdapter(self.client, "abra").identify()
+        with self.assertLogs("abra.triggers", level="WARNING") as logs:
+            with self.assertRaises(ValueError):
+                slack.SlackAdapter(self.client, "abra").identify()
+        self.assertIn("slack auth_test failed: invalid_auth", "\n".join(logs.output))
 
     def test_top_level_mention_starts_conversation(self):
         event = self.adapter.intake(mention(), True)
@@ -155,10 +158,16 @@ class SlackAdapterTests(unittest.TestCase):
             self.assertIsNone(
                 self.adapter.intake(mention(subtype="message_changed"), True)
             )
+            self.assertIsNone(self.adapter.intake(mention(channel="D1"), True))
+            self.assertIsNone(
+                self.adapter.intake(mention(channel="G1", channel_type="mpim"), True)
+            )
+            self.assertIsNone(self.adapter.intake(message(channel_type="mpim"), False))
         output = "\n".join(logs.output)
         self.assertNotIn("look", output)
         self.assertNotIn("help", output)
         self.assertIn("top-level message", output)
+        self.assertIn("direct or group message", output)
         self.assertIn("mention handled by app_mention", output)
 
     def test_mention_rewrite_uses_id_not_display_name(self):
@@ -185,6 +194,32 @@ class SlackAdapterTests(unittest.TestCase):
         self.assertEqual("\n".join(p["text"] for p in posts), text)
         self.assertEqual([len(c) for c in slack.chunks("y" * 8000)], [3900, 3900, 200])
         self.assertEqual(slack.chunks("short"), ["short"])
+
+    def test_reply_neutralizes_broadcasts_mentions_and_links(self):
+        text = (
+            "hi <!channel> <!here> <!everyone> <@U123> <https://evil|bank> a&b *bold*"
+        )
+        self.adapter.reply("slack:C1:100.1", text)
+        posted = self.client.made("chat_postMessage")[0]["text"]
+        self.assertEqual(
+            posted,
+            "hi &lt;!channel&gt; &lt;!here&gt; &lt;!everyone&gt; &lt;@U123&gt;"
+            " &lt;https://evil|bank&gt; a&amp;b *bold*",
+        )
+        self.assertNotIn("<", posted)
+        self.assertNotIn(">", posted)
+
+    def test_escaped_reply_chunks_stay_bounded_without_split_entities(self):
+        for text in ("<" * 5000, "a" + "&" * 4000, "<!channel>" * 900):
+            self.client.calls.clear()
+            self.adapter.reply("slack:C1:100.1", text)
+            posts = [p["text"] for p in self.client.made("chat_postMessage")]
+            self.assertGreater(len(posts), 1)
+            for post in posts:
+                self.assertLessEqual(len(post), 3900)
+                self.assertNotRegex(post, r"&[a-z]{0,3}$")
+                self.assertNotRegex(post, r"^[a-z]{1,3};")
+            self.assertEqual("".join(posts), slack.escape(text))
 
     def test_reply_stops_and_logs_code_only_on_api_error(self):
         self.client.failures["chat_postMessage"] = ["channel_not_found"]
@@ -440,6 +475,9 @@ class SlackMainTests(unittest.TestCase):
             return made["app"], made["socket"]
 
         argv = ["--root", str(self.root), "--name", "helper"]
+        root = logging.getLogger()
+        handlers = list(root.handlers)
+        self.addCleanup(setattr, root, "handlers", handlers)
         with self.assertLogs("abra.triggers", level="INFO") as logs:
             code = slack.main(argv, self.env, connect)
         self.assertEqual(code, 0)

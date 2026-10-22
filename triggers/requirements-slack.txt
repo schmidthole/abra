@@ -1,4 +1,4 @@
-# slack adapter only; base abra stays stdlib. install in a virtualenv:
-#   python3 -m venv .venv-slack && .venv-slack/bin/pip install -r triggers/requirements-slack.txt
+# slack adapter only; base abra stays stdlib. install in a virtualenv outside
+# the repo, see docs/slack.md.
 slack_bolt==1.30.0
 slack_sdk==3.45.0

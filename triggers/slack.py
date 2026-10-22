@@ -14,6 +14,7 @@ import runtime
 
 
 CHANNEL = re.compile(r"[CG][A-Z0-9]{1,31}")
+DIRECT = re.compile(r"D[A-Z0-9]{1,31}")
 USER = re.compile(r"[UW][A-Z0-9]{1,31}")
 BOT = re.compile(r"B[A-Z0-9]{1,31}")
 TS = re.compile(r"[0-9]{1,12}\.[0-9]{1,9}")
@@ -43,10 +44,19 @@ def chunks(text, size=CHUNK):
         cut = text.rfind("\n", 0, size + 1)
         if cut <= 0:
             cut = size
+            # never split an escaped entity such as &amp;
+            amp = text.rfind("&", max(0, cut - 4), cut)
+            if amp > 0 and ";" not in text[amp:cut]:
+                cut = amp
         parts.append(text[:cut])
         text = text[cut:].lstrip("\n")
     parts.append(text)
     return [part for part in parts if part.strip()]
+
+
+def escape(text):
+    """neutralize slack control sequences: broadcasts, mentions, and links."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def order(ts):
@@ -134,6 +144,8 @@ class SlackAdapter:
         if not isinstance(event, dict):
             return self._ignore(None, None, "not an object")
         channel, ts, thread = (event.get(k) for k in ("channel", "ts", "thread_ts"))
+        if isinstance(channel, str) and DIRECT.fullmatch(channel):
+            return self._ignore(None, ts, "direct or group message")
         if not isinstance(channel, str) or not CHANNEL.fullmatch(channel):
             return self._ignore(None, None, "invalid channel")
         if not isinstance(ts, str) or not TS.fullmatch(ts):
@@ -147,8 +159,11 @@ class SlackAdapter:
         if reason:
             return self._ignore(conv, ts, reason)
         text = event["text"]
+        channel_type = event.get("channel_type")
+        if channel_type in ("im", "mpim"):
+            return self._ignore(conv, ts, "direct or group message")
         if not mention:
-            if event.get("channel_type") not in ("channel", "group"):
+            if channel_type not in ("channel", "group"):
                 return self._ignore(conv, ts, "not a channel message")
             if thread is None or thread == ts:
                 return self._ignore(conv, ts, "top-level message")
@@ -179,7 +194,7 @@ class SlackAdapter:
 
     def reply(self, conv, text):
         channel, thread = self.split(conv)
-        for part in chunks(text):
+        for part in chunks(escape(text)):
             response = self._call(
                 "chat_postMessage",
                 channel=channel,

@@ -14,6 +14,11 @@ host needs outbound https only and no public endpoint.
 - every later reply in that thread, from anybody in the channel, is added to the
   session. top-level messages without a tag are ignored.
 - a reply that tags the bot is handled once, through its `app_mention` event.
+- direct messages and group dms are ignored. a group dm mention that slack does
+  not label with a channel type cannot be told apart from a private channel
+  without extra scopes, so do not add the bot to group dms.
+- result text is escaped (`&`, `<`, `>`), so output cannot trigger `@channel`,
+  `@here`, user mentions, or labeled links.
 - the bot's own posts, other bots and apps, edits, deletes, joins, and other
   message subtypes are ignored (`thread_broadcast` and `file_share` replies count
   as ordinary replies; only their text is used). `<@BOTID>` in text becomes
@@ -48,18 +53,19 @@ host needs outbound https only and no public endpoint.
    or command-line arguments.
 5. invite the bot to each channel it should serve (`/invite @abra`). it only sees
    channels it is a member of.
-6. install the adapter dependency in a virtualenv (base abra stays stdlib):
+6. install the adapter dependency in a virtualenv outside the abra checkout and
+   instance roots (base abra stays stdlib):
 
    ```sh
-   python3 -m venv .venv-slack
-   .venv-slack/bin/pip install -r triggers/requirements-slack.txt
+   python3 -m venv ~/.venvs/abra-slack
+   ~/.venvs/abra-slack/bin/pip install -r triggers/requirements-slack.txt
    ```
 
 7. run it against an abra root, base or specialty:
 
    ```sh
    SLACK_BOT_TOKEN=... SLACK_APP_TOKEN=... \
-     .venv-slack/bin/python triggers/slack.py --root /path/to/abra-instance --name abra
+     ~/.venvs/abra-slack/bin/python triggers/slack.py --root /path/to/abra-instance --name abra
    ```
 
    a missing or malformed token exits 1 naming the variable. sigint or sigterm
