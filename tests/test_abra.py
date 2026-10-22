@@ -13,10 +13,8 @@ import textwrap
 import time
 import unittest
 
-
 SOURCE = Path(__file__).resolve().parents[1] / "bin/abra"
-STUB = textwrap.dedent(
-    """\
+STUB = textwrap.dedent("""\
     import json, os, sys, time
     prompt = sys.stdin.buffer.read().decode("utf-8")
     with open(os.environ["STUB_LOG"], "a") as handle:
@@ -46,8 +44,7 @@ STUB = textwrap.dedent(
         count = sum(1 for _ in open(os.environ["STUB_LOG"]))
         print(json.dumps({"is_error": False, "result": "reply " + str(count),
                           "session_id": "session-" + str(count)}))
-    """
-)
+    """)
 
 
 class AbraTests(unittest.TestCase):

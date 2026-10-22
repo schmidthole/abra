@@ -12,7 +12,6 @@ import threading
 
 import runtime
 
-
 CHANNEL = re.compile(r"[CG][A-Z0-9]{1,31}")
 DIRECT = re.compile(r"D[A-Z0-9]{1,31}")
 USER = re.compile(r"[UW][A-Z0-9]{1,31}")

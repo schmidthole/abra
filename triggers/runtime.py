@@ -17,7 +17,6 @@ import threading
 import time
 import uuid
 
-
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}")
 REQUESTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9@:._ -]{0,127}")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,31}")

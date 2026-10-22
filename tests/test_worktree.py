@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-
 SPEC = importlib.util.spec_from_file_location(
     "worktree", Path(__file__).resolve().parents[1] / "bin/worktree.py"
 )
