@@ -376,7 +376,8 @@ def main(argv=None, env=None, connect=build):
         socket.connect()
         log.info("listening for slack events as %s", args.name)
         while not done.wait(1):
-            pass
+            if instance.crashed.is_set():
+                break
         log.info("shutting down; pending messages stay stored")
     except Exception as error:
         log.error("slack connection failed: %s", error_code(error))
@@ -389,6 +390,9 @@ def main(argv=None, env=None, connect=build):
         except Exception as error:
             log.warning("could not close slack connection: %s", error_code(error))
         instance.stop()
+    if instance.crashed.is_set():
+        log.error("error: the agent stopped; pending messages stay stored")
+        return 1
     return 0
 
 

@@ -194,6 +194,7 @@ class Runtime:
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.stopping = threading.Event()
+        self.crashed = threading.Event()
         self.ready = queue.Queue()
         self.convs = {}
         self.scheduled = set()
@@ -207,6 +208,25 @@ class Runtime:
     # lifecycle
 
     def start(self):
+        self._open()
+        self.archive()
+        with self.lock:
+            for conv, entry in self.convs.items():
+                for message in entry["pending"]:
+                    self._ack(conv, message["msg_id"], "queued")
+                if entry["pending"]:
+                    self._schedule(conv)
+        self._catch_up()
+        for _ in range(self.workers):
+            thread = threading.Thread(target=self._work, daemon=True)
+            thread.start()
+            self.threads.append(thread)
+        thread = threading.Thread(target=self._archive_loop, daemon=True)
+        thread.start()
+        self.threads.append(thread)
+
+    def _open(self):
+        """private directories, the instance lock, stale temp files, and the store."""
         # refuse symlinked or non-directory temp dirs before any chmod or sweep
         for directory in (self.directory / "tmp", self.scratch):
             try:
@@ -244,21 +264,6 @@ class Runtime:
         with self.lock:
             self.convs = self._load()
         log.info("starting %s with %d conversations", self.path.name, len(self.convs))
-        self.archive()
-        with self.lock:
-            for conv, entry in self.convs.items():
-                for message in entry["pending"]:
-                    self._ack(conv, message["msg_id"], "queued")
-                if entry["pending"]:
-                    self._schedule(conv)
-        self._catch_up()
-        for _ in range(self.workers):
-            thread = threading.Thread(target=self._work, daemon=True)
-            thread.start()
-            self.threads.append(thread)
-        thread = threading.Thread(target=self._archive_loop, daemon=True)
-        thread.start()
-        self.threads.append(thread)
 
     def stop(self):
         """stop intake scheduling, let running turns finish, keep pending stored."""
@@ -282,7 +287,9 @@ class Runtime:
     def wait_idle(self, timeout=None):
         """block until no conversation has queued or running work."""
         with self.changed:
-            return self.changed.wait_for(lambda: not self.scheduled, timeout)
+            return self.changed.wait_for(
+                lambda: not self.scheduled or self.crashed.is_set(), timeout
+            )
 
     # intake
 
@@ -343,8 +350,11 @@ class Runtime:
             del self.convs[conv]
             raise
         log.info("started %s as work item %s", conv, work_id)
-        self._reply(conv, announcement(self.name, work_id, session_id))
+        self._announce(conv, work_id, session_id)
         return entry
+
+    def _announce(self, conv, work_id, session_id):
+        self._reply(conv, announcement(self.name, work_id, session_id))
 
     def _mint(self):
         taken = {entry["work_id"] for entry in self.convs.values()}
@@ -744,24 +754,27 @@ class Runtime:
 
     def _save(self):
         """atomic 0600 write; caller holds self.lock."""
-        data = json.dumps(
-            {"version": 1, "convs": self.convs}, indent=2, ensure_ascii=False
-        )
-        descriptor, temporary = tempfile.mkstemp(
-            dir=self.directory, prefix="." + self.path.name, suffix=".tmp"
-        )
+        write_private(self.path, {"version": 1, "convs": self.convs})
+
+
+def write_private(path, value):
+    """atomically replace path with json, readable only by the owner."""
+    data = json.dumps(value, indent=2, ensure_ascii=False)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix="." + path.name, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(data + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(data + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-        except BaseException:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def add_arguments(parser):
@@ -770,7 +783,12 @@ def add_arguments(parser):
 
 
 def from_args(adapter, args, env, **options):
-    """build a runtime from --root/--name and abra_archive_days/abra_trigger_workers."""
+    """build a runtime from --root/--name and the environment; abra_resident=1
+    selects the resident backend (see resident.from_env)."""
+    if env.get("ABRA_RESIDENT", "") == "1":
+        import resident
+
+        return resident.from_env(adapter, args, env, **options)
     settings = {}
     for variable, key in (
         ("ABRA_ARCHIVE_DAYS", "archive_days"),

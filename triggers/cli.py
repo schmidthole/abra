@@ -85,11 +85,16 @@ def main(argv=None):
                 continue
             adapter.remember(event.conv, event.msg_id, event.sender, event.text)
             instance.submit(event)
+            if instance.crashed.is_set():
+                break
         instance.wait_idle()
     except KeyboardInterrupt:
         runtime.log.info("interrupted; pending messages stay stored")
     finally:
         instance.stop()
+    if instance.crashed.is_set():
+        runtime.log.error("error: the agent stopped; pending messages stay stored")
+        return 1
     return 0
 
 

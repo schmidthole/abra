@@ -208,6 +208,59 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
    stored and resumes on the next start.
 5. keep platform credentials in the deployer's secret store, never in the repo.
 
+## resident mode
+
+with `ABRA_RESIDENT=1` the runtime hosts one long-lived agent session over acp
+instead of one `bin/abra` turn per conversation. one adapter per instance.
+
+- start: runs the specialty check, opens the bridge socket, spawns `ABRA_AGENT_CMD`
+  (split like a shell would, run as an argv list with cwd = the instance root, in
+  its own process group) and initializes it. a stored session for the same command
+  (`data/triggers/resident.json`, 0600) is resumed (session/resume, else
+  session/load) with a restart event; otherwise a new session starts lazily with
+  the bootstrap event when the first message arrives.
+- inbox: messages from all conversations queue in arrival order. at most one
+  runtime prompt is outstanding; the next prompt batches every waiting message
+  (up to 50 messages or 256 kib), grouped by conversation.
+- steering: while a prompt runs, new messages are sent with `_session/steering`
+  (`idleBehavior: promptRequired`). `injected` adds them to the running turn;
+  `startedNewTurn` means the agent took them in a turn the runtime does not await,
+  so they count as handled; `promptRequired`, `failed`, or an error leave them for
+  the next prompt; -32601 turns steering off.
+- framing: `bin/abra`'s `resident_prompt` (shared with the one-shot framing): a
+  trusted header and `runtime event:` lines, then per conversation its key and work
+  id and one nonce-fenced untrusted block per message with `msg_id` and `from`.
+- replies: abra posts with `reply(work_id, text)` through the mcp bridge. if a
+  turn's messages all came from one conversation and abra did not reply to it, the
+  turn's final text (after its last tool call) is posted there.
+- markers: `running` (eyes on slack) when a message reaches the agent; `failed`
+  (x) with the fixed error text when the prompt errors or is refused. no queued or
+  done markers. messages stay pending in the store until their turn ends, so a
+  crash re-delivers them (at least once).
+- permissions: the runtime answers permission requests itself and allows only the
+  bridge's reply tool (`mcp__abra__reply`, as claude-agent-acp names it), once;
+  everything else is rejected. with `ABRA_AGENT_MODE=1` (container only) it sets
+  the session mode to `bypassPermissions` (claude) or `agent-full-access` (codex)
+  when offered; codex-acp can also start that way with `INITIAL_AGENT_MODE`.
+- jobs: `bin/abra job NAME` hands the job to a running resident runtime over the
+  bridge socket (named with its token in `data/triggers/bridge.json`, 0600; the
+  socket moves to a private temp directory when the root's path is too long for a
+  unix socket); the runtime reads
+  the job prompt from the specialty and sends it as a runtime event. with no
+  runtime listening, the job runs one-shot as before.
+- specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`,
+  and the bootstrap event runs the AGENTS.md startup, which reads it for any agent.
+  the pack's `mcp_config` stdio and http servers are passed in `mcpServers`.
+- crash: if the agent exits, the runtime stops dispatching and the adapter exits
+  non-zero for the orchestrator to restart it. sigterm stops intake, waits for the
+  running turn, closes the session, and kills the agent's process group.
+
+| setting | effect |
+| --- | --- |
+| `ABRA_RESIDENT` | `1` selects resident mode |
+| `ABRA_AGENT_CMD` | acp agent command, e.g. `npx @agentclientprotocol/claude-agent-acp` |
+| `ABRA_AGENT_MODE` | `1` sets the unattended session mode (container only) |
+
 ## acp client
 
 `triggers/acp.py` is a stdlib acp v1 client (agent client protocol, json-rpc 2.0
