@@ -1,10 +1,11 @@
-"""exercise the slack adapter with a fake slack client and a stub bin/abra."""
+"""exercise the slack adapter with a fake slack client and a fake acp agent."""
 
 import importlib.util
 import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import threading
 import time
 import unittest
 
-from test_triggers import STUB, TRIGGERS
+from test_triggers import FAKE, TRIGGERS
 
 import runtime  # noqa: E402
 import slack  # noqa: E402
@@ -391,17 +392,20 @@ class FakeSocket:
 
 class SlackMainTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        # short paths keep the unix socket under the platform limit
+        self.temporary = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name) / "home"
+        self.root = Path(self.temporary.name).resolve() / "home"
         (self.root / "bin").mkdir(parents=True)
-        stub = self.root / "bin/abra"
-        stub.write_text("#!" + sys.executable + "\n" + STUB)
-        stub.chmod(0o755)
-        (self.root / "stub.json").write_text(json.dumps({}))
+        shutil.copy(TRIGGERS.parent / "bin/abra", self.root / "bin/abra")
+        self.log = Path(self.temporary.name) / "agent.log"
+        config = Path(self.temporary.name) / "agent.json"
+        config.write_text(json.dumps({"log": str(self.log)}))
         self.env = {
             "SLACK_BOT_TOKEN": "xoxb-1111-supersecretbot",
             "SLACK_APP_TOKEN": "xapp-1-supersecretapp",
+            "ABRA_AGENT_CMD": " ".join([sys.executable, str(FAKE), str(config)]),
+            "ABRA_HEARTBEAT": "0",
         }
 
     def run_main(self, env, *extra):
@@ -454,14 +458,16 @@ class SlackMainTests(unittest.TestCase):
     def drive(self, app):
         """socket thread: deliver events, wait for the turn, then send sigterm."""
         try:
-            app.listeners["app_mention"](event=mention("<@UBOT> private words"))
+            app.listeners["app_mention"](
+                event=mention("<@UBOT> private words do-silent")
+            )
             app.listeners["message"](event=message("hey <@UBOT> again", ts="100.3"))
             app.listeners["message"](event=message("top", ts="200.1", thread_ts=None))
             app.listeners["message"](event="garbage")
             deadline = time.time() + 20
             while time.time() < deadline:
                 texts = [p["text"] for p in self.client.made("chat_postMessage")]
-                if "result 1" in texts:
+                if "free text answer" in texts:
                     break
                 time.sleep(0.05)
         finally:
@@ -495,17 +501,14 @@ class SlackMainTests(unittest.TestCase):
             )
         )
         self.assertEqual([p["thread_ts"] for p in posts], ["100.1", "100.1"])
-        self.assertEqual(posts[-1]["text"], "result 1")
-        added = [f["name"] for f in self.client.made("reactions_add")]
-        self.assertEqual(added, ["hourglass_flowing_sand", "eyes", "white_check_mark"])
-        runs = (self.root / "runs.log").read_text().splitlines()
-        self.assertEqual(len(runs), 1)
-        record = json.loads(runs[0])
-        self.assertEqual(record["argv"][:3], ["run", "--key", "slack:C1:100.1"])
-        self.assertEqual(
-            json.loads(record["--messages-file"]),
-            [{"from": "U1", "text": "@helper private words"}],
-        )
+        self.assertEqual(posts[-1]["text"], "free text answer")
+        added = {f["name"] for f in self.client.made("reactions_add")}
+        self.assertEqual(added, {"eyes"})
+        entries = [json.loads(line) for line in self.log.read_text().splitlines()]
+        prompt = [e for e in entries if e.get("method") == "session/prompt"][0]
+        text = prompt["params"]["prompt"][0]["text"]
+        self.assertIn("conversation: slack:C1:100.1", text)
+        self.assertIn("@helper private words do-silent", text)
         store = json.loads((self.root / "data/triggers/slack.json").read_text())
         self.assertEqual(list(store["convs"]), ["slack:C1:100.1"])
         output = "\n".join(r.getMessage() for r in logs.records)

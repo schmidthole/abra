@@ -126,12 +126,11 @@ class ResidentTests(unittest.TestCase):
     def test_requires_agent_command(self):
         args = type("Args", (), {"root": str(self.root), "name": "abra"})
         with self.assertRaises(ValueError):
-            runtime.from_args(self.adapter, args, {"ABRA_RESIDENT": "1"})
+            runtime.from_args(self.adapter, args, {})
         instance = runtime.from_args(
             self.adapter,
             args,
             {
-                "ABRA_RESIDENT": "1",
                 "ABRA_AGENT_CMD": "agent --acp",
                 "ABRA_AGENT_MODE": "1",
             },
@@ -570,7 +569,7 @@ class ResidentTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=60,
-            env=dict(os.environ, ABRA_RESIDENT="1", ABRA_AGENT_CMD=command),
+            env=dict(os.environ, ABRA_AGENT_CMD=command),
         )
 
     def test_cli_adapter_in_resident_mode(self):

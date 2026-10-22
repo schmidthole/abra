@@ -32,7 +32,8 @@ KEY_TYPE = re.compile(
     r"|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)"
 )
 KEY_DATA = re.compile(r"[A-Za-z0-9+/]{16,16384}={0,3}")
-# variables ssh sessions need to run abra by hand; slack tokens stay with the listener.
+# variables ssh sessions need to run abra by hand; slack tokens are not put in the
+# ssh session env.
 SHARED = (
     "ABRA_ROOT",
     "ABRA_NAME",
@@ -40,8 +41,6 @@ SHARED = (
     "ABRA_SPECIALTY_DIR",
     "ABRA_AGENT_MODE",
     "ABRA_MAX_CONCURRENCY",
-    "ABRA_ARCHIVE_DAYS",
-    "ABRA_TRIGGER_WORKERS",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GH_TOKEN",

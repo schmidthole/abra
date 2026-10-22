@@ -64,7 +64,8 @@ class Server:
 
     def start(self):
         directory = os.path.dirname(self.path)
-        mode = os.lstat(directory).st_mode
+        # a symlinked directory is fine (the deployer may put data on a volume)
+        mode = os.stat(directory).st_mode
         if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) & 0o077:
             raise ValueError("bridge socket directory must be a private directory")
         try:

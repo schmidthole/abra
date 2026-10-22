@@ -7,6 +7,7 @@ agent answers with the bridge's reply(work_id, text) tool.
 """
 
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -62,15 +63,6 @@ def load_cli(path=CLI):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
-
-
-def announcement(name, work_id):
-    return (
-        name
-        + " is on it. this thread is now work item "
-        + work_id
-        + ". reply in this thread to add to it."
-    )
 
 
 def stdio_env(values):
@@ -167,6 +159,7 @@ class Resident(runtime.Runtime):
         self.client = None
         self.server = None
         self.dispatcher = None
+        self.instance = None
         self.session = None
         self.stored = None
         self.started = None
@@ -191,17 +184,26 @@ class Resident(runtime.Runtime):
 
     def start(self):
         self.cli.preflight(self.root, self.env)
-        self._open()
         try:
+            self._open()
             self._boot()
         except BaseException:
             self._teardown()
             raise
 
     def _boot(self):
+        # one resident session per root, whichever adapter hosts it
+        descriptor = os.open(
+            self.directory / "resident.lock", os.O_WRONLY | os.O_CREAT, 0o600
+        )
+        os.fchmod(descriptor, 0o600)
+        self.instance = os.fdopen(descriptor, "a")
+        try:
+            fcntl.flock(self.instance, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("another resident runtime already runs on this root")
         with self.lock:
-            for conv, entry in self.convs.items():
-                entry["archived"] = False
+            for conv in self.convs:
                 self._schedule(conv)
         self._catch_up()
         state = self._load_state()
@@ -285,6 +287,9 @@ class Resident(runtime.Runtime):
         if self.socket_dir:
             shutil.rmtree(self.socket_dir, ignore_errors=True)
             self.socket_dir = None
+        if self.instance:
+            self.instance.close()
+            self.instance = None
         if self.holder:
             self.holder.close()
             self.holder = None
@@ -323,18 +328,6 @@ class Resident(runtime.Runtime):
             log.info("ignoring event while stopping")
             return False
         return super().submit(event)
-
-    def _announce(self, conv, work_id, session_id):
-        self._reply(conv, announcement(self.name, work_id))
-
-    def _resurrect(self, conv, entry):
-        entry["archived"] = False
-        self._save()
-
-    def _ack(self, conv, msg_id, state):
-        # resident markers: running when the agent gets a message, failed on errors
-        if state in ("running", "failed"):
-            super()._ack(conv, msg_id, state)
 
     def _schedule(self, conv):
         """queue this conversation's undelivered messages in arrival order."""
@@ -893,7 +886,7 @@ def from_env(adapter, args, env, **options):
     """resident settings: abra_agent_cmd (required) and abra_agent_mode=1."""
     command = env.get("ABRA_AGENT_CMD", "")
     if not command.strip():
-        raise ValueError("abra_agent_cmd is required when abra_resident=1")
+        raise ValueError("abra_agent_cmd is required")
     settings = dict(agent_mode=env.get("ABRA_AGENT_MODE", "") == "1", env=env)
     for variable, key in (
         ("ABRA_WAKE_GRACE", "wake_grace"),

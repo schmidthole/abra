@@ -1,0 +1,8 @@
+{
+  "name": "abra-claude-agent-acp",
+  "private": true,
+  "description": "pinned acp adapter for the resident trigger runtime",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.94.0"
+  }
+}
