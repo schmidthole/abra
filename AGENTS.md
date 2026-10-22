@@ -105,7 +105,8 @@ event, not an interactive user.
   task id and record the conversation key, work id, and every requester in the task
   body.
 - answer with the `reply(work_id, text)` tool; that is the only way to post. only
-  the coordinator posts; never let a subagent call it.
+  the coordinator posts; never let a subagent call it. the runtime's check for
+  subagent calls is best effort, so this rule is yours to keep.
 - never wait on subagents in-turn: dispatch, post progress with reply, and end the
   turn. you are woken when background work finishes or new messages arrive.
 - a question becomes a reply plus a held task; the answer arrives as a later event.

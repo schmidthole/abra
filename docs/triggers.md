@@ -196,11 +196,15 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   crash re-delivers them (at least once).
 - permissions: the runtime answers permission requests itself and allows only the
   bridge's reply tool, once: claude-agent-acp's `toolName` must be
-  `mcp__abra__reply`, its `mcpServer` must be present and named `abra`, the
-  request must come from the resident session's own id (subagents ask from child
-  sessions), and a call carrying `parentToolUseId` is rejected, so only the
-  coordinator posts.
-  everything else is rejected. other agents do not send these fields, so outside
+  `mcp__abra__reply`, its `mcpServer` must be present and named `abra`, and the
+  request must carry the resident session's id. the session check does not tell
+  subagents apart: abra does not advertise the acp `subagents` capability, so
+  claude-agent-acp sends their requests with the root session id too. a request
+  carrying `parentToolUseId` (a subagent's call) is rejected, but that is best
+  effort, since the adapter can miss it. "only the coordinator posts" therefore
+  rests on the AGENTS.md rule plus this check; a reply that slips through still
+  reaches only this instance's work ids and is rate limited. everything else is
+  rejected. other agents do not send these fields, so outside
   agent mode (for example codex) abra cannot post and only the single-conversation
   free-text fallback reaches the thread. with `ABRA_AGENT_MODE=1` (container only) it sets
   the session mode to `bypassPermissions` (claude) or `agent-full-access` (codex)

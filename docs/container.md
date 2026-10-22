@@ -120,10 +120,15 @@ platform's secret store.
 ### environment in ssh sessions
 
 sshd starts sessions with a clean environment, so the entrypoint writes an
-`Include`d sshd file, `/run/abra/sshd_env` (0600), that sets these variables for
-every ssh session: the `ABRA_*` settings above, `ANTHROPIC_API_KEY`,
-`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, and the image's npm and claude settings.
-this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand.
+`Include`d sshd file, `/run/abra/sshd_env` (0600), that sets exactly these
+variables for every ssh session, when set: `ABRA_ROOT`, `ABRA_NAME`,
+`ABRA_TRIGGER`, `ABRA_SPECIALTY_DIR`, `ABRA_AGENT_MODE`, `ABRA_MAX_CONCURRENCY`,
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `DISABLE_AUTOUPDATER`,
+`npm_config_cache`, `npm_config_prefer_offline`, and `npm_config_update_notifier`.
+this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand. the
+resident settings (`ABRA_AGENT_CMD`, `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`,
+`ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE`) and `CLAUDE_CODE_EXECUTABLE` are not
+shared; the trigger listener gets the container's full environment.
 the slack tokens are left out of the session environment, but this is not a
 security boundary. a value containing `"`, `\`, or control characters is not
 shared and its name is logged.

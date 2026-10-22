@@ -853,11 +853,12 @@ class Resident(runtime.Runtime):
         with self.lock:
             session = self.session
         if not session or params.get("sessionId") != session:
-            # child sessions (subagents) ask from their own session id
+            # not a subagent check: without the acp subagents capability,
+            # claude-agent-acp sends subagent requests with the root session id
             log.warning("rejected a reply outside the resident session")
             return None
         if claude.get("parentToolUseId"):
-            # a subagent's call: only the coordinator posts
+            # a subagent's call; best effort, the adapter can omit this field
             log.warning("rejected a reply from a subagent")
             return None
         for option in params.get("options") or ():
