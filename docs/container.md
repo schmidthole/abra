@@ -120,12 +120,15 @@ sshd starts sessions with a clean environment, so the entrypoint writes an
 every ssh session: the `ABRA_*` settings above, `ANTHROPIC_API_KEY`,
 `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, and the image's npm and claude settings.
 this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand.
-`SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` are only given to the listener. a value
-containing `"`, `\`, or control characters is not shared and its name is logged.
+the slack tokens are left out of the session environment, but this is not a
+security boundary. a value containing `"`, `\`, or control characters is not
+shared and its name is logged.
 
-this means anyone holding an authorized key can read the claude and github
-credentials. only authorize keys of people who may use those credentials, and
-scope the tokens to what abra needs.
+ssh sessions run as the same user as the entrypoint and the listener, so anyone
+holding an authorized key can read every secret given to the container (claude
+or anthropic, gh, and slack), for example from `/proc/<pid>/environ`. only
+authorize keys of people trusted with all of them, and scope the tokens to what
+abra needs.
 
 ## kubernetes
 

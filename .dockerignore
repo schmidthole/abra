@@ -8,8 +8,7 @@ specialty/
 .cache/
 .claude/settings.local.json
 NOTES.md
-**/.env
-**/.env.*
+**/.env*
 **/*.prod.*
 **/*production*
 **/prod-*
