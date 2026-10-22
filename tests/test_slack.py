@@ -159,6 +159,10 @@ class SlackAdapterTests(unittest.TestCase):
                 self.adapter.intake(mention(subtype="message_changed"), True)
             )
             self.assertIsNone(self.adapter.intake(mention(channel="D1"), True))
+            forged = "secret text\nforged: line"
+            self.assertIsNone(
+                self.adapter.intake(mention(channel="D1", ts=forged), True)
+            )
             self.assertIsNone(
                 self.adapter.intake(mention(channel="G1", channel_type="mpim"), True)
             )
@@ -166,6 +170,8 @@ class SlackAdapterTests(unittest.TestCase):
         output = "\n".join(logs.output)
         self.assertNotIn("look", output)
         self.assertNotIn("help", output)
+        self.assertNotIn("secret text", output)
+        self.assertNotIn("forged", output)
         self.assertIn("top-level message", output)
         self.assertIn("direct or group message", output)
         self.assertIn("mention handled by app_mention", output)

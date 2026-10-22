@@ -145,7 +145,7 @@ class SlackAdapter:
             return self._ignore(None, None, "not an object")
         channel, ts, thread = (event.get(k) for k in ("channel", "ts", "thread_ts"))
         if isinstance(channel, str) and DIRECT.fullmatch(channel):
-            return self._ignore(None, ts, "direct or group message")
+            return self._ignore(None, None, "direct or group message")
         if not isinstance(channel, str) or not CHANNEL.fullmatch(channel):
             return self._ignore(None, None, "invalid channel")
         if not isinstance(ts, str) or not TS.fullmatch(ts):
