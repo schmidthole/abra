@@ -156,7 +156,8 @@ retries, and process supervision belong to the deployer.
 
 `triggers/` holds a shared runtime that turns chat or ticket conversations into
 `bin/abra` turns: tag the bot to start a work item, reply in the thread to add to
-it. adapters are thin; `triggers/cli.py` is the json-lines reference adapter. see
+it. adapters are thin; `triggers/cli.py` is the json-lines reference adapter and
+`triggers/slack.py` serves slack threads ([docs/slack.md](docs/slack.md)). see
 [docs/triggers.md](docs/triggers.md).
 
 ## pipeline
