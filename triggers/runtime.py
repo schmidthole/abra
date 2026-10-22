@@ -139,10 +139,8 @@ class Runtime:
             holder.close()
             raise ValueError("another runtime already owns " + self.path.name)
         self.holder = holder
-        # only this runtime's temp files: other adapters may share the root
+        # only this store's temp files: other adapters may share the root
         stale = list(self.directory.glob("." + self.path.name + "*.tmp"))
-        stale += list(self.directory.glob(".resident.json*.tmp"))
-        stale += list(self.directory.glob(".bridge.json*.tmp"))
         for path in stale:
             path.unlink()
         if stale:

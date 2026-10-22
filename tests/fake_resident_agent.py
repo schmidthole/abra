@@ -128,16 +128,21 @@ def handle_turn(sid, text):
         outcomes = []
         reply_tool = "mcp__abra__reply"
         server = {"name": "abra", "source": "config"}
-        for claude in (
-            {"toolName": reply_tool, "mcpServer": server},
-            {"toolName": "Bash"},
-            {"toolName": reply_tool, "mcpServer": server, "parentToolUseId": "t0"},
-            {"toolName": reply_tool, "mcpServer": {"name": "other"}},
+        for claude, session in (
+            ({"toolName": reply_tool, "mcpServer": server}, sid),
+            ({"toolName": "Bash"}, sid),
+            (
+                {"toolName": reply_tool, "mcpServer": server, "parentToolUseId": "t"},
+                sid,
+            ),
+            ({"toolName": reply_tool, "mcpServer": {"name": "other"}}, sid),
+            ({"toolName": reply_tool}, sid),
+            ({"toolName": reply_tool, "mcpServer": server}, "child-1"),
         ):
             response = ask(
                 "session/request_permission",
                 {
-                    "sessionId": sid,
+                    "sessionId": session,
                     "toolCall": {
                         "toolCallId": claude["toolName"],
                         "_meta": {"claudeCode": claude},
@@ -181,6 +186,8 @@ def handle_turn(sid, text):
     if "do-refuse" in text:
         return "refusal"
     if "do-cancel" in text:
+        return "cancelled"
+    if config.get("cancel_checkpoint") and "runtime event: checkpoint:" in text:
         return "cancelled"
     return "end_turn"
 

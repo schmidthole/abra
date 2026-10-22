@@ -161,6 +161,7 @@ class Resident(runtime.Runtime):
         self.server = None
         self.dispatcher = None
         self.instance = None
+        self.wrote_handoff = False
         self.session = None
         self.stored = None
         self.started = None
@@ -205,6 +206,13 @@ class Resident(runtime.Runtime):
             fcntl.flock(self.instance, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("another resident runtime already runs on this root")
+        # resident files belong to whoever holds the lock, so sweep only now
+        stale = list(self.directory.glob(".resident.json*.tmp"))
+        stale += list(self.directory.glob(".bridge.json*.tmp"))
+        for path in stale:
+            path.unlink()
+        if stale:
+            log.info("removed %d stale resident temporary files", len(stale))
         with self.lock:
             for conv in self.convs:
                 self._schedule(conv)
@@ -228,6 +236,7 @@ class Resident(runtime.Runtime):
         runtime.write_private(
             self.handoff, {"socket": str(self.socket_path), "token": self.token}
         )
+        self.wrote_handoff = True
         self.server = mcp_bridge.Server(self.socket_path, self.token, self.bridge)
         self.server.start()
         self.client = acp.Client(
@@ -287,10 +296,13 @@ class Resident(runtime.Runtime):
         if self.server:
             self.server.stop()
             self.server = None
-        try:
-            os.unlink(self.handoff)
-        except OSError:
-            pass
+        # a refused start must not touch the running runtime's handoff
+        if self.wrote_handoff:
+            self.wrote_handoff = False
+            try:
+                os.unlink(self.handoff)
+            except OSError:
+                pass
         if self.socket_dir:
             shutil.rmtree(self.socket_dir, ignore_errors=True)
             self.socket_dir = None
@@ -457,7 +469,12 @@ class Resident(runtime.Runtime):
                 delays.append(min(due))
         if self.turn is None and self.wake_at is not None:
             delays.append(self.wake_at - moment)
-        if self.turn is None and self.beat_at is not None and not self.beating:
+        if (
+            self.turn is None
+            and self.session
+            and self.beat_at is not None
+            and not self.beating
+        ):
             if moment >= self.beat_at:
                 self.beating = True
                 return self._beat, None
@@ -621,8 +638,9 @@ class Resident(runtime.Runtime):
             self._crash("ending a turn failed (" + type(error).__name__ + ")")
 
     def _end(self, turn, reason):
-        if turn.get("checkpoint") and reason in DONE:
-            # clear while the turn still blocks new prompts on the old session
+        if turn.get("checkpoint"):
+            # clear however the checkpoint ended (a rejected tool can cancel it),
+            # while the turn still blocks new prompts on the old session
             self._clear()
         failed = reason is None or reason == "refusal"
         with self.lock:
@@ -830,7 +848,13 @@ class Resident(runtime.Runtime):
         server = claude.get("mcpServer")
         if claude.get("toolName") != REPLY_TOOL:
             return None
-        if isinstance(server, dict) and server.get("name") != mcp_bridge.NAME:
+        if not isinstance(server, dict) or server.get("name") != mcp_bridge.NAME:
+            return None
+        with self.lock:
+            session = self.session
+        if not session or params.get("sessionId") != session:
+            # child sessions (subagents) ask from their own session id
+            log.warning("rejected a reply outside the resident session")
             return None
         if claude.get("parentToolUseId"):
             # a subagent's call: only the coordinator posts

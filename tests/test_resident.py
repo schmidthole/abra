@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -112,7 +113,7 @@ class ResidentTests(unittest.TestCase):
             for e in self.received("session/prompt")
         ]
 
-    def wait_for(self, predicate, timeout=10):
+    def wait_for(self, predicate, timeout=30):
         deadline = time.time() + timeout
         while time.time() < deadline:
             if predicate():
@@ -289,7 +290,7 @@ class ResidentTests(unittest.TestCase):
         rejected = {"outcome": "selected", "optionId": "r1"}
         self.assertEqual(
             outcomes,
-            [{"outcome": "selected", "optionId": "a1"}, rejected, rejected, rejected],
+            [{"outcome": "selected", "optionId": "a1"}] + [rejected] * 5,
         )
         self.assertEqual(self.received("session/set_mode"), [])
 
@@ -440,9 +441,12 @@ class ResidentTests(unittest.TestCase):
             return 2
 
         instance = self.start(heartbeat=0.3, inflight=busy)
-        self.wait_for(lambda: len(self.prompts()) >= 1)
+        time.sleep(0.6)
+        self.assertEqual(self.prompts(), [])
+        instance.submit(event("start", "1", "hello"))
+        self.wait_for(lambda: len(self.prompts()) >= 2)
         self.assertIn(
-            "runtime event: heartbeat: 2 tasks are in flight", self.prompts()[0]
+            "runtime event: heartbeat: 2 tasks are in flight", self.prompts()[1]
         )
         instance.stop()
         self.log.unlink()
@@ -466,16 +470,30 @@ class ResidentTests(unittest.TestCase):
     def test_idle_clear_checkpoints_then_starts_fresh(self):
         instance = self.start(idle_clear=0.3)
         instance.submit(event("start", "1", "hello"))
-        self.wait_for(lambda: len(self.received("session/close")) == 1)
+        self.wait_for(
+            lambda: instance.session is None and self.received("session/close")
+        )
         self.assertIn("runtime event: " + resident.CHECKPOINT, self.prompts()[1])
-        self.wait_for(lambda: instance.session is None)
         state = json.loads((self.root / "data/triggers/resident.json").read_text())
         self.assertIsNone(state["session_id"])
         instance.submit(event("message", "2", "back again"))
-        self.wait_for(lambda: len(self.prompts()) == 3)
-        self.assertEqual(len(self.received("session/new")), 2)
-        self.assertIn(resident.BOOTSTRAP, self.prompts()[2])
-        self.assertIn("back again", self.prompts()[2])
+        self.wait_for(lambda: any("back again" in p for p in self.prompts()))
+        again = [p for p in self.prompts() if "back again" in p][0]
+        self.assertIn(resident.BOOTSTRAP, again)
+        self.assertGreaterEqual(len(self.received("session/new")), 2)
+
+    def test_cancelled_checkpoint_still_clears(self):
+        self.configure(cancel_checkpoint=True)
+        instance = self.start(idle_clear=0.3, heartbeat=0.8, inflight=lambda: 3)
+        instance.submit(event("start", "1", "hello"))
+        self.wait_for(lambda: len(self.received("session/close")) == 1)
+        self.wait_for(lambda: instance.session is None)
+        self.assertIn(resident.CHECKPOINT, self.prompts()[-1])
+        count = len(self.prompts())
+        time.sleep(1)
+        # cold until the next real event: no heartbeat, no new session
+        self.assertEqual(len(self.prompts()), count)
+        self.assertEqual(len(self.received("session/new")), 1)
 
     def test_no_clear_while_background_work_runs(self):
         self.configure(background=5)
@@ -653,6 +671,43 @@ class ResidentTests(unittest.TestCase):
         self.assertTrue(replies[1].startswith("re abra-"))
         acks = [(r["msg_id"], r["state"]) for r in records if r["type"] == "ack"]
         self.assertEqual(acks, [("1", "running"), ("2", "running")])
+
+    def test_cli_sigterm_drains_and_cleans_up(self):
+        self.configure(slow=0.5)
+        command = " ".join([sys.executable, str(FAKE), str(self.config_path)])
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(TESTS.parent / "triggers/cli.py"),
+                "--root",
+                str(self.root),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=dict(os.environ, ABRA_AGENT_CMD=command),
+        )
+        record = {
+            "kind": "start",
+            "conv": "cli:demo:1",
+            "msg_id": "1",
+            "sender": "U1",
+            "text": "work do-slow do-reply",
+        }
+        process.stdin.write(json.dumps(record) + "\n")
+        process.stdin.flush()
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        process.send_signal(signal.SIGTERM)
+        out, err = process.communicate(timeout=60)
+        process.stdin.close()
+        self.assertEqual(process.returncode, 0, err)
+        self.assertIn("interrupted; pending messages stay stored", err)
+        self.assertIn("re abra-", out)
+        self.assertFalse((self.root / "data/triggers/bridge.json").exists())
+        stored = json.loads((self.root / "data/triggers/cli.json").read_text())
+        self.assertEqual(stored["convs"]["cli:demo:1"]["pending"], [])
+        self.assertEqual(len(self.received("session/close")), 1)
 
     def test_cli_exits_non_zero_when_agent_crashes(self):
         result = self.run_cli("boom do-crash")

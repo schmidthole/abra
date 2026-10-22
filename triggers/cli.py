@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import threading
 
@@ -75,6 +76,11 @@ def main(argv=None):
     except (ValueError, OSError) as error:
         runtime.log.error("error: %s", error)
         return 1
+
+    def terminate(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, terminate)
     try:
         for number, line in enumerate(sys.stdin, 1):
             if not line.strip():
@@ -91,7 +97,9 @@ def main(argv=None):
     except KeyboardInterrupt:
         runtime.log.info("interrupted; pending messages stay stored")
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         instance.stop()
+        signal.signal(signal.SIGTERM, previous)
     if instance.crashed.is_set():
         runtime.log.error("error: the agent stopped; pending messages stay stored")
         return 1

@@ -138,7 +138,7 @@ the agent settings are in the table under resident session below.
 `triggers/cli.py` reads json-lines events on stdin and writes replies and acks as
 json lines on stdout. history is served from the events and replies it has seen.
 at end of input it waits until nothing is pending or running, then exits; it
-exits 1 if the agent stopped.
+exits 1 if the agent stopped. sigint or sigterm stops it like the slack adapter.
 
 ```sh
 printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": "U1", "text": "hello"}' \
@@ -196,8 +196,10 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   crash re-delivers them (at least once).
 - permissions: the runtime answers permission requests itself and allows only the
   bridge's reply tool, once: claude-agent-acp's `toolName` must be
-  `mcp__abra__reply`, its `mcpServer` (when given) must be `abra`, and a call from
-  a subagent (`parentToolUseId`) is rejected, so only the coordinator posts.
+  `mcp__abra__reply`, its `mcpServer` must be present and named `abra`, the
+  request must come from the resident session's own id (subagents ask from child
+  sessions), and a call carrying `parentToolUseId` is rejected, so only the
+  coordinator posts.
   everything else is rejected. other agents do not send these fields, so outside
   agent mode (for example codex) abra cannot post and only the single-conversation
   free-text fallback reaches the thread. with `ABRA_AGENT_MODE=1` (container only) it sets
@@ -218,13 +220,14 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   seconds (default 20); if the agent does not start a turn by itself (claude does,
   codex does not), it sends one `background work finished` event.
 - heartbeat: every `ABRA_HEARTBEAT` seconds (default 1800, 0 turns it off) while
-  idle, the runtime runs `bin/tasks list --state in_flight` and sends a heartbeat
+  a session is live and idle, the runtime runs `bin/tasks list --state in_flight` and sends a heartbeat
   event only when tasks are in flight. no file watchers.
 - idle clear: when nothing is pending, queued, or running in the background and
   the session has been idle for `ABRA_IDLE_CLEAR` seconds (default 600, 0 is off),
   the runtime sends a checkpoint event ("save your notes": update every
-  unfinished task body), waits for it to end, closes the session, and forgets its
-  id. the next event starts a new session with the bootstrap event. a session
+  unfinished task body), waits for it to end however it ends, closes the
+  session, and forgets its id. the instance then stays cold (no heartbeat) until
+  the next event, which starts a new session with the bootstrap event. a session
   older than `ABRA_MAX_SESSION_AGE` seconds (default 7 days) is rotated the same
   way after one quiet minute. messages that arrive during a checkpoint wait for
   the new session.

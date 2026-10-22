@@ -178,20 +178,32 @@ class TriggerTests(unittest.TestCase):
         )
         self.assertEqual(entry["last_msg_id"], "m2")
 
+    def assert_first_survives(self, first, refused):
+        handoff = self.root / "data/triggers/bridge.json"
+        inflight = self.root / "data/triggers/.resident.jsonlive.tmp"
+        inflight.write_text("in flight")
+        before = handoff.read_text()
+        with self.assertRaises(ValueError) as caught:
+            self.start(refused)
+        self.assertEqual(handoff.read_text(), before)
+        self.assertTrue(inflight.exists())
+        self.assertTrue(first.socket_path.exists())
+        first.submit(event("start", "m1"))
+        self.assertTrue(first.wait_idle(10))
+        return str(caught.exception)
+
     def test_second_runtime_on_same_store_refused(self):
-        self.start()
-        with self.assertRaises(ValueError):
-            self.start()
+        _, first = self.start()
+        self.assert_first_survives(first, Adapter())
 
     def test_second_adapter_on_same_root_refused(self):
-        self.start()
+        _, first = self.start()
 
         class Other(Adapter):
             name = "other"
 
-        with self.assertRaises(ValueError) as caught:
-            self.start(Other())
-        self.assertIn("another resident runtime", str(caught.exception))
+        message = self.assert_first_survives(first, Other())
+        self.assertIn("another resident runtime", message)
 
     def test_pending_cap_drops_and_acks_failed(self):
         with mock.patch.object(runtime, "MAX_PENDING", 2):
