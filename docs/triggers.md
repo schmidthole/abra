@@ -207,3 +207,29 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
 4. call `submit` for each event; call `stop()` on shutdown. pending work stays
    stored and resumes on the next start.
 5. keep platform credentials in the deployer's secret store, never in the repo.
+
+## acp client
+
+`triggers/acp.py` is a stdlib acp v1 client (agent client protocol, json-rpc 2.0
+over newline-delimited stdio) for driving an agent adapter such as
+`claude-agent-acp` or `codex-acp`. it is groundwork for a resident session; the
+runtime above does not use it yet.
+
+- `Client(argv, ...)` spawns the adapter (argv list, no shell) in its own process
+  group. `start()`, `initialize()` (protocol version 1, no fs or terminal
+  capabilities), then `new_session`, `load_session`, `resume_session`, `prompt`
+  (blocks until the stop reason), `cancel`, `set_mode`, `close_session`, and
+  `steer` (`_session/steering`; returns the outcome, raises `MethodNotFound` when
+  the agent lacks it). load, resume, and close raise `Unsupported` without sending
+  when the agent did not advertise them.
+- `on_update(params)` receives every `session/update`, during or outside a prompt.
+  `permission(params)` returns an offered option id; anything else, including an
+  exception, rejects (default: reject all). other agent requests (`fs/*`,
+  `terminal/*`, unknown) get -32601.
+- callbacks run on one dispatcher thread in arrival order, so a prompt returns
+  only after its updates were delivered. they must not make blocking client calls.
+- lines over `max_line` (8 mib) and invalid json are dropped and logged by type.
+  logs carry method names, ids, sizes, and error codes, never content.
+- agent exit fails pending calls with `AgentExited` and calls `on_exit(code)`.
+  `close()` sends nothing, closes stdin, sigterms the process group, sigkills it
+  after `kill_timeout`, and reaps.
