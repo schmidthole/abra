@@ -139,7 +139,8 @@ the agent settings are in the table under resident session below.
 ## linear adapter
 
 `triggers/linear.py` polls linear with linear-axi for todo issues assigned to the
-bot user, one issue per conversation. see [linear.md](linear.md) for setup, the
+bot user (or, in app mode, delegated to a linear agent app), one issue per
+conversation. see [linear.md](linear.md) for setup, the
 outcome contract, and security notes.
 
 ## reference adapter

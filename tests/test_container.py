@@ -533,6 +533,8 @@ class ImageConfigTests(unittest.TestCase):
         self.assertNotRegex(self.dockerfile, r"(npx|npm install)[^\n]*linear-axi")
         self.assertIn("LINEAR_API_KEY", entrypoint.SECRETS)
         self.assertNotIn("LINEAR_API_KEY", entrypoint.SHARED)
+        self.assertIn("LINEAR_CLIENT_SECRET", entrypoint.SECRETS)
+        self.assertNotIn("LINEAR_CLIENT_SECRET", entrypoint.SHARED)
 
     def test_retired_one_shot_trigger_settings_not_shared(self):
         for name in ("ABRA_ARCHIVE_DAYS", "ABRA_TRIGGER_WORKERS"):

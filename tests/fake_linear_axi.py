@@ -8,7 +8,9 @@ bot user id), "issues" keyed by identifier, and "fail": a list of command names
 "apply_fail" lists commands that apply their change and then exit 1, and
 "ambiguous" makes a todo listing without --team fail as linear-axi does when
 several teams share the state name. state names resolve case-insensitively to
-their canonical form, as in linear-axi.
+their canonical form, as in linear-axi. "auth_fail" lists commands that exit 1
+with AUTH_ERROR. app mode authenticates with LINEAR_ACCESS_TOKEN: issues carry a
+"delegate", "sessions" holds agent sessions, and thoughts land in "activities".
 """
 
 import fcntl
@@ -59,8 +61,16 @@ def handle(state, args):
     command = " ".join(args[:2]) if args[0] == "issue" else args[0]
     if command in state.get("fail", []):
         error("Linear API error: stub failure for secret issue words", "API_ERROR")
+    if command in state.get("auth_fail", []):
+        error("Authentication failed", "AUTH_ERROR")
     if args[0] == "api":
         query = flag(args, "--query") or ""
+        if "agentSessions" in query:
+            emit({"data": {"agentSessions": {"nodes": state.get("sessions", [])}}})
+        if "agentActivityCreate" in query:
+            variables = json.loads(flag(args, "--variables") or "{}")
+            state.setdefault("activities", []).append(variables["input"])
+            emit({"data": {"agentActivityCreate": {"success": True}}})
         if "viewer" in query:
             emit({"data": {"viewer": {"id": viewer}}})
         ident = json.loads(flag(args, "--variables") or "{}").get("id")
@@ -75,6 +85,7 @@ def handle(state, args):
             "url": "https://linear.app/acme/issue/" + ident,
             "state": {"name": issue["state"]},
             "assignee": {"id": issue["assignee"]} if issue.get("assignee") else None,
+            "delegate": {"id": issue["delegate"]} if issue.get("delegate") else None,
             "creator": {"id": issue["creator"]} if issue.get("creator") else None,
             "team": {"key": issue["team"]},
             "comments": {"nodes": issue.get("comments", [])},
@@ -82,6 +93,7 @@ def handle(state, args):
         emit({"data": {"issue": data}})
     if command == "issue list":
         state_name, team = canonical(flag(args, "--state")), flag(args, "--team")
+        field = "delegate" if flag(args, "--delegate") == "me" else "assignee"
         if state.get("ambiguous") and team is None:
             error("Ambiguous workflow state: " + state_name, "VALIDATION_ERROR", 2)
         found = [
@@ -92,7 +104,7 @@ def handle(state, args):
                 "updatedAt": issue["updatedAt"],
             }
             for ident, issue in sorted(issues.items())
-            if issue.get("assignee") == viewer
+            if issue.get(field) == viewer
             and issue["state"] == state_name
             and (team is None or issue["team"] == team)
         ]
@@ -112,6 +124,11 @@ def handle(state, args):
         issue["assignee"] = None if args[3] == "none" else args[3]
         bump(state, issue)
         emit({"result": "issue assigned", "issue": {"assignee": args[3]}})
+    if command == "issue update":
+        delegate = flag(args, "--delegate")
+        issue["delegate"] = {"none": None, "me": viewer}.get(delegate, delegate)
+        bump(state, issue)
+        emit({"result": "issue updated", "issue": {"delegate": delegate}})
     if command == "issue label":
         issue.setdefault("labels", []).append(args[4])
         emit({"result": "label added", "issue": {"labels": issue["labels"]}})
@@ -137,13 +154,16 @@ def main():
             entry = {
                 "args": args,
                 "key": os.environ.get("LINEAR_API_KEY"),
+                "token": os.environ.get("LINEAR_ACCESS_TOKEN"),
                 "env": sorted(os.environ),
             }
             log.write(json.dumps(entry) + "\n")
         if args[-1:] != ["--json"]:
             error("stub requires --json", "VALIDATION_ERROR", 2)
         args = args[:-1]
-        if not os.environ.get("LINEAR_API_KEY"):
+        if not (
+            os.environ.get("LINEAR_API_KEY") or os.environ.get("LINEAR_ACCESS_TOKEN")
+        ):
             error("LINEAR_API_KEY is not set", "AUTH_ERROR")
         state = json.loads(STATE.read_text())
         try:

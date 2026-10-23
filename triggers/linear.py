@@ -2,18 +2,24 @@
 """linear adapter: polls linear-axi for todo issues assigned to the bot; comments out."""
 
 import argparse
+import base64
 from datetime import datetime, timedelta, timezone
+import http.client
 import json
 import logging
 import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import runtime
 
@@ -30,7 +36,32 @@ LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 API_KEY = re.compile(r"lin_api_[A-Za-z0-9_-]{8,256}")
 SECRET = re.compile(r"lin_(?:api|oauth)_[A-Za-z0-9_-]+")
 MENTION = re.compile(r"@(?=[A-Za-z0-9_.-])")
-# child processes get only these variables plus linear_api_key
+CLIENT = re.compile(r"[A-Za-z0-9_-]{8,256}")
+TOKEN = re.compile(r"[A-Za-z0-9_.~+/=-]{16,4096}")
+# app mode: oauth client credentials for a linear agent app (actor=app)
+TOKEN_URL = "https://api.linear.app/oauth/token"
+SCOPES = (
+    "read",
+    "write",
+    "issues:create",
+    "comments:create",
+    "app:assignable",
+    "app:mentionable",
+)
+DEFAULT_SCOPES = "read,write,app:assignable"
+TOKEN_TIMEOUT = 30
+MAX_TOKEN_RESPONSE = 64 * 1024
+MIN_LIFETIME = 2 * 3600
+MAX_LIFETIME = 366 * 24 * 3600
+RENEW_MARGIN = 24 * 3600
+# credential inputs never reach the agent as given; it gets only what it needs
+CREDENTIALS = (
+    "LINEAR_API_KEY",
+    "LINEAR_CLIENT_ID",
+    "LINEAR_CLIENT_SECRET",
+    "LINEAR_ACCESS_TOKEN",
+)
+# child processes get only these variables plus the linear key or token
 PASSED = (
     "PATH",
     "HOME",
@@ -49,10 +80,21 @@ SETTINGS = (
 )
 ISSUE_QUERY = (
     "query AbraIssue($id: String!) { issue(id: $id) { id identifier title"
-    " description url state { name } assignee { id } creator { id } team { key }"
+    " description url state { name } assignee { id } delegate { id } creator { id }"
+    " team { key }"
     " comments(first: 100) { nodes { id body createdAt user { id name } } } } }"
 )
 VIEWER_QUERY = "query AbraViewer { viewer { id } }"
+# query.agentSessions takes no filter, so match the issue and app user here
+SESSIONS_QUERY = (
+    "query AbraSessions { agentSessions(first: 50, orderBy: updatedAt)"
+    " { nodes { id status appUser { id } issue { id } } } }"
+)
+THOUGHT_MUTATION = (
+    "mutation AbraThought($input: AgentActivityCreateInput!)"
+    " { agentActivityCreate(input: $input) { success } }"
+)
+OPEN_SESSIONS = ("pending", "active", "awaitingInput", "stale")
 POLL = 30
 POLL_RANGE = (10, 3600)
 LIMIT = "50"
@@ -116,8 +158,11 @@ class LinearAdapter:
 
     name = "linear"
 
-    def __init__(self, bot, command, env, teams=(), timeout=TIMEOUT, **names):
+    def __init__(
+        self, bot, command, env, teams=(), timeout=TIMEOUT, actor="user", **names
+    ):
         self.bot = bot
+        self.actor = actor
         self.command = command
         self.env = env
         self.teams = tuple(teams)
@@ -126,6 +171,9 @@ class LinearAdapter:
         self.progress = names.get("progress", "In Progress")
         self.blocked = names.get("blocked", "abra-blocked")
         self.viewer = None
+        # app mode: set when the token is near expiry or rejected
+        self.renew = threading.Event()
+        self.stopper = lambda: None
 
     # linear-axi
 
@@ -157,6 +205,8 @@ class LinearAdapter:
         if result.returncode:
             code = value.get("code") if isinstance(value, dict) else None
             if isinstance(code, str) and CODE.fullmatch(code):
+                if code == "AUTH_ERROR" and self.actor == "app":
+                    self.expire("linear rejected the app token")
                 raise LinearError(
                     code.lower() + " (exit " + str(result.returncode) + ")"
                 )
@@ -164,6 +214,13 @@ class LinearAdapter:
         if not isinstance(value, dict):
             raise LinearError("invalid output")
         return value
+
+    def expire(self, why):
+        """app mode: stop gracefully so the supervisor restarts with a fresh token."""
+        if not self.renew.is_set():
+            log.warning("%s; stopping so the supervisor mints a fresh token", why)
+            self.renew.set()
+            self.stopper()
 
     def call(self, what, *args):
         """run, logging a failure by code; returns none on failure."""
@@ -212,7 +269,8 @@ class LinearAdapter:
                 raise ValueError("linear-axi could not list todo issues: " + str(error))
 
     def listing(self, team, limit=LIMIT):
-        args = ["issue", "list", "--assignee", "me", "--state", self.todo]
+        who = "--delegate" if self.actor == "app" else "--assignee"
+        args = ["issue", "list", who, "me", "--state", self.todo]
         args += ["--fields", "id,identifier,team,updatedAt", "--limit", limit]
         return args + (["--team", team] if team else [])
 
@@ -275,6 +333,8 @@ class LinearAdapter:
         if not same(status, self.progress) and not self.confirm(identifier):
             return
         log.info("claimed linear issue %s", identifier)
+        if self.actor == "app":
+            self.think(issue)
         match = PICKUP.fullmatch(last) if isinstance(last, str) else None
         if match and not STAMP.fullmatch(match.group(1)):
             match = None
@@ -290,12 +350,57 @@ class LinearAdapter:
             log.error("could not submit linear issue %s; handing it back", identifier)
             self.give_up(identifier)
 
+    def mine(self, issue):
+        """the issue is with the bot: its delegate in app mode, else its assignee."""
+        field = "delegate" if self.actor == "app" else "assignee"
+        return (issue.get(field) or {}).get("id") == self.viewer
+
     def claimable(self, issue):
         state = (issue.get("state") or {}).get("name")
-        assignee = (issue.get("assignee") or {}).get("id")
         team = (issue.get("team") or {}).get("key")
         allowed = not self.teams or team in self.teams
-        return same(state, self.todo) and assignee == self.viewer and allowed
+        return same(state, self.todo) and self.mine(issue) and allowed
+
+    def think(self, issue):
+        """best effort: a thought on the bot's agent session, so it is not unresponsive."""
+        try:
+            data = self.call("agent sessions", "api", "--query=" + SESSIONS_QUERY)
+            nodes = (((data or {}).get("data") or {}).get("agentSessions") or {}).get(
+                "nodes"
+            )
+            session = None
+            for node in nodes if isinstance(nodes, list) else []:
+                if (
+                    isinstance(node, dict)
+                    and (node.get("issue") or {}).get("id") == issue.get("id")
+                    and (node.get("appUser") or {}).get("id") == self.viewer
+                    and node.get("status") in OPEN_SESSIONS
+                    and isinstance(node.get("id"), str)
+                    and UUID.fullmatch(node["id"])
+                ):
+                    session = node["id"]
+                    break
+            if session is None:
+                log.info("no open agent session for %s", issue["identifier"])
+                return
+            content = {
+                "type": "thought",
+                "body": self.bot + " picked up this issue and is working on it.",
+            }
+            variables = {"input": {"agentSessionId": session, "content": content}}
+            data = self.call(
+                "agent activity",
+                "api",
+                "--query=" + THOUGHT_MUTATION,
+                "--variables=" + json.dumps(variables),
+            )
+            result = ((data or {}).get("data") or {}).get("agentActivityCreate") or {}
+            if result.get("success") is True:
+                log.info(
+                    "posted a thought to the agent session for %s", issue["identifier"]
+                )
+        except Exception as error:
+            log.warning("agent session update failed: %s", type(error).__name__)
 
     def confirm(self, identifier):
         """after an unconfirmed claim, read the issue back; never strand it."""
@@ -307,7 +412,7 @@ class LinearAdapter:
             self.give_up(identifier)
             return False
         state = (issue.get("state") or {}).get("name")
-        assigned = (issue.get("assignee") or {}).get("id") == self.viewer
+        assigned = self.mine(issue)
         if assigned and same(state, self.progress):
             return True
         if assigned and not same(state, self.todo):
@@ -378,9 +483,19 @@ class LinearAdapter:
         self.call("label add", "issue", "label", "add", identifier, self.blocked)
         issue = self.fetch(identifier)
         creator = ((issue or {}).get("creator") or {}).get("id")
-        target = (
-            creator if isinstance(creator, str) and UUID.fullmatch(creator) else "none"
-        )
+        known = isinstance(creator, str) and UUID.fullmatch(creator)
+        if self.actor == "app":
+            # the human assignee stays; the creator gets an unassigned issue
+            if issue is not None and not (issue.get("assignee") or {}).get("id"):
+                if known:
+                    self.call("issue assign", "issue", "assign", identifier, creator)
+            args = ("issue", "update", identifier, "--delegate", "none")
+            if self.call("issue delegate", *args) is not None:
+                log.info("handed linear issue %s back: delegate cleared", identifier)
+            else:
+                log.error("could not clear the delegate of linear issue %s", identifier)
+            return
+        target = creator if known else "none"
         if self.call("issue assign", "issue", "assign", identifier, target) is not None:
             log.info("handed linear issue %s back to its creator", identifier)
 
@@ -450,24 +565,160 @@ class LinearAdapter:
 
 
 class Redact(logging.Filter):
-    """defense in depth: mask linear key-like values and drop tracebacks."""
+    """defense in depth: mask linear key-like and known secret values, drop tracebacks."""
+
+    def __init__(self):
+        super().__init__()
+        self.values = []
 
     def filter(self, record):
         message = record.getMessage()
         clean = SECRET.sub("[redacted]", message)
+        for value in self.values:
+            clean = clean.replace(value, "[redacted]")
         if clean != message:
             record.msg, record.args = clean, None
         record.exc_info = record.exc_text = None
         return True
 
 
-def settings(env):
-    """adapter settings from env; raises valueerror naming the variable only."""
-    key = env.get("LINEAR_API_KEY", "")
+def scopes(env):
+    """app token scopes from linear_app_scopes, checked against an allowlist."""
+    value = env.get("LINEAR_APP_SCOPES", "") or DEFAULT_SCOPES
+    items = [s.strip() for s in value.split(",") if s.strip()]
+    if "admin" in items:
+        raise ValueError("linear_app_scopes must not include admin")
+    if not items or not all(s in SCOPES for s in items):
+        raise ValueError(
+            "linear_app_scopes must be comma-separated from: " + ",".join(SCOPES)
+        )
+    return ",".join(dict.fromkeys(items))
+
+
+def credentials(env):
+    """the actor (app or user) and its credentials; errors name variables only."""
+    key, client, secret = (
+        env.get(name, "")
+        for name in ("LINEAR_API_KEY", "LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET")
+    )
+    if key and (client or secret):
+        raise ValueError(
+            "set either linear_api_key or linear_client_id and linear_client_secret,"
+            " not both"
+        )
+    if client or secret:
+        if not (client and secret):
+            raise ValueError(
+                "app mode needs both linear_client_id and linear_client_secret"
+            )
+        for name, value in (
+            ("linear_client_id", client),
+            ("linear_client_secret", secret),
+        ):
+            if not CLIENT.fullmatch(value):
+                raise ValueError(name + " is malformed")
+        return "app", dict(client=client, secret=secret, scopes=scopes(env))
     if not key:
-        raise ValueError("linear_api_key is not set")
+        raise ValueError(
+            "linear_api_key is not set (or set linear_client_id and"
+            " linear_client_secret)"
+        )
     if not API_KEY.fullmatch(key):
         raise ValueError("linear_api_key is not a valid lin_api_ key")
+    return "user", dict(key=key)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """never follow a redirect, so client credentials go only to the token url."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def unique(pairs):
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def reject(name):
+    raise ValueError("non-standard json constant")
+
+
+def mint(client, secret, scope, timeout=TOKEN_TIMEOUT):
+    """an app token by the client_credentials grant: (token, lifetime seconds).
+
+    tls is always verified; errors name the failure, never the response body.
+    """
+    body = urllib.parse.urlencode(
+        {"grant_type": "client_credentials", "scope": scope}
+    ).encode("ascii")
+    basic = base64.b64encode((client + ":" + secret).encode("ascii")).decode("ascii")
+    request = urllib.request.Request(
+        TOKEN_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": "Basic " + basic,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+    )
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=context), NoRedirect()
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            data = response.read(MAX_TOKEN_RESPONSE + 1)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise ValueError("linear token endpoint returned http " + str(error.code))
+    except (OSError, http.client.HTTPException) as error:
+        raise ValueError(
+            "could not reach the linear token endpoint ("
+            + type(error).__name__.lower()
+            + ")"
+        )
+    if len(data) > MAX_TOKEN_RESPONSE:
+        raise ValueError("linear token response is too large")
+    try:
+        value = json.loads(
+            data.decode("utf-8"), object_pairs_hook=unique, parse_constant=reject
+        )
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise ValueError("linear token response is not valid json")
+    if not isinstance(value, dict):
+        raise ValueError("linear token response is not an object")
+    token, kind, lifetime = (
+        value.get(k) for k in ("access_token", "token_type", "expires_in")
+    )
+    if not isinstance(token, str) or not TOKEN.fullmatch(token):
+        raise ValueError("linear token response has no valid access_token")
+    if not isinstance(kind, str) or kind.casefold() != "bearer":
+        raise ValueError("linear token response is not a bearer token")
+    if (
+        not isinstance(lifetime, int)
+        or isinstance(lifetime, bool)
+        or not MIN_LIFETIME <= lifetime <= MAX_LIFETIME
+    ):
+        raise ValueError("linear token response has an invalid expires_in")
+    return token, lifetime
+
+
+def agent_env(env, actor, child):
+    """the agent's env: no credential inputs, only the key or token, plus the actor."""
+    result = {k: v for k, v in env.items() if k not in CREDENTIALS}
+    result.update({k: child[k] for k in CREDENTIALS if k in child})
+    result["LINEAR_ACTOR"] = actor
+    return result
+
+
+def settings(env):
+    """adapter settings from env; raises valueerror naming the variable only."""
+    actor, auth = credentials(env)
     value = env.get("LINEAR_POLL_SECONDS", "") or str(POLL)
     low, high = POLL_RANGE
     if not re.fullmatch(r"[0-9]{1,5}", value) or not low <= int(value) <= high:
@@ -484,12 +735,19 @@ def settings(env):
             raise ValueError(variable.lower() + " must match " + LABEL.pattern)
         names[field] = name
     passed = {k: env[k] for k in PASSED if k in env}
-    passed["LINEAR_API_KEY"] = key
+    if actor == "user":
+        passed["LINEAR_API_KEY"] = auth["key"]
     command = shutil.which("linear-axi", path=passed.get("PATH", os.defpath))
     if not command:
         raise ValueError("linear-axi is not installed or not on path")
     return dict(
-        command=command, env=passed, teams=teams, interval=int(value), names=names
+        command=command,
+        env=passed,
+        teams=teams,
+        interval=int(value),
+        names=names,
+        actor=actor,
+        auth=auth,
     )
 
 
@@ -512,16 +770,33 @@ def main(argv=None, env=None):
     env = os.environ if env is None else env
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("triggers: %(message)s"))
-    handler.addFilter(Redact())
+    redact = Redact()
+    handler.addFilter(redact)
     logging.basicConfig(level=logging.INFO, handlers=[handler])
+    renew_at = None
     try:
         config = settings(env)
+        actor, auth = config["actor"], config.pop("auth")
+        if actor == "app":
+            redact.values.append(auth["secret"])
+            token, lifetime = mint(auth["client"], auth["secret"], auth["scopes"])
+            redact.values.append(token)
+            renew_at = time.monotonic() + lifetime - min(RENEW_MARGIN, lifetime // 2)
+            config["env"]["LINEAR_ACCESS_TOKEN"] = token
+            log.info("minted a linear app token for %d hours", lifetime // 3600)
         names = config["names"]
         names.pop("review")
         adapter = LinearAdapter(
-            args.name, config["command"], config["env"], config["teams"], **names
+            args.name,
+            config["command"],
+            config["env"],
+            config["teams"],
+            actor=actor,
+            **names,
         )
-        instance = runtime.from_args(adapter, args, env)
+        instance = runtime.from_args(
+            adapter, args, agent_env(env, actor, config["env"])
+        )
         adapter.identify()
         adapter.check()
         instance.start()
@@ -529,24 +804,40 @@ def main(argv=None, env=None):
         log.error("error: %s", error)
         return 1
     done = threading.Event()
+    adapter.stopper = done.set
+    timer = None
+    if renew_at is not None:
+        timer = threading.Timer(
+            max(0.0, renew_at - time.monotonic()),
+            adapter.expire,
+            ("the linear app token is near expiry",),
+        )
+        timer.daemon = True
+        timer.start()
     previous = {}
     for number in (signal.SIGINT, signal.SIGTERM):
         previous[number] = signal.signal(number, lambda *_: done.set())
     try:
         log.info(
-            "polling linear every %d seconds for %d teams as %s",
+            "polling linear every %d seconds for %d teams as %s (%s actor)",
             config["interval"],
             len(config["teams"]),
             args.name,
+            actor,
         )
         serve(adapter, instance, config["interval"], done)
         log.info("shutting down; pending messages stay stored")
     finally:
+        if timer is not None:
+            timer.cancel()
         for number, action in previous.items():
             signal.signal(number, action)
         instance.stop()
     if instance.crashed.is_set():
         log.error("error: the agent stopped; pending messages stay stored")
+        return 1
+    if adapter.renew.is_set():
+        log.error("error: the linear app token needs renewal; restart to mint one")
         return 1
     return 0
 

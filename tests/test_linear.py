@@ -1,5 +1,7 @@
 """exercise the linear adapter against a stub linear-axi and a fake acp agent."""
 
+import base64
+import http.server
 import json
 import logging
 import os
@@ -11,6 +13,8 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
+import urllib.parse
 
 from test_triggers import FAKE, TESTS, TRIGGERS
 
@@ -21,6 +25,10 @@ BOT = "00000000-0000-4000-8000-0000000000b0"
 CREATOR = "00000000-0000-4000-8000-0000000000c1"
 HUMAN = "00000000-0000-4000-8000-0000000000d2"
 KEY = "lin_api_supersecretkey0123456789"
+CLIENT_ID = "clientid0123456789abcdef"
+CLIENT_SECRET = "clientsecretvalue0123456789"
+TOKEN = "apptokenvalue0123456789abcdef"
+SESSION = "22222222-2222-4222-8222-222222222222"
 
 
 def issue(identifier="ENG-1", **fields):
@@ -666,6 +674,492 @@ class MainTests(Base):
         for record in logs.records:
             self.assertEqual(record.msg, record.msg.lower())
         self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+
+class AppAdapterTests(Base):
+    """app mode: the bot is the issue's delegate; humans stay assignee."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(
+            {
+                "viewer": BOT,
+                "issues": {
+                    "ENG-1": issue(assignee=HUMAN, delegate=BOT),
+                    "ENG-2": issue("ENG-2", id="33333333-3333-4333-8333-333333333333"),
+                },
+            }
+        )
+        self.adapter_ref = self.app()
+        self.instance = self.store()
+
+    def app(self, **names):
+        env = {"PATH": self.path, "HOME": str(self.root), "LINEAR_ACCESS_TOKEN": TOKEN}
+        adapter = linear.LinearAdapter(
+            "abra",
+            str(self.bin / "linear-axi"),
+            env,
+            timeout=20,
+            actor="app",
+            **names,
+        )
+        adapter.identify()
+        return adapter
+
+    def test_delegate_pickup_keeps_the_assignee(self):
+        self.assertEqual(self.adapter_ref.poll(self.instance), 1)
+        listed = [c["args"] for c in self.calls() if c["args"][:2] == ["issue", "list"]]
+        self.assertEqual(
+            listed[0][:6], ["issue", "list", "--delegate", "me", "--state", "Todo"]
+        )
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual(
+            (item["state"], item["assignee"], item["delegate"]),
+            ("In Progress", HUMAN, BOT),
+        )
+        # assigned to the bot but not delegated: not app work
+        self.assertEqual(self.state()["issues"]["ENG-2"]["state"], "Todo")
+        self.assertEqual(list(self.instance.convs), ["linear:ENG-1"])
+        self.assertNotIn("issue assign", self.commands())
+        for call in self.calls():
+            self.assertEqual((call["token"], call["key"]), (TOKEN, None))
+
+    def test_claim_checks_the_delegate(self):
+        self.edit(lambda s: s["issues"]["ENG-1"].update(delegate=None))
+        self.adapter_ref.pickup(
+            self.instance,
+            {"identifier": "ENG-1", "team": "ENG", "updatedAt": "2026-10-22T11:00:00Z"},
+        )
+        self.assertNotIn("issue state", self.commands())
+        # an applied but unconfirmed claim is read back by delegate
+        self.edit(
+            lambda s: (
+                s["issues"]["ENG-1"].update(delegate=BOT),
+                s.update(apply_fail=["issue state"]),
+            )
+        )
+        self.adapter_ref.poll(self.instance)
+        self.assertEqual(len(self.instance.convs["linear:ENG-1"]["pending"]), 1)
+
+    def test_unconfirmed_claim_mirrors_user_mode_by_delegate(self):
+        # still todo with the bot as delegate: left for the next poll
+        self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        self.assertEqual(self.state()["issues"]["ENG-1"]["delegate"], BOT)
+        # todo but no longer delegated: skipped, not handed back
+        self.edit(lambda s: s["issues"]["ENG-1"].update(delegate=None))
+        self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        self.assertNotIn("issue label", self.commands())
+        # delegated in an unexpected state: handed back
+        self.edit(lambda s: s["issues"]["ENG-1"].update(state="Done", delegate=BOT))
+        self.assertFalse(self.adapter_ref.confirm("ENG-1"))
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual(
+            (item["labels"], item["delegate"], item["assignee"]),
+            (["abra-blocked"], None, HUMAN),
+        )
+        self.assertIn("hit an error on this issue", item["comments"][-1]["body"])
+
+    def test_hand_back_keeps_a_human_assignee(self):
+        self.adapter_ref.poll(self.instance)
+        with self.assertLogs("abra.triggers", level="INFO") as logs:
+            self.adapter_ref.ack("linear:ENG-1", "todo-x", "failed")
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual(
+            (item["labels"], item["delegate"], item["assignee"]),
+            (["abra-blocked"], None, HUMAN),
+        )
+        self.assertNotIn("issue assign", self.commands())
+        self.assertIn("delegate cleared", "\n".join(logs.output))
+        update = [
+            c["args"] for c in self.calls() if c["args"][:2] == ["issue", "update"]
+        ]
+        self.assertEqual(
+            update, [["issue", "update", "ENG-1", "--delegate", "none", "--json"]]
+        )
+
+    def test_hand_back_assigns_the_creator_only_when_unassigned(self):
+        self.edit(lambda s: s["issues"]["ENG-1"].update(assignee=None))
+        self.adapter_ref.hand_back("ENG-1")
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual((item["delegate"], item["assignee"]), (None, CREATOR))
+        # a failed delegate clear is logged as an error, never silent
+        self.edit(
+            lambda s: (
+                s["issues"]["ENG-1"].update(delegate=BOT),
+                s.update(fail=["issue update"]),
+            )
+        )
+        with self.assertLogs("abra.triggers", level="ERROR") as logs:
+            self.adapter_ref.hand_back("ENG-1")
+        self.assertIn("could not clear the delegate", "\n".join(logs.output))
+
+    def test_thought_on_the_open_agent_session(self):
+        other = "44444444-4444-4444-8444-444444444444"
+        sessions = [
+            {
+                "id": other,
+                "status": "active",
+                "appUser": {"id": BOT},
+                "issue": {"id": "x"},
+            },
+            {
+                "id": other,
+                "status": "complete",
+                "appUser": {"id": BOT},
+                "issue": {"id": issue()["id"]},
+            },
+            {
+                "id": SESSION,
+                "status": "pending",
+                "appUser": {"id": BOT},
+                "issue": {"id": issue()["id"]},
+            },
+        ]
+        self.edit(lambda s: s.update(sessions=sessions))
+        self.adapter_ref.poll(self.instance)
+        activities = self.state()["activities"]
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["agentSessionId"], SESSION)
+        self.assertEqual(activities[0]["content"]["type"], "thought")
+
+    def test_agent_session_trouble_never_blocks_pickup(self):
+        for sessions in ([], "garbage", [{"id": 5}, "x", None]):
+            self.edit(
+                lambda s: (
+                    s.update(sessions=sessions),
+                    s["issues"]["ENG-1"].update(
+                        state="Todo",
+                        updatedAt="2026-10-22T11:%02d:00.000Z" % len(str(sessions)),
+                    ),
+                )
+            )
+            self.adapter_ref.poll(self.instance)
+            self.assertEqual(self.state()["issues"]["ENG-1"]["state"], "In Progress")
+        self.assertNotIn("activities", self.state())
+        self.assertEqual(len(self.instance.convs["linear:ENG-1"]["pending"]), 3)
+        with mock.patch.object(self.adapter_ref, "call", side_effect=KeyError("x")):
+            with self.assertLogs("abra.triggers", level="WARNING") as logs:
+                self.adapter_ref.think({"id": "x", "identifier": "ENG-1"})
+        self.assertIn("agent session update failed: keyerror", logs.output[0].lower())
+
+    def test_auth_error_requests_a_restart(self):
+        stopped = threading.Event()
+        self.adapter_ref.stopper = stopped.set
+        self.edit(lambda s: s.update(auth_fail=["issue list"]))
+        with self.assertLogs("abra.triggers", level="WARNING") as logs:
+            self.adapter_ref.poll(self.instance)
+            self.adapter_ref.poll(self.instance)
+        self.assertTrue(self.adapter_ref.renew.is_set() and stopped.is_set())
+        output = "\n".join(logs.output)
+        self.assertEqual(output.count("linear rejected the app token"), 1)
+        # user mode keeps today's behavior: an auth error is only logged
+        user = self.adapter()
+        user.poll(self.instance)
+        self.assertFalse(user.renew.is_set())
+
+
+class TokenEndpoint:
+    """a local stub of linear's token endpoint; tests point token_url at it."""
+
+    def __init__(self, test):
+        self.requests = []
+        self.status, self.body, self.headers = 200, b"", {}
+        endpoint = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                endpoint.requests.append(
+                    (self.path, dict(self.headers), self.rfile.read(length).decode())
+                )
+                self.send_response(endpoint.status)
+                for name, value in endpoint.headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(endpoint.body)))
+                self.end_headers()
+                self.wfile.write(endpoint.body)
+
+            do_GET = do_POST
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        test.addCleanup(self.server.server_close)
+        test.addCleanup(self.server.shutdown)
+        self.url = "http://127.0.0.1:%d/oauth/token" % self.server.server_port
+        patcher = mock.patch.object(linear, "TOKEN_URL", self.url)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+    def reply(self, value, status=200, **headers):
+        self.status, self.headers = status, headers
+        self.body = value if isinstance(value, bytes) else json.dumps(value).encode()
+
+
+def granted(lifetime=30 * 24 * 3600, token=TOKEN):
+    return {"access_token": token, "token_type": "Bearer", "expires_in": lifetime}
+
+
+class MintTests(unittest.TestCase):
+    def setUp(self):
+        self.endpoint = TokenEndpoint(self)
+
+    def mint(self):
+        return linear.mint(CLIENT_ID, CLIENT_SECRET, "read,write,app:assignable")
+
+    def test_mint_success(self):
+        self.endpoint.reply(dict(granted(), scope="read write"))
+        self.assertEqual(self.mint(), (TOKEN, 30 * 24 * 3600))
+        path, headers, body = self.endpoint.requests[0]
+        self.assertEqual(path, "/oauth/token")
+        self.assertEqual(
+            urllib.parse.parse_qs(body),
+            {
+                "grant_type": ["client_credentials"],
+                "scope": ["read,write,app:assignable"],
+            },
+        )
+        self.assertEqual(headers["Content-Type"], "application/x-www-form-urlencoded")
+        kind, _, value = headers["Authorization"].partition(" ")
+        self.assertEqual(kind, "Basic")
+        self.assertEqual(
+            base64.b64decode(value).decode(), CLIENT_ID + ":" + CLIENT_SECRET
+        )
+        self.assertNotIn(CLIENT_SECRET, body)
+
+    def test_mint_failures_never_echo_the_response(self):
+        cases = [
+            (
+                dict(value={"error": "invalid_client " + CLIENT_SECRET}, status=401),
+                "http 401",
+            ),
+            (dict(value=b"not json " + CLIENT_SECRET.encode()), "not valid json"),
+            (
+                dict(value=b'{"access_token": "a", "access_token": "b"}'),
+                "not valid json",
+            ),
+            (dict(value=b'{"expires_in": NaN}'), "not valid json"),
+            (dict(value=[TOKEN]), "not an object"),
+            (
+                dict(value=dict(granted(), access_token="short")),
+                "no valid access_token",
+            ),
+            (dict(value=dict(granted(), token_type="mac")), "not a bearer token"),
+            (dict(value=granted(lifetime=60)), "invalid expires_in"),
+            (dict(value=granted(lifetime=True)), "invalid expires_in"),
+            (dict(value=granted(lifetime="2592000")), "invalid expires_in"),
+            (dict(value=b" " * (linear.MAX_TOKEN_RESPONSE + 1)), "too large"),
+        ]
+        for reply, expected in cases:
+            self.endpoint.reply(**reply)
+            with self.assertRaisesRegex(ValueError, expected) as caught:
+                self.mint()
+            self.assertNotIn(CLIENT_SECRET, str(caught.exception))
+            self.assertNotIn(TOKEN, str(caught.exception))
+
+    def test_redirects_are_not_followed(self):
+        self.endpoint.reply(b"", status=302, Location=self.endpoint.url + "/elsewhere")
+        with self.assertRaisesRegex(ValueError, "http 302"):
+            self.mint()
+        self.assertEqual(len(self.endpoint.requests), 1)
+
+    def test_unreachable_endpoint(self):
+        self.endpoint.server.server_close()
+        with self.assertRaisesRegex(ValueError, "could not reach the linear token"):
+            self.mint()
+
+    def test_production_url_is_https(self):
+        # a fixed constant, not configurable from the environment
+        source = (TRIGGERS / "linear.py").read_text()
+        self.assertIn('TOKEN_URL = "https://api.linear.app/oauth/token"', source)
+        self.assertNotIn('TOKEN_URL"', source)
+
+
+class AppSettingsTests(Base):
+    def env(self, **values):
+        env = {
+            "PATH": self.path,
+            "LINEAR_CLIENT_ID": CLIENT_ID,
+            "LINEAR_CLIENT_SECRET": CLIENT_SECRET,
+        }
+        env.update(values)
+        return {k: v for k, v in env.items() if v is not None}
+
+    def test_app_mode_and_scopes(self):
+        config = linear.settings(self.env(HOME="/h"))
+        self.assertEqual(config["actor"], "app")
+        self.assertEqual(config["auth"]["scopes"], "read,write,app:assignable")
+        self.assertEqual(set(config["env"]), {"PATH", "HOME"})
+        scoped = linear.settings(
+            self.env(LINEAR_APP_SCOPES="read, write,read,app:mentionable")
+        )
+        self.assertEqual(scoped["auth"]["scopes"], "read,write,app:mentionable")
+        self.assertEqual(
+            linear.settings({"PATH": self.path, "LINEAR_API_KEY": KEY})["actor"], "user"
+        )
+
+    def test_conflicts_and_rejections_name_variables_only(self):
+        cases = [
+            (dict(LINEAR_API_KEY=KEY), "not both"),
+            (dict(LINEAR_CLIENT_SECRET=None), "needs both linear_client_id and"),
+            (dict(LINEAR_CLIENT_ID=None), "needs both linear_client_id and"),
+            (dict(LINEAR_CLIENT_ID=None, LINEAR_API_KEY=KEY), "not both"),
+            (
+                dict(LINEAR_CLIENT_SECRET="bad secret!"),
+                "linear_client_secret is malformed",
+            ),
+            (dict(LINEAR_CLIENT_ID="x"), "linear_client_id is malformed"),
+            (dict(LINEAR_APP_SCOPES="read,write,admin"), "must not include admin"),
+            (dict(LINEAR_APP_SCOPES="read,everything"), "must be comma-separated from"),
+            (dict(LINEAR_APP_SCOPES=" , "), "must be comma-separated from"),
+        ]
+        for values, expected in cases:
+            with self.assertRaisesRegex(ValueError, expected) as caught:
+                linear.settings(self.env(**values))
+            for secret in (CLIENT_SECRET, KEY, CLIENT_ID):
+                self.assertNotIn(secret, str(caught.exception))
+
+    def test_agent_env_drops_credential_inputs(self):
+        env = {
+            "PATH": "/bin",
+            "ABRA_AGENT_CMD": "x",
+            "LINEAR_CLIENT_ID": CLIENT_ID,
+            "LINEAR_CLIENT_SECRET": CLIENT_SECRET,
+            "LINEAR_API_KEY": KEY,
+            "LINEAR_ACCESS_TOKEN": "stale",
+        }
+        agent = linear.agent_env(
+            env, "app", {"PATH": "/bin", "LINEAR_ACCESS_TOKEN": TOKEN}
+        )
+        self.assertEqual(
+            agent,
+            {
+                "PATH": "/bin",
+                "ABRA_AGENT_CMD": "x",
+                "LINEAR_ACCESS_TOKEN": TOKEN,
+                "LINEAR_ACTOR": "app",
+            },
+        )
+        user = linear.agent_env(
+            {"LINEAR_API_KEY": KEY}, "user", {"LINEAR_API_KEY": KEY}
+        )
+        self.assertEqual(user, {"LINEAR_API_KEY": KEY, "LINEAR_ACTOR": "user"})
+
+    def test_redact_masks_known_values(self):
+        redact = linear.Redact()
+        redact.values.append(TOKEN)
+        record = logging.LogRecord(
+            "abra.triggers", logging.INFO, "", 0, "token %s", (TOKEN,), None
+        )
+        redact.filter(record)
+        self.assertEqual(record.getMessage(), "token [redacted]")
+
+
+class AppMainTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.write(
+            {"viewer": BOT, "issues": {"ENG-1": issue(assignee=HUMAN, delegate=BOT)}}
+        )
+        self.endpoint = TokenEndpoint(self)
+        self.endpoint.reply(granted())
+        self.log = Path(self.temporary.name) / "agent.log"
+        config = Path(self.temporary.name) / "agent.json"
+        config.write_text(json.dumps({"log": str(self.log)}))
+        self.env = {
+            "PATH": self.path,
+            "HOME": str(self.root),
+            "LINEAR_CLIENT_ID": CLIENT_ID,
+            "LINEAR_CLIENT_SECRET": CLIENT_SECRET,
+            "ABRA_AGENT_CMD": " ".join([sys.executable, str(FAKE), str(config)]),
+            "ABRA_HEARTBEAT": "0",
+        }
+        root = logging.getLogger()
+        self.addCleanup(setattr, root, "handlers", list(root.handlers))
+        self.agent_envs = []
+        original = runtime.from_args
+
+        def capture(adapter, args, env, **options):
+            self.agent_envs.append(dict(env))
+            return original(adapter, args, env, **options)
+
+        patcher = mock.patch.object(runtime, "from_args", capture)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def main(self, lifetime=None, timeout=20):
+        if lifetime:
+            self.endpoint.reply(granted(lifetime=lifetime))
+        stopper = threading.Timer(timeout, os.kill, (os.getpid(), signal.SIGTERM))
+        stopper.daemon = True
+        stopper.start()
+        self.addCleanup(stopper.cancel)
+        with mock.patch.object(linear, "MIN_LIFETIME", 0):
+            with self.assertLogs("abra.triggers", level="INFO") as logs:
+                code = linear.main(["--root", str(self.root)], self.env)
+        output = "\n".join(r.getMessage() for r in logs.records)
+        for secret in (CLIENT_SECRET, TOKEN, CLIENT_ID):
+            self.assertNotIn(secret, output)
+        return code, output
+
+    def test_mint_failure_exits_1(self):
+        self.endpoint.reply({"error": "invalid_client"}, status=401)
+        code, output = self.main()
+        self.assertEqual(code, 1)
+        self.assertIn("linear token endpoint returned http 401", output)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.agent_envs, [])
+
+    def test_mode_conflict_exits_1_before_minting(self):
+        self.env["LINEAR_API_KEY"] = KEY
+        code, output = self.main()
+        self.assertEqual(code, 1)
+        self.assertIn("not both", output)
+        self.assertEqual(self.endpoint.requests, [])
+
+    def test_expiry_restarts_after_a_graceful_stop(self):
+        started = time.monotonic()
+        code, output = self.main(lifetime=4)
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertIn("the linear app token is near expiry", output)
+        self.assertIn("needs renewal", output)
+        self.assertEqual(len(self.endpoint.requests), 1)
+        item = self.state()["issues"]["ENG-1"]
+        self.assertEqual((item["state"], item["assignee"]), ("In Progress", HUMAN))
+        # the secret never reaches children or the agent
+        for call in self.calls():
+            self.assertEqual((call["token"], call["key"]), (TOKEN, None))
+            self.assertNotIn("LINEAR_CLIENT_SECRET", call["env"])
+            self.assertNotIn("LINEAR_CLIENT_ID", call["env"])
+        agent = self.agent_envs[0]
+        self.assertEqual(
+            (agent["LINEAR_ACCESS_TOKEN"], agent["LINEAR_ACTOR"]), (TOKEN, "app")
+        )
+        for name in ("LINEAR_CLIENT_SECRET", "LINEAR_CLIENT_ID", "LINEAR_API_KEY"):
+            self.assertNotIn(name, agent)
+
+    def test_auth_error_restarts_after_a_graceful_stop(self):
+        self.edit(lambda s: s.update(auth_fail=["issue state"]))
+        code, output = self.main()
+        self.assertEqual(code, 1)
+        self.assertIn("linear rejected the app token", output)
+        self.assertIn("needs renewal", output)
+        self.assertEqual(self.state()["issues"]["ENG-1"]["state"], "Todo")
+
+    def test_user_mode_exports_the_actor(self):
+        del self.env["LINEAR_CLIENT_ID"], self.env["LINEAR_CLIENT_SECRET"]
+        self.env["LINEAR_API_KEY"] = KEY
+        self.write({"viewer": BOT, "issues": {}})
+        code, _ = self.main(timeout=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.endpoint.requests, [])
+        agent = self.agent_envs[0]
+        self.assertEqual(
+            (agent["LINEAR_API_KEY"], agent["LINEAR_ACTOR"]), (KEY, "user")
+        )
 
 
 if __name__ == "__main__":

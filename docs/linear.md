@@ -5,6 +5,19 @@ shared trigger runtime ([triggers.md](triggers.md)). it polls linear with
 [linear-axi](https://github.com/schmidthole/linear-axi), so the host needs
 outbound https only and no public endpoint or webhook.
 
+it runs as one of two linear actors:
+
+- user mode (`LINEAR_API_KEY`): a bot user on a paid seat. work is issues
+  assigned to that user.
+- app mode (`LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET`): a linear agent app
+  (oauth `actor=app`, no paid seat). people assign issues to the agent, which
+  linear records as the issue's `delegate`; the human assignee stays. see
+  [app mode](#app-mode).
+
+setting both, or only one of the two app variables, exits 1 naming the
+variables. the sections below describe user mode; app mode differences are
+listed in its section. the agent gets `LINEAR_ACTOR=app` or `LINEAR_ACTOR=user`.
+
 ## behavior
 
 - work starts only by assignment: an issue assigned to the bot user and in the
@@ -70,7 +83,7 @@ issue text, and to record the key, identifier, and url in the task body.
   the ceiling, comments the result, and hands back as cannot complete with that
   reason.
 
-abra makes these writes with `linear-axi` and the same `LINEAR_API_KEY`, which it
+abra makes these writes with `linear-axi` and the same `LINEAR_API_KEY` (or app token), which it
 inherits from the listener's environment.
 
 ## resume
@@ -117,7 +130,9 @@ removing the blocked label is up to the human; the adapter ignores labels.
 
 | variable | effect |
 | --- | --- |
-| `LINEAR_API_KEY` | the bot user's personal api key (required) |
+| `LINEAR_API_KEY` | user mode: the bot user's personal api key |
+| `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | app mode: the agent app's oauth client credentials |
+| `LINEAR_APP_SCOPES` | app mode token scopes, default `read,write,app:assignable` |
 | `LINEAR_TEAMS` | comma-separated team keys to serve, for example `ENG,OPS`; empty serves every team |
 | `LINEAR_POLL_SECONDS` | poll period, 10 to 3600, default 30 |
 | `LINEAR_TODO_STATE` | state that marks work for the bot, default `Todo` |
@@ -135,6 +150,86 @@ sigint or sigterm stops polling, lets the running turn finish (bounded), closes
 the agent session, and keeps pending messages stored. if the agent exits, the
 listener exits 1 so the supervisor restarts it.
 
+## app mode
+
+### setup
+
+1. as a workspace admin, open settings, api, applications (oauth applications)
+   and create a new application. its name and icon are what people see when
+   they assign issues to the agent.
+2. set the actor to app (`actor=app`), so the app acts as its own agent user
+   and uses no paid seat.
+3. enable client credentials. no webhooks are needed: the adapter polls.
+4. scopes: `read`, `write`, and `app:assignable` (so people can assign issues
+   to the agent). `app:mentionable` is optional and unused. never grant `admin`;
+   the adapter refuses it.
+5. install the app in the workspace (an admin approves it). client credentials
+   tokens reach the workspace's public teams; add the agent to any private team
+   it should serve. keep `LINEAR_TEAMS` set to the served teams.
+6. create the workflow states and the blocked label in each team as in user
+   mode, and install linear-axi at the pinned commit (it must support
+   `LINEAR_ACCESS_TOKEN` and `--delegate`).
+7. keep the client id and secret in your secret store and run:
+
+   ```sh
+   LINEAR_CLIENT_ID=... LINEAR_CLIENT_SECRET=... LINEAR_TEAMS=ENG \
+     python3 triggers/linear.py --root /path/to/abra-instance --name abra
+   ```
+
+### token
+
+at startup the listener mints an app token with the client credentials grant:
+`POST https://api.linear.app/oauth/token`, form encoded,
+`grant_type=client_credentials` and `scope=<LINEAR_APP_SCOPES>`, with the client
+id and secret in http basic auth. the request verifies tls (1.2 or later),
+never follows a redirect, times out after 30 seconds, reads at most 64 kib, and
+accepts only a strict json object with a bearer `access_token` and an integer
+`expires_in` of at least two hours. a failure exits 1, naming the failure, never
+the response. the token stays in memory and reaches linear-axi children and the
+agent as `LINEAR_ACCESS_TOKEN`.
+
+the token lasts about 30 days and has no refresh token. one day before expiry
+(or half its lifetime, if shorter), or on the first linear-axi `AUTH_ERROR`, the
+listener stops gracefully (running turn finished, pending messages stored) and
+exits 1, so the supervisor (the container entrypoint and orchestrator) restarts
+it with a fresh token.
+
+### behavior
+
+- pickup lists `linear-axi issue list --delegate me --state <todo>`: todo issues
+  delegated to the agent, per team in `LINEAR_TEAMS`. the claim checks the
+  delegate (not the assignee) and moves the issue to the in-progress state; the
+  human assignee is untouched. unconfirmed claims are read back as in user mode,
+  checking the delegate.
+- hand back (the `failed` marker, a failed submit, an unconfirmed claim in an
+  unexpected state, and abra's cannot-complete path): comment, add the blocked
+  label, assign the creator only when the issue has no assignee, then clear the
+  delegate (`linear-axi issue update <id> --delegate none`). a failed clear is
+  logged as an error.
+- success: the issue stays delegated to the agent and moves to the review
+  state.
+- resume: delegate the issue to the agent again and set it to todo.
+- agent session (best effort): after a claim the adapter reads
+  `agentSessions(first: 50, orderBy: updatedAt)`, picks the open session
+  (pending, active, awaiting input, or stale) whose `issue` is this issue and
+  whose `appUser` is the agent, and posts a `thought` with
+  `agentActivityCreate`. any failure is logged and never blocks pickup.
+
+### agent session notes
+
+checked against linear's sdk schema
+(`packages/sdk/src/schema.graphql` in github.com/linear/linear, read
+2026-10-23): `Query.agentSessions` takes only pagination arguments (no filter),
+`Issue.agentSessions` is marked internal, `AgentSession` has `issue`,
+`appUser`, and `status`, and `agentActivityCreate` takes
+`AgentActivityCreateInput { agentSessionId, content }` with content
+`{type: "thought", body}`. so a polling client can find the session only by
+scanning recent sessions. limits: linear expects a first activity within
+seconds of a delegation, which a 30 second poll can miss, so the session may
+show as unresponsive until the thought lands; a session beyond the 50 most
+recently updated is not found; the adapter does not create sessions or close
+them with a `response`.
+
 ## security
 
 - anyone who can assign issues to the bot in an allowed team can direct this
@@ -143,6 +238,13 @@ listener exits 1 so the supervisor restarts it.
   runtime's nonce-fenced untrusted blocks. scope the bot's team membership and
   `LINEAR_TEAMS` accordingly, and run one instance per team (or per set of teams
   that share one trust boundary): all issues share one resident session.
+- app mode: the client secret is read from the environment and used only for
+  the token request. it never reaches linear-axi children or the agent, which
+  get only the minted token (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and
+  `LINEAR_API_KEY` are stripped from the agent's environment), and the secret
+  and token are masked in any log line. the token can do whatever its scopes
+  allow in every team the app can see, so keep scopes minimal and rotate the
+  secret in linear if it leaks (existing tokens may need revoking too).
 - the key is read from the environment only, passed only to linear-axi children
   (whose environment is limited to `PATH`, `HOME`, locale, temp, and tls
   variables plus the key) and to the agent, which needs it for its own linear
@@ -175,5 +277,8 @@ listener exits 1 so the supervisor restarts it.
   issue between the check and the claim. run one listener per bot user.
 - if the process dies between a successful claim and storing the pickup, the
   issue stays in progress with the bot; reassign it and set it to todo to retry.
-- a live check needs a linear workspace and a bot seat; the tests use a stub
-  linear-axi.
+- a live check needs a linear workspace and a bot seat or agent app; the tests
+  use a stub linear-axi and a stub token endpoint.
+- app mode: if the process stops between a claim and its hand back (a token
+  expiry or auth error included), the issue can stay in progress and delegated;
+  delegate it again and set it to todo to retry.

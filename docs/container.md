@@ -64,7 +64,9 @@ which:
 
 if sshd or the listener exits for any reason, the other is stopped and the
 container exits non-zero so the orchestrator restarts it; there is no restart
-loop inside. sigterm or sigint is forwarded to both, and the container exits 0
+loop inside. the linear listener in app mode relies on this: it exits 1
+before its app token expires, or when linear rejects it, so the restart mints a
+fresh one. sigterm or sigint is forwarded to both, and the container exits 0
 once they stop. the listener lets running turns finish on sigterm, so give the
 container a long enough stop grace period.
 
@@ -110,7 +112,8 @@ platform's secret store.
 | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | claude code auth (or run `claude` over ssh once to log in) |
 | `GH_TOKEN` | gh auth (or `gh auth login` over ssh) |
 | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | slack listener tokens, see [slack.md](slack.md) |
-| `LINEAR_API_KEY` | linear bot key, plus the other `LINEAR_*` settings in [linear.md](linear.md) |
+| `LINEAR_API_KEY` | linear bot key (user mode), plus the other `LINEAR_*` settings in [linear.md](linear.md) |
+| `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | linear agent app credentials (app mode, instead of `LINEAR_API_KEY`); pass with `-e LINEAR_CLIENT_ID -e LINEAR_CLIENT_SECRET -e ABRA_TRIGGER=linear` |
 | `ABRA_TRIGGER` | `none` (default), `slack`, or `linear` |
 | `ABRA_NAME` | bot name for the listener, default `abra` |
 | `ABRA_ROOT` | instance root, default `/home/abra/abra` |
@@ -132,9 +135,10 @@ this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand. the
 resident settings (`ABRA_AGENT_CMD`, `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`,
 `ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE`) and `CLAUDE_CODE_EXECUTABLE` are not
 shared; the trigger listener gets the container's full environment.
-the slack tokens and `LINEAR_API_KEY` are left out of the session environment,
-but this is not a security boundary; export the linear key by hand in a session
-that needs `linear-axi`. a value containing `"`, `\`, or control characters is not
+the slack tokens, `LINEAR_API_KEY`, and `LINEAR_CLIENT_SECRET` are left out of
+the session environment, but this is not a security boundary; export the linear
+key by hand in a session that needs `linear-axi`. in app mode the listener mints
+its token in memory; a session has no token unless one is exported by hand. a value containing `"`, `\`, or control characters is not
 shared and its name is logged.
 
 ssh sessions run as the same user as the entrypoint and the listener, so anyone
