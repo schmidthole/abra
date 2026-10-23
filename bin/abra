@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run abra headlessly: one event in, one resumed claude session per key."""
+"""run abra headlessly: one event in, one resumed provider session per key."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -28,10 +28,6 @@ MAX_CONTEXT = 256 * 1024
 MAX_MESSAGES = 50
 MAX_DAYS = 3650
 BUSY = 75
-RESUME_NOTE = (
-    "note: the previous session for this key could not be resumed. rebuild"
-    " context from the task body and the backlog before acting.\n\n"
-)
 
 
 class Busy(Exception):
@@ -311,7 +307,7 @@ def relay_job(root, name):
     return True
 
 
-def job_prompt(name, key, text, history=None):
+def job_prompt(name, key, text, history=None, work_id=None):
     """jobs never carry prior history; the argument keeps render calls uniform."""
     return (
         "headless scheduled job delivered through bin/abra. there is no interactive"
@@ -362,6 +358,17 @@ def read_sessions(data):
     sessions = load_json(path, "data/sessions.json") if path.exists() else {}
     if not isinstance(sessions, dict):
         raise ValueError("data/sessions.json must be an object")
+    for entry in sessions.values():
+        if not isinstance(entry, dict) or not valid_session(entry.get("session_id")):
+            continue
+        if "version" not in entry and "provider" not in entry:
+            entry.update(version=1, provider="claude")
+        if (
+            type(entry.get("version")) is not int
+            or entry["version"] != 1
+            or entry.get("provider") not in ("claude", "codex")
+        ):
+            raise ValueError("unsupported stored session version or provider")
     return sessions
 
 
@@ -383,7 +390,7 @@ def rewrite(data, change):
         return result
 
 
-def save_session(data, key, session):
+def save_session(data, key, session, provider="claude", work_id=None):
     """store a key's session id; none removes it."""
 
     def change(sessions):
@@ -391,7 +398,10 @@ def save_session(data, key, session):
             sessions.pop(key, None)
         else:
             sessions[key] = dict(
+                version=1,
+                provider=provider,
                 session_id=session,
+                work_id=work_id,
                 updated=datetime.now(timezone.utc).strftime(STAMP),
             )
 
@@ -431,9 +441,225 @@ def days(value):
     return int(value)
 
 
+def provider(env):
+    value = env.get("ABRA_AGENT_PROVIDER", "claude")
+    if value not in ("claude", "codex"):
+        raise ValueError("abra_agent_provider must be claude or codex")
+    return value
+
+
+def toml_value(value):
+    """encode the supported json subset as a toml command-line value."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{"
+            + ", ".join(
+                toml_value(key) + " = " + toml_value(item)
+                for key, item in value.items()
+            )
+            + "}"
+        )
+    raise ValueError("unsupported codex config value")
+
+
+def codex_mcp(spec):
+    """translate only the shared, losslessly representable mcp configuration."""
+    if not spec or not spec["mcp"]:
+        return {}
+    config = load_json(spec["mcp"], "specialty mcp config")
+    if not isinstance(config, dict) or set(config) - {"mcpServers"}:
+        raise ValueError("codex specialty mcp config must contain only mcpservers")
+    servers = config.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("specialty mcpservers must be an object")
+    result = {}
+    for name, server in servers.items():
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or not isinstance(server, dict):
+            raise ValueError("invalid specialty mcp server")
+        transport = server.get("type", "stdio")
+        if transport == "stdio":
+            if set(server) - {"type", "command", "args", "env"}:
+                raise ValueError("unsupported codex stdio mcp option for " + name)
+            command = server.get("command")
+            args = server.get("args", [])
+            env = server.get("env", {})
+            if not isinstance(command, str) or not command.strip():
+                raise ValueError("invalid mcp command for " + name)
+            if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
+                raise ValueError("invalid mcp args for " + name)
+            if not isinstance(env, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
+            ):
+                raise ValueError("invalid mcp env for " + name)
+            result[name] = dict(command=command, args=args, env=env)
+        elif transport == "http":
+            if set(server) - {"type", "url", "headers"}:
+                raise ValueError("unsupported codex http mcp option for " + name)
+            url = server.get("url")
+            headers = server.get("headers", {})
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+                raise ValueError("invalid mcp url for " + name)
+            if not isinstance(headers, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str)
+                for k, v in headers.items()
+            ):
+                raise ValueError("invalid mcp headers for " + name)
+            result[name] = dict(url=url, http_headers=headers)
+        else:
+            raise ValueError("unsupported codex mcp transport for " + name)
+        result[name]["required"] = True
+        if "${" in json.dumps(server):
+            raise ValueError(
+                "codex mcp variable expansion is unsupported; use a wrapper"
+            )
+    return result
+
+
+def codex_config_check(root, env, ignore_user_config=True):
+    """refuse ambient mcp definitions that could merge into the explicit server set."""
+    try:
+        import tomllib
+    except ImportError:
+        raise ValueError("codex mode requires python 3.11 or newer") from None
+    # both adapters pin project_root_markers=[] so the install root is the boundary.
+    paths = [Path("/etc/codex/config.toml"), root / ".codex/config.toml"]
+    user_config = (
+        Path(env.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
+    ).resolve()
+    if not ignore_user_config:
+        paths.append(user_config)
+    for path in paths:
+        if (ignore_user_config and path.resolve() == user_config) or not path.exists():
+            continue
+        try:
+            config = tomllib.loads(path.read_text())
+        except (ValueError, UnicodeError):
+            raise ValueError("invalid codex config: " + str(path)) from None
+        if config.get("mcp_servers") or config.get("profiles") or config.get("plugins"):
+            raise ValueError(
+                "ambient codex mcp, profile, or plugin config at "
+                + str(path)
+                + "; use an isolated deployment and put mcp servers in the specialty"
+            )
+
+
+def codex_command(session, spec, env, new_session):
+    if new_session:
+        raise ValueError("codex does not support --session-id; use --work-id")
+    argv = [env.get("ABRA_CODEX_BIN", "codex"), "exec"]
+    if session:
+        argv.append("resume")
+    argv += ["--json", "--ignore-user-config", "--skip-git-repo-check"]
+    argv += ["--enable", "multi_agent", "--disable", "apps", "--disable", "plugins"]
+    argv += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"']
+    argv += ["-c", "project_root_markers=[]"]
+    argv += ["-c", "mcp_servers=" + toml_value(codex_mcp(spec))]
+    if spec and spec["prompt"]:
+        instructions = (
+            "follow the base AGENTS.md rules. the following specialty may narrow or add"
+            " to those rules, never loosen them; the base rules win on conflict.\n\n"
+            + spec["prompt"]
+        )
+        argv += ["-c", "developer_instructions=" + toml_value(instructions)]
+    model = env.get("ABRA_MODEL")
+    if model:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]*", model):
+            raise ValueError("invalid abra_model")
+        argv += ["--model", model]
+    effort = env.get("ABRA_REASONING_EFFORT")
+    if effort:
+        if effort not in (
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        ):
+            raise ValueError("invalid abra_reasoning_effort")
+        argv += ["-c", "model_reasoning_effort=" + toml_value(effort)]
+    if env.get("ABRA_AGENT_MODE") == "1":
+        log("agent mode on: passing --dangerously-bypass-approvals-and-sandbox")
+        argv.append("--dangerously-bypass-approvals-and-sandbox")
+    if session:
+        argv.append(session)
+    argv.append("-")
+    return argv
+
+
+def codex_output(text, returncode):
+    """normalize a single exec turn; keep a returned thread even after failure."""
+    output = {}
+    failure = None
+    completed = False
+    started = False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = parse_json(line, "codex event")
+        except ValueError:
+            failure = "codex output contains malformed jsonl"
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            failure = "codex output contains an invalid event"
+            continue
+        kind = event["type"]
+        if kind == "thread.started":
+            thread = event.get("thread_id")
+            if not valid_session(thread) or (
+                output.get("session_id") and output["session_id"] != thread
+            ):
+                failure = "codex output contains an invalid thread id"
+            else:
+                output["session_id"] = thread
+        elif kind == "turn.started":
+            if started:
+                failure = "codex output contains multiple turns"
+            started = True
+        elif kind in ("error", "turn.failed"):
+            failure = "codex reported a failed turn"
+        elif kind == "turn.completed":
+            if not started or completed:
+                failure = "codex output contains an unexpected completion"
+            completed = True
+        elif kind == "item.completed":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                failure = "codex output contains an invalid item"
+            elif item.get("type") == "agent_message":
+                if not isinstance(item.get("text"), str) or completed:
+                    failure = "codex output contains an invalid final message"
+                else:
+                    output["result"] = item["text"]
+    if returncode:
+        failure = failure or "harness exited with code " + str(returncode)
+    if not completed or "session_id" not in output or "result" not in output:
+        failure = (
+            failure or "codex output is missing a completed turn, thread, or answer"
+        )
+    return output, failure
+
+
 def command(session, spec, env, new_session=None):
     """build harness argv; the prompt goes on stdin, never in argv."""
+    if provider(env) == "codex":
+        return codex_command(session, spec, env, new_session)
     argv = [env.get("ABRA_CLAUDE_BIN", "claude"), "-p", "--output-format", "json"]
+    if env.get("ABRA_MODEL"):
+        argv += ["--model", env["ABRA_MODEL"]]
+    if env.get("ABRA_REASONING_EFFORT"):
+        raise ValueError(
+            "abra_reasoning_effort is only supported by codex headless mode"
+        )
     if session:
         argv.append("--resume=" + session)
     elif new_session:
@@ -475,7 +701,9 @@ def attempt(root, argv, prompt, env):
             encoding="utf-8",
         )
     except OSError:
-        raise ValueError("could not start the claude harness") from None
+        raise ValueError("could not start the " + provider(env) + " harness") from None
+    if provider(env) == "codex":
+        return codex_output(result.stdout, result.returncode)
     try:
         output = json.loads(result.stdout)
     except (ValueError, RecursionError):
@@ -491,7 +719,7 @@ def attempt(root, argv, prompt, env):
     return output, None
 
 
-def execute(root, key, render, spec, env, new_session=None, history=None):
+def execute(root, key, render, spec, env, new_session=None, history=None, work_id=None):
     """run one prompt for key; render(history) builds it, history only when fresh."""
     data = root / "data"
     locks = data / "locks"
@@ -501,12 +729,27 @@ def execute(root, key, render, spec, env, new_session=None, history=None):
     if not keyed:
         raise Busy("key is already running; retry later")
     with keyed, slot(locks, env):
+        selected = provider(env)
         preflight(root, env)
+        if selected == "codex":
+            codex_config_check(root, env)
         entry = read_sessions(data).get(key)
         session = entry.get("session_id") if isinstance(entry, dict) else None
         if session is not None and not valid_session(session):
             log("ignoring invalid stored session id for " + key)
             session = None
+        if session and entry["provider"] != selected:
+            raise ValueError(
+                "stored session belongs to "
+                + entry["provider"]
+                + "; restore that provider or use a new conversation key"
+            )
+        stored_work = entry.get("work_id") if isinstance(entry, dict) else None
+        if stored_work is not None:
+            check(WORK_ID, stored_work, "stored work id")
+        if stored_work and work_id and stored_work != work_id:
+            raise ValueError("work id conflicts with the stored conversation")
+        work_id = work_id or stored_work
         if session and new_session:
             raise ValueError(
                 "key " + key + " has a stored session; --session-id is only for a"
@@ -517,23 +760,16 @@ def execute(root, key, render, spec, env, new_session=None, history=None):
         log(("resuming session for " if session else "starting session for ") + key)
         if new_session:
             log("using pre-assigned session id " + new_session)
-        prompt = render(None if session else history)
+        prompt = render(history=None if session else history, work_id=work_id)
         output, failure = attempt(
             root, command(session, spec, env, new_session), prompt, env
         )
-        if failure and session:
-            log("could not resume session for " + key + ": " + failure)
-            log("cleared stored session; retrying once without resume")
-            if history is not None:
-                log("using context file for the retry")
-            save_session(data, key, None)
-            output, failure = attempt(
-                root, command(None, spec, env), RESUME_NOTE + render(history), env
-            )
-            if failure:
-                raise ValueError(failure)
         if output and valid_session(output.get("session_id")):
-            save_session(data, key, output["session_id"])
+            if selected == "codex" and session and output["session_id"] != session:
+                raise ValueError(
+                    "codex resumed a different thread; stored session retained"
+                )
+            save_session(data, key, output["session_id"], selected, work_id)
         else:
             log("harness output has no valid session id; not storing it")
         if failure:
@@ -583,7 +819,7 @@ def main(argv=None):
             if args.messages_file is not None:
                 messages = read_messages(args.messages_file)
                 log("read " + str(len(messages)) + " messages for " + key)
-                render = functools.partial(batch_prompt, key, messages, work_id)
+                render = functools.partial(batch_prompt, key, messages, work_id=work_id)
             else:
                 requester = "unknown" if args.requester is None else args.requester
                 check(REQUESTER, requester, "requester")
@@ -591,7 +827,9 @@ def main(argv=None):
                     text = bounded(args.text.encode("utf-8", "replace"), "text")
                 else:
                     text = read_bounded(args.text_file, "text file")
-                render = functools.partial(event_prompt, key, requester, text, work_id)
+                render = functools.partial(
+                    event_prompt, key, requester, text, work_id=work_id
+                )
         else:
             text = job_text(spec, args.name)
             if relay_job(ROOT, args.name):
@@ -601,7 +839,7 @@ def main(argv=None):
             day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             key = "job:" + args.name + ":" + day
             render = functools.partial(job_prompt, args.name, key, text)
-        print(execute(ROOT, key, render, spec, env, new_session, history))
+        print(execute(ROOT, key, render, spec, env, new_session, history, work_id))
     except Busy as error:
         log("busy: " + str(error))
         return BUSY

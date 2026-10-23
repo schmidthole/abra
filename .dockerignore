@@ -7,6 +7,20 @@ specialty/
 .sources/
 .cache/
 .claude/settings.local.json
+# exclude operator codex state while retaining project skills and rules.
+**/.codex/*.json
+**/.codex/*.jsonl
+**/.codex/config.toml
+**/.codex/config.local.toml
+**/.codex/sessions/
+**/.codex/archived_sessions/
+**/.codex/log/
+**/.codex/logs/
+**/.codex/tmp/
+**/.codex/shell_snapshots/
+**/.codex/memories/
+**/.codex/*.sqlite*
+**/.codex/*.db*
 NOTES.md
 **/.env*
 **/*.prod.*

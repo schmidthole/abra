@@ -175,20 +175,23 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
 
 ## resident session
 
-- start: runs the specialty check, opens the bridge socket, spawns `ABRA_AGENT_CMD`
+- start: runs the specialty check, opens the bridge socket, spawns `ABRA_RESIDENT_AGENT_CMD`
   (split like a shell would, run as an argv list with cwd = the instance root, in
-  its own process group) and initializes it. a stored session for the same command
+  its own process group) and initializes it. `ABRA_AGENT_CMD` remains the legacy
+  fallback. `ABRA_AGENT_PROVIDER=claude|codex` defaults to claude. a stored session for the same provider and command
   (`data/triggers/resident.json`, 0600) is resumed (session/resume, else
   session/load) with a restart event; otherwise a new session starts lazily with
   the bootstrap event when the first message arrives.
 - inbox: messages from all conversations queue in arrival order. at most one
   runtime prompt is outstanding; the next prompt batches every waiting message
   (up to 50 messages or 256 kib), grouped by conversation.
-- steering: while a prompt runs, new messages are sent with `_session/steering`
-  (`idleBehavior: promptRequired`). `injected` adds them to the running turn;
-  `startedNewTurn` means the agent took them in a turn the runtime does not await,
-  so they count as handled; `promptRequired`, `failed`, or an error leave them for
-  the next prompt; -32601 turns steering off.
+- steering: claude receives `_session/steering` (`idleBehavior: promptRequired`).
+  injected messages remain durable until both the steering rpc and prompt finish,
+  including when their responses race. `promptRequired`, `failed`, or an error
+  leave messages for the next prompt; -32601 turns steering off. an unexpected
+  `startedNewTurn` stops the runtime with messages retained for reconciliation.
+  codex always queues arrivals for the next awaited prompt: its steering extension
+  can start an unowned turn, so using it would risk losing durable messages.
 - framing: `bin/abra`'s `resident_prompt` (shared with the one-shot framing): a
   trusted header and `runtime event:` lines, then per conversation its key and work
   id and one nonce-fenced untrusted block per message with `msg_id` and `from`.
@@ -206,18 +209,24 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
 - permissions: the runtime answers permission requests itself and allows only the
   bridge's reply tool, once: claude-agent-acp's `toolName` must be
   `mcp__abra__reply`, its `mcpServer` must be present and named `abra`, and the
-  request must carry the resident session's id. the session check does not tell
-  subagents apart: abra does not advertise the acp `subagents` capability, so
+  request must carry the resident session's id. for the legacy claude path the session check does not tell
+  subagents apart: abra does not advertise its acp `subagents` capability, so
   claude-agent-acp sends their requests with the root session id too. a request
   carrying `parentToolUseId` (a subagent's call) is rejected, but that is best
   effort, since the adapter can miss it. "only the coordinator posts" therefore
   rests on the `docs/modes/resident.md` rule plus this check; a reply that slips
   through still reaches only this instance's work ids and is rate limited.
-  everything else is rejected. other agents do not send these fields, so outside
-  agent mode (for example codex) abra cannot post and only the single-conversation
-  free-text fallback reaches the thread. with `ABRA_AGENT_MODE=1` (container only) it sets
+  codex instead requires native subagent capability, a root `tool_call` with
+  structured `rawInput.server=abra` and `rawInput.tool=reply`, and a matching
+  `toolCallId` on an approval marked `_meta.is_mcp_tool_approval=true`. child,
+  unknown, completed, and unrelated calls are rejected; titles never authorize.
+  everything else is rejected. without native child identity codex reply approvals
+  fail closed; use the supported pinned adapter for multi-conversation operation.
+  with `ABRA_AGENT_MODE=1` (container only) it sets
   the session mode to `bypassPermissions` (claude) or `agent-full-access` (codex)
-  when offered; codex-acp can also start that way with `INITIAL_AGENT_MODE`.
+  when advertised. absence or rejection of the requested mode stops setup before
+  prompting, preserving pending messages. unattended mode bypasses the approval
+  check, so the coordinator-only reply instruction remains mandatory.
 - jobs: `bin/abra job NAME` hands the job to a running resident runtime over the
   bridge socket (named with its token in `data/triggers/bridge.json`, 0600; the
   socket moves to a private temp directory when the root's path is too long for a
@@ -225,14 +234,46 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   the job prompt from the specialty and sends it as a runtime event. waiting jobs
   (at most 20) are kept in `resident.json` until a turn delivers them, so a crash
   does not lose them. with no runtime listening, the job runs one-shot as before.
-- specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`,
-  and the bootstrap event runs the AGENTS.md startup, which reads it for any agent
-  through `docs/modes/specialty.md`.
-  the pack's `mcp_config` stdio and http servers are passed in `mcpServers`.
-- wake: tool calls still open when their turn ends count as background work. when
-  one completes while no runtime prompt runs, the runtime waits `ABRA_WAKE_GRACE`
-  seconds (default 20); if the agent does not start a turn by itself (claude does,
-  codex does not), it sends one `background work finished` event.
+- specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`
+  and to codex using the advertised `systemPrompt` extension with append mode and
+  text content. a codex adapter missing that capability cannot use a specialty
+  prompt. the bootstrap still runs the AGENTS.md startup. the pack's `mcp_config`
+  stdio and advertised http/sse servers are passed in `mcpServers`; unsupported
+  transports/settings fail setup rather than silently dropping tools. codex's
+  reported mcp startup failures also stop the runtime. use a dedicated codex home
+  without ambient mcp servers: upstream configuration can override supplied names.
+  startup checks user, system, and instance-root TOML configuration and rejects ambient
+  MCP, profile, or plugin definitions, including those supplied in `CODEX_CONFIG`.
+  codex mode requires python 3.11 or newer for TOML validation.
+  codex's `CODEX_CONFIG` must be a json object; the runtime preserves its settings
+  and requires `features.multi_agent=true`, `features.apps=false`, and
+  `features.plugins=false` so native delegation is available and explicit MCP
+  configuration determines integrations. conflicting explicit values fail startup.
+  `project_root_markers=[]` fixes project discovery at the instance root; also set
+  it in a dedicated codex home's `config.toml` so the adapter's initial config
+  discovery uses the same boundary before opening a session.
+- model: `ABRA_MODEL` and `ABRA_REASONING_EFFORT`, when set, must be advertised ACP
+  configuration options and successfully applied using `session/set_config_option`
+  before prompting. otherwise setup fails. when unset the adapter's configured
+  defaults apply; use a dedicated provider home for reproducible settings.
+- wake: the codex client advertises `subagents: {}` and requires the agent's
+  `sessionCapabilities.subagents` before tracking native sessions. parent-scoped
+  `subagent_spawned` and terminal `subagent_state_update` events maintain a child
+  tree, including descendants and distinct reopened generation ids. duplicate,
+  unknown-parent, mismatched-parent, and stale-generation updates cannot finish or
+  resurrect another child. completions schedule one reconciliation wake after
+  `ABRA_WAKE_GRACE` seconds (default 20), coalescing arrivals during that grace;
+  a completion during another conversation's prompt remains queued for afterward.
+  live descendants prevent idle clear and stdin-eof drain even if their parents
+  have completed. recorded ids in `resident.json` are diagnostic; after restart
+  the agent must reconcile its task notes, not assume those children are alive.
+  claude retains its legacy open-tool tracking and observed self-start suppression.
+  codex adapters lacking the lifecycle capability receive an in-turn wait policy.
+- external turns: the pinned codex adapter does not expose a complete root-turn
+  lifecycle over ACP. unsolicited root text/thought/tool activity outside an awaited
+  runtime turn stops the runtime for reconciliation instead of racing another
+  prompt or clearing an active session. do not enable autonomous goal continuations
+  in this resident backend. normal child lifecycle updates are supported.
 - heartbeat: every `ABRA_HEARTBEAT` seconds (default 1800, 0 turns it off) while
   a session is live and idle, the runtime runs `bin/tasks list --state in_flight` and sends a heartbeat
   event only when tasks are in flight. no file watchers.
@@ -247,18 +288,29 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   the new session.
 - crash: if the agent exits, the runtime stops dispatching and the adapter exits
   non-zero for the orchestrator to restart it; pending messages are re-delivered
-  on the next start. sigterm stops intake, waits up to 60 seconds for the running
-  turn (its messages stay pending if it does not finish), closes the session, and
+  on the next start. sigterm stops intake, drains queued input, running turns,
+  native descendants and reconciliation wakes for up to 60 seconds, closes the session, and
   kills the agent's process group. the session id stays stored for the restart.
+  on timeout, unfinished messages and diagnostic child ids remain stored; the
+  next session must reconcile ownership from task notes before redispatching.
 
 | setting | effect |
 | --- | --- |
-| `ABRA_AGENT_CMD` | acp agent command (required), e.g. `npx @agentclientprotocol/claude-agent-acp`; the container sets it |
+| `ABRA_AGENT_PROVIDER` | `claude` (default) or `codex`; stored sessions cannot cross providers |
+| `ABRA_RESIDENT_AGENT_CMD` | acp agent command; falls back to legacy `ABRA_AGENT_CMD` |
+| `ABRA_MODEL`, `ABRA_REASONING_EFFORT` | optional advertised ACP session configuration; unsupported values fail setup |
 | `ABRA_AGENT_MODE` | `1` sets the unattended session mode (container only) |
 | `ABRA_WAKE_GRACE` | seconds to wait for a self-started turn, default 20 |
 | `ABRA_HEARTBEAT` | idle heartbeat period in seconds, default 1800; 0 is off |
 | `ABRA_IDLE_CLEAR` | idle seconds before checkpoint and clear, default 600; 0 is off |
 | `ABRA_MAX_SESSION_AGE` | session age in seconds before rotation, default 604800 |
+
+the codex ACP contract is pinned to source commit
+[`082be156aacac3ef21e231da2efcdf5f6af34a6b`](https://github.com/agentclientprotocol/codex-acp/tree/082be156aacac3ef21e231da2efcdf5f6af34a6b).
+its package declares `@agentclientprotocol/codex-acp` version `2.2.2`, but the
+registry artifact with that version has different code; use the container's
+source-pinned build. `tests/fixtures/codex-acp-082be156.json` records source-derived
+v1 lifecycle and permission examples, not a live inference capture.
 
 ## acp client
 
@@ -267,8 +319,8 @@ over newline-delimited stdio) for driving an agent adapter such as
 `claude-agent-acp` or `codex-acp`. the resident session runs on it.
 
 - `Client(argv, ...)` spawns the adapter (argv list, no shell) in its own process
-  group. `start()`, `initialize()` (protocol version 1, no fs or terminal
-  capabilities), then `new_session`, `load_session`, `resume_session`, `prompt`
+  group. `start()`, `initialize(subagents=False)` (protocol version 1, no fs or terminal
+  capabilities; codex enables native subagents), then `new_session`, `load_session`, `resume_session`, `prompt`
   (blocks until the stop reason), `cancel`, `set_mode`, `close_session`, and
   `steer` (`_session/steering`; returns the outcome, raises `MethodNotFound` when
   the agent lacks it). load, resume, and close raise `Unsupported` without sending

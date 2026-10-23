@@ -6,11 +6,13 @@ FROM debian:trixie-20261020@sha256:4c25275446ca371766b8b093c696782eabce06263fcca
 ARG NODE_VERSION=24.22.1
 ARG NODE_SHA256_AMD64=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
 ARG NODE_SHA256_ARM64=dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e
-ARG GH_VERSION=2.103.0
+ARG GH_VERSION=2.103.1
 # sha256 of https://cli.github.com/packages/githubcli-archive-keyring.gpg
 # (signing key 7f38bbb59d064dbcb3d84d725612b36462313325)
 ARG GH_KEYRING_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b
 ARG CLAUDE_CODE_VERSION=2.1.308
+# the published codex-acp 2.2.2 predates the required subagent protocol.
+ARG CODEX_ACP_COMMIT=082be156aacac3ef21e231da2efcdf5f6af34a6b
 # must match the pins in bin/tasks and bin/github
 ARG TASKS_AXI_VERSION=0.2.5
 ARG GH_AXI_VERSION=0.1.35
@@ -72,7 +74,29 @@ COPY docker/claude-agent-acp/package.json docker/claude-agent-acp/package-lock.j
 RUN cd /opt/claude-agent-acp \
     && npm ci --omit=dev --ignore-scripts --no-fund --no-audit \
     && npm cache clean --force \
-    && test -x node_modules/.bin/claude-agent-acp
+    && test -x node_modules/.bin/claude-agent-acp \
+    && ln -s /opt/claude-agent-acp/node_modules/.bin/claude-agent-acp /usr/local/bin/claude-agent-acp
+
+# build the audited adapter source with locked dependencies, including the same
+# codex cli for both resident and headless runs. esbuild's optional platform
+# package supplies its binary without running install scripts.
+RUN git init -q /opt/codex-acp \
+    && cd /opt/codex-acp \
+    && git fetch -q --depth 1 https://github.com/agentclientprotocol/codex-acp.git "${CODEX_ACP_COMMIT}" \
+    && git checkout -q FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "${CODEX_ACP_COMMIT}" \
+    && rm -rf .git
+COPY docker/codex-acp/package.json docker/codex-acp/package-lock.json /opt/codex-acp/
+RUN cd /opt/codex-acp \
+    && npm ci --ignore-scripts --no-fund --no-audit \
+    && node build.mjs \
+    && npm prune --omit=dev --ignore-scripts --no-fund --no-audit \
+    && npm cache clean --force \
+    && chmod 0755 dist/index.js \
+    && ln -s /opt/codex-acp/dist/index.js /usr/local/bin/codex-acp \
+    && ln -s /opt/codex-acp/node_modules/.bin/codex /usr/local/bin/codex \
+    && codex --version \
+    && codex-acp --version
 
 # linear-axi for the linear trigger and abra's linear writes: fetched by commit
 # and checked, every package from its lockfile with integrity hashes and install
@@ -112,8 +136,10 @@ RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash abra \
     && install -d -o abra -g abra -m 0755 /opt/abra-npm
 
 ENV ABRA_ROOT=/home/abra/abra \
-    ABRA_AGENT_CMD=/opt/claude-agent-acp/node_modules/.bin/claude-agent-acp \
+    ABRA_AGENT_PROVIDER=claude \
     CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude \
+    CODEX_PATH=/usr/local/bin/codex \
+    CODEX_HOME=/home/abra/.codex \
     DISABLE_AUTOUPDATER=1 \
     npm_config_cache=/opt/abra-npm \
     npm_config_prefer_offline=true \

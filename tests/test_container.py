@@ -112,6 +112,16 @@ class EntrypointTests(unittest.TestCase):
             with self.assertRaises(entrypoint.SetupError):
                 entrypoint.instance_root({"ABRA_ROOT": value})
 
+    def test_provider_selection(self):
+        self.assertEqual(entrypoint.provider({}), "claude")
+        for value in ("claude", "codex"):
+            self.assertEqual(entrypoint.provider({"ABRA_AGENT_PROVIDER": value}), value)
+        for value in ("", "CODEX", "codex ", "other"):
+            code, stderr = self.main(dict(self.env, ABRA_AGENT_PROVIDER=value))
+            self.assertEqual(code, 1)
+            self.assertIn("unknown abra_agent_provider", stderr)
+            self.assertFalse(self.root.exists())
+
     def test_keys_fail_closed(self):
         missing = self.base / "missing"
         with self.assertRaisesRegex(entrypoint.SetupError, "missing"):
@@ -164,6 +174,22 @@ class EntrypointTests(unittest.TestCase):
     def test_seed_requires_parent(self):
         with self.assertRaisesRegex(entrypoint.SetupError, "parent missing"):
             entrypoint.seed_root(self.source, self.base / "nope/abra")
+
+    def test_codex_home_created_once_and_state_preserved(self):
+        env = {}
+        entrypoint.codex_home(env)
+        home = self.home / ".codex"
+        self.assertEqual(env["CODEX_HOME"], str(home))
+        self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+        (home / "auth.json").write_text("saved login")
+        entrypoint.codex_home(env)
+        self.assertEqual((home / "auth.json").read_text(), "saved login")
+        custom = self.home / "other-codex"
+        entrypoint.codex_home({"CODEX_HOME": str(custom)})
+        self.assertTrue(custom.is_dir())
+        for value in ("relative", "/home/abra/../etc"):
+            with self.assertRaises(entrypoint.SetupError):
+                entrypoint.codex_home({"CODEX_HOME": value})
 
     @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
     def test_host_key_generated_once(self):
@@ -259,6 +285,35 @@ class EntrypointTests(unittest.TestCase):
         )
         self.assertEqual(listener_env["LINEAR_API_KEY"], "lin_api_1")
         self.assertEqual(entrypoint.PYTHON, sys.executable)
+
+    def test_codex_credentials_and_configuration_reach_intended_processes(self):
+        env = dict(
+            self.env,
+            ABRA_AGENT_PROVIDER="codex",
+            ABRA_MODEL="example-model",
+            ABRA_REASONING_EFFORT="high",
+            CODEX_HOME=str(self.home / ".codex"),
+            CODEX_API_KEY="codex-secret",
+            OPENAI_API_KEY="openai-secret",
+            CODEX_ACCESS_TOKEN="access-secret",
+        )
+        children = entrypoint.commands(env, self.root, "linear")
+        ssh_env = entrypoint.sshd_env(env)
+        for name in ("CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"):
+            self.assertNotIn(name, children[0][1])
+            self.assertEqual(children[1][1][name], env[name])
+            self.assertIn('"' + name + "=" + env[name] + '"', ssh_env)
+        for name in (
+            "ABRA_AGENT_PROVIDER",
+            "ABRA_MODEL",
+            "ABRA_REASONING_EFFORT",
+            "CODEX_HOME",
+        ):
+            self.assertIn('"' + name + "=" + env[name] + '"', ssh_env)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            entrypoint.sshd_env(dict(env, CODEX_API_KEY='bad"secret'))
+        self.assertIn("not sharing codex_api_key", stderr.getvalue())
+        self.assertNotIn("secret", stderr.getvalue())
 
     def test_missing_keys_exit_before_any_change(self):
         self.keys.unlink()
@@ -443,6 +498,21 @@ class ImageConfigTests(unittest.TestCase):
             "deploy/prod-values.yaml",
             "NOTES.md",
             ".claude/settings.local.json",
+            ".codex/auth.json",
+            ".codex/.credentials.json",
+            ".codex/session_index.jsonl",
+            ".codex/config.toml",
+            ".codex/config.local.toml",
+            ".codex/history.jsonl",
+            ".codex/sessions/2026/session.jsonl",
+            ".codex/archived_sessions/session.jsonl",
+            ".codex/log/codex.log",
+            ".codex/tmp/env",
+            ".codex/shell_snapshots/snapshot.sh",
+            ".codex/memories/notes.md",
+            ".codex/state_5.sqlite",
+            ".codex/state_5.sqlite-wal",
+            "nested/.codex/auth.json",
             ".cache/x",
             "bin/__pycache__/x.pyc",
             "triggers/x.pyc",
@@ -456,6 +526,8 @@ class ImageConfigTests(unittest.TestCase):
             "docs/modes/headless.md",
             ".gitignore",
             "templates/worker.md",
+            ".codex/skills/example/SKILL.md",
+            ".codex/rules/default.rules",
         ):
             self.assertFalse(dockerignored(path, patterns), path)
 
@@ -513,11 +585,42 @@ class ImageConfigTests(unittest.TestCase):
                 self.assertRegex(entry.get("integrity", ""), r"^sha512-", name)
                 self.assertFalse(entry.get("hasInstallScript"), name)
         self.assertIn("npm ci --omit=dev --ignore-scripts", self.dockerfile)
-        self.assertIn(
-            "ABRA_AGENT_CMD=/opt/claude-agent-acp/node_modules/.bin/claude-agent-acp",
-            self.dockerfile,
-        )
+        self.assertNotRegex(self.dockerfile, r"ABRA_AGENT_CMD=")
+        self.assertIn("ABRA_AGENT_PROVIDER=claude", self.dockerfile)
         self.assertIn("CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude", self.dockerfile)
+
+    def test_codex_source_and_dependency_pair_pinned(self):
+        self.assertEqual(
+            self.arg("CODEX_ACP_COMMIT"),
+            "082be156aacac3ef21e231da2efcdf5f6af34a6b",
+        )
+        self.assertIn(
+            "https://github.com/agentclientprotocol/codex-acp.git", self.dockerfile
+        )
+        self.assertIn(
+            'test "$(git rev-parse HEAD)" = "${CODEX_ACP_COMMIT}"', self.dockerfile
+        )
+        directory = REPO / "docker/codex-acp"
+        manifest = json.loads((directory / "package.json").read_text())
+        lock = json.loads((directory / "package-lock.json").read_text())
+        self.assertEqual(manifest["dependencies"]["@openai/codex"], "0.163.0")
+        self.assertEqual(manifest["dependencies"]["@agentclientprotocol/sdk"], "2.0.0")
+        for group in ("dependencies", "devDependencies"):
+            self.assertEqual(lock["packages"][""][group], manifest[group])
+            for name, version in manifest[group].items():
+                self.assertRegex(version, r"^[0-9]+\.[0-9]+\.[0-9]+$")
+                self.assertEqual(
+                    lock["packages"]["node_modules/" + name]["version"], version
+                )
+        for name, entry in lock["packages"].items():
+            if name:
+                self.assertRegex(entry.get("integrity", ""), r"^sha512-", name)
+        for architecture in ("linux-x64", "linux-arm64"):
+            package = lock["packages"]["node_modules/@openai/codex-" + architecture]
+            self.assertEqual(package["version"], "0.163.0-" + architecture)
+        self.assertIn("node build.mjs", self.dockerfile)
+        self.assertIn("CODEX_PATH=/usr/local/bin/codex", self.dockerfile)
+        self.assertIn("CODEX_HOME=/home/abra/.codex", self.dockerfile)
 
     def test_linear_axi_built_from_pinned_commit(self):
         commit = self.arg("LINEAR_AXI_COMMIT")

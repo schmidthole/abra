@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,23 @@ STUB = textwrap.dedent("""\
         handle.write(json.dumps({"argv": sys.argv[1:], "stdin": prompt}) + "\\n")
     time.sleep(float(os.environ.get("STUB_SLEEP", "0")))
     mode = os.environ.get("STUB_MODE", "ok")
+    if os.environ.get("ABRA_AGENT_PROVIDER") == "codex":
+        with open(os.environ["STUB_FIXTURE"]) as handle:
+            output = handle.read()
+        if mode == "malformed":
+            output += "not json\\n"
+        elif mode == "truncated":
+            output = "\\n".join(output.splitlines()[:-1])
+        elif mode == "wrong-thread":
+            output = output.replace("0199a213-81c0-7800-8aa1-bbab2a035a53", "other-thread")
+        elif mode == "failed":
+            output += json.dumps({"type": "turn.failed", "error": {"message": "failed after work"}})
+        elif mode == "error-event":
+            output += json.dumps({"type": "error", "message": "failed"})
+        elif mode == "missing-answer":
+            output = "\\n".join(line for line in output.splitlines() if "agent_message" not in line)
+        print(output)
+        sys.exit(1 if mode == "nonzero" else 0)
     resuming = any(arg.startswith("--resume") for arg in sys.argv)
     if mode == "resume-fails" and resuming:
         print(json.dumps({"is_error": True, "result": "no conversation found"}))
@@ -95,6 +113,290 @@ class AbraTests(unittest.TestCase):
             (directory / "specialty.json").write_text(json.dumps(manifest))
         return directory
 
+    def use_codex(self):
+        if sys.version_info < (3, 11):
+            self.skipTest("codex headless mode requires python 3.11")
+        self.env.update(
+            ABRA_AGENT_PROVIDER="codex",
+            ABRA_CODEX_BIN=self.env["ABRA_CLAUDE_BIN"],
+            STUB_FIXTURE=str(
+                SOURCE.parent.parent / "tests/fixtures/codex-exec-0.163.0/success.jsonl"
+            ),
+        )
+
+    def test_codex_fresh_and_exact_resume(self):
+        self.use_codex()
+        first = self.abra(
+            "run", "--key", "k", "--text", "hello", "--work-id", "work-42"
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout, "finished safely\n")
+        second = self.abra("run", "--key", "k", "--text", "again")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.calls()[0][0], "exec")
+        self.assertEqual(self.calls()[1][:2], ["exec", "resume"])
+        self.assertEqual(
+            self.calls()[1][-2:], ["0199a213-81c0-7800-8aa1-bbab2a035a53", "-"]
+        )
+        self.assertNotIn("--last", self.calls()[1])
+        self.assertIn("work id: work-42", self.prompts()[1])
+        self.assertEqual(self.sessions()["k"]["provider"], "codex")
+        self.assertEqual(self.sessions()["k"]["version"], 1)
+        self.assertEqual(self.sessions()["k"]["work_id"], "work-42")
+        conflict = self.abra(
+            "run", "--key", "k", "--text", "again", "--work-id", "other"
+        )
+        self.assert_error(conflict, 1, "work id conflicts")
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_codex_captured_fresh_and_resume_protocol(self):
+        self.use_codex()
+        fixture_dir = SOURCE.parent.parent / "tests/fixtures/codex-exec-0.163.0"
+        for name in ("fresh", "resume"):
+            result = self.abra(
+                "run",
+                "--key",
+                "captured",
+                "--text",
+                "remember the marker",
+                STUB_FIXTURE=str(fixture_dir / ("captured-" + name + ".jsonl")),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "copper-otter-731\n")
+            self.assertEqual(
+                self.sessions()["captured"]["session_id"],
+                "0199a213-81c0-7800-8aa1-bbab2a035a53",
+            )
+        self.assertEqual(self.calls()[1][:2], ["exec", "resume"])
+        self.assertEqual(
+            self.calls()[1][-2:], ["0199a213-81c0-7800-8aa1-bbab2a035a53", "-"]
+        )
+
+    def test_codex_partial_failures_preserve_thread_and_never_replay(self):
+        self.use_codex()
+        for mode in (
+            "malformed",
+            "truncated",
+            "failed",
+            "error-event",
+            "missing-answer",
+            "nonzero",
+        ):
+            with self.subTest(mode=mode):
+                before = len(self.calls())
+                result = self.abra(
+                    "run", "--key", mode, "--text", "work", STUB_MODE=mode
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(self.calls()), before + 1)
+                self.assertEqual(
+                    self.sessions()[mode]["session_id"],
+                    "0199a213-81c0-7800-8aa1-bbab2a035a53",
+                )
+                resumed = self.abra(
+                    "run", "--key", mode, "--text", "reconcile", STUB_MODE=mode
+                )
+                self.assertEqual(resumed.returncode, 1, resumed.stderr)
+                self.assertEqual(len(self.calls()), before + 2)
+                self.assertEqual(self.calls()[-1][:2], ["exec", "resume"])
+
+    def test_codex_wrong_resume_thread_does_not_replace_mapping(self):
+        self.use_codex()
+        self.abra("run", "--key", "k", "--text", "start")
+        before = self.sessions()
+        result = self.abra(
+            "run", "--key", "k", "--text", "next", STUB_MODE="wrong-thread"
+        )
+        self.assert_error(result, 1, "different thread")
+        self.assertEqual(self.sessions(), before)
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_provider_switch_fails_before_launch_and_legacy_migrates(self):
+        self.write_sessions({"k": {"session_id": "old-claude"}})
+        self.use_codex()
+        result = self.abra("run", "--key", "k", "--text", "next")
+        self.assert_error(result, 1, "stored session belongs to claude")
+        self.assertEqual(self.calls(), [])
+        self.assertNotIn("provider", self.sessions()["k"])
+        self.env["ABRA_AGENT_PROVIDER"] = "claude"
+        result = self.abra("run", "--key", "k", "--text", "next")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--resume=old-claude", self.calls()[0])
+        self.assertEqual(self.sessions()["k"]["provider"], "claude")
+        self.assertEqual(self.sessions()["k"]["version"], 1)
+
+    def test_unknown_provider_and_session_version_fail_closed(self):
+        result = self.abra(
+            "run", "--key", "k", "--text", "x", ABRA_AGENT_PROVIDER="other"
+        )
+        self.assert_error(result, 1, "abra_agent_provider")
+        self.write_sessions(
+            {"k": {"version": 2, "provider": "codex", "session_id": "thread"}}
+        )
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assert_error(result, 1, "unsupported stored session")
+        self.assertEqual(self.calls(), [])
+
+    def test_codex_preassignment_rejected_without_launch(self):
+        self.use_codex()
+        result = self.abra(
+            "run",
+            "--key",
+            "k",
+            "--text",
+            "x",
+            "--session-id",
+            "0f8fad5b-d9cb-469f-a165-70867728950e",
+        )
+        self.assert_error(result, 1, "codex does not support --session-id")
+        self.assertEqual(self.calls(), [])
+
+    def test_codex_permissions_model_and_reasoning(self):
+        self.use_codex()
+        self.abra(
+            "run",
+            "--key",
+            "k",
+            "--text",
+            "x",
+            ABRA_MODEL="test-model",
+            ABRA_REASONING_EFFORT="high",
+        )
+        call = self.calls()[0]
+        self.assertIn('approval_policy="never"', call)
+        self.assertIn('sandbox_mode="workspace-write"', call)
+        self.assertIn("--ignore-user-config", call)
+        self.assertIn("--skip-git-repo-check", call)
+        self.assertIn("project_root_markers=[]", call)
+        self.assertEqual(call[call.index("--enable") + 1], "multi_agent")
+        disabled = [call[i + 1] for i, arg in enumerate(call) if arg == "--disable"]
+        self.assertEqual(disabled, ["apps", "plugins"])
+        self.assertIn('model_reasoning_effort="high"', call)
+        self.assertEqual(call[call.index("--model") + 1], "test-model")
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", call)
+        self.abra("run", "--key", "k", "--text", "x", ABRA_AGENT_MODE="1")
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.calls()[1])
+        result = self.abra(
+            "run", "--key", "k", "--text", "x", ABRA_REASONING_EFFORT="invalid"
+        )
+        self.assert_error(result, 1, "invalid abra_reasoning_effort")
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_codex_specialty_mcp_translation(self):
+        self.use_codex()
+        import tomllib
+
+        directory = self.specialty(
+            {"mcp_config": "mcp.json"}, 'narrow scope "carefully"\n'
+        )
+        (directory / "mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "stdio": {
+                            "command": "server",
+                            "args": ["--stdio"],
+                            "env": {"MODE": "safe"},
+                        },
+                        "remote": {
+                            "type": "http",
+                            "url": "https://example.com/mcp",
+                            "headers": {"x-mode": "safe"},
+                        },
+                    }
+                }
+            )
+        )
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = self.calls()[0]
+        servers = tomllib.loads(
+            next(arg for arg in call if arg.startswith("mcp_servers="))
+        )["mcp_servers"]
+        self.assertEqual(set(servers), {"stdio", "remote"})
+        self.assertEqual(servers["stdio"]["args"], ["--stdio"])
+        self.assertEqual(servers["remote"]["http_headers"], {"x-mode": "safe"})
+        self.assertTrue(all(server["required"] for server in servers.values()))
+        instructions = next(
+            arg for arg in call if arg.startswith("developer_instructions=")
+        )
+        self.assertIn("never loosen", instructions)
+        self.assertIn("narrow scope", instructions)
+
+    def test_codex_unsupported_mcp_options_rejected(self):
+        self.use_codex()
+        directory = self.specialty({"mcp_config": "mcp.json"})
+        for server in (
+            {"type": "sse", "url": "https://example.com"},
+            {"command": "x", "unknown": True},
+            {"command": "x", "env": {"TOKEN": "${TOKEN}"}},
+            {"command": "x", "args": "bad"},
+        ):
+            (directory / "mcp.json").write_text(
+                json.dumps({"mcpServers": {"tool": server}})
+            )
+            result = self.abra("run", "--key", "k", "--text", "x")
+            self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_codex_refuses_ambient_project_tools_but_allows_ordinary_config(self):
+        self.use_codex()
+        config = self.root / ".codex/config.toml"
+        config.parent.mkdir()
+        for text in (
+            '[mcp_servers.unrelated]\ncommand="tool"',
+            "[plugins.unrelated]\nenabled=true",
+            '[profiles.unrelated]\nmodel="other"',
+        ):
+            config.write_text(text)
+            result = self.abra("run", "--key", "k", "--text", "x")
+            self.assert_error(result, 1, "ambient codex")
+        self.assertEqual(self.calls(), [])
+        config.write_text('model_reasoning_effort="high"\n')
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_codex_install_root_excludes_unrelated_parent_config(self):
+        self.use_codex()
+        parent_config = self.root.parent / ".codex/config.toml"
+        parent_config.parent.mkdir()
+        parent_config.write_text('[mcp_servers.unrelated]\ncommand="tool"\n')
+        for git_marker in (False, True):
+            if git_marker:
+                (self.root / ".git").write_text("gitdir: /unused/worktree")
+            result = self.abra(
+                "run",
+                "--key",
+                "k",
+                "--text",
+                "x",
+                CODEX_HOME=str(self.root / "data/codex-home"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("project_root_markers=[]", self.calls()[-1])
+        local = self.root / ".codex/config.toml"
+        local.parent.mkdir()
+        local.write_text(parent_config.read_text())
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assert_error(result, 1, "ambient codex")
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_codex_config_check_can_include_resident_user_config(self):
+        self.use_codex()
+        home = Path(self.temporary.name) / "codex-home"
+        home.mkdir()
+        (home / "config.toml").write_text('[mcp_servers.unrelated]\ncommand="tool"\n')
+        validate = runpy.run_path(str(SOURCE))["codex_config_check"]
+        env = {"CODEX_HOME": str(home)}
+        validate(self.root, env)
+        with self.assertRaisesRegex(ValueError, "ambient codex"):
+            validate(self.root, env, ignore_user_config=False)
+
+    def test_codex_per_key_lock_and_concurrency_cap(self):
+        self.use_codex()
+        self.test_per_key_lock_and_concurrency_cap()
+
     def test_first_run_then_resume_persists_session(self):
         first = self.abra("run", "--key", "thread:C01.1", "--text", "hello")
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -112,6 +414,9 @@ class AbraTests(unittest.TestCase):
         )
         self.abra("run", "--key", "other", "--text", "new")
         self.assertFalse(any(a.startswith("--resume") for a in self.calls()[2]))
+
+    def sessions(self):
+        return json.loads((self.root / "data/sessions.json").read_text())
 
     def write_sessions(self, value):
         (self.root / "data").mkdir(exist_ok=True)
@@ -179,17 +484,16 @@ class AbraTests(unittest.TestCase):
         self.assertIn("harness output is not json", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
-    def test_deeply_nested_harness_output_on_resume_retries(self):
+    def test_deeply_nested_harness_output_on_resume_does_not_replay(self):
         self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
         result = self.abra(
             "run", "--key", "k", "--text", "y", STUB_MODE="deep-on-resume"
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            "could not resume session for k: harness output is not json", result.stderr
-        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("harness output is not json", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        self.assertEqual(len(self.calls()), 3)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertEqual(self.sessions()["k"]["session_id"], "session-1")
 
     def test_invalid_utf8_specialty_prompt_is_named(self):
         self.specialty(prompt=None).joinpath("SPECIALTY.md").write_bytes(b"\xff\xfe")
@@ -254,31 +558,25 @@ class AbraTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", calls[1])
         self.assertIn("--dangerously-skip-permissions", calls[2])
 
-    def test_unresumable_session_retries_fresh_once(self):
+    def test_unresumable_session_requires_operator_reconciliation(self):
         self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
         result = self.abra("run", "--key", "k", "--text", "y", STUB_MODE="resume-fails")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("could not resume session for k", result.stderr)
-        calls = self.calls()
-        self.assertEqual(len(calls), 3)
-        self.assertIn("--resume=session-1", calls[1])
-        self.assertFalse(any(arg.startswith("--resume") for arg in calls[2]))
-        self.assertTrue(self.prompts()[2].startswith("note: the previous session"))
-        sessions = json.loads((self.root / "data/sessions.json").read_text())
-        self.assertEqual(sessions["k"]["session_id"], "session-3")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("--resume=session-1", self.calls()[1])
+        self.assertEqual(self.sessions()["k"]["session_id"], "session-1")
 
-    def test_unresumable_session_and_failed_retry_clears_session(self):
+    def test_failed_turn_saves_returned_session_without_replay(self):
         self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
         self.abra("run", "--key", "other", "--text", "x")
         result = self.abra("run", "--key", "k", "--text", "y", STUB_MODE="error")
         self.assertEqual(result.returncode, 1)
         self.assertIn("abra: error: harness reported an error", result.stderr)
-        self.assertEqual(len(self.calls()), 4)
-        sessions = json.loads((self.root / "data/sessions.json").read_text())
-        self.assertNotIn("k", sessions)
-        self.assertIn("other", sessions)
+        self.assertEqual(len(self.calls()), 3)
+        self.assertEqual(self.sessions()["k"]["session_id"], "s-err")
+        self.assertIn("other", self.sessions())
         self.abra("run", "--key", "k", "--text", "z")
-        self.assertFalse(any(a.startswith("--resume") for a in self.calls()[4]))
+        self.assertIn("--resume=s-err", self.calls()[3])
 
     def test_first_run_failure_does_not_retry(self):
         result = self.abra("run", "--key", "k", "--text", "x", STUB_MODE="garbage")
@@ -594,7 +892,7 @@ class AbraTests(unittest.TestCase):
         self.assertIn("use abra-x7k2 as its tasks-axi task id", header)
         self.assertIn("data/abra-x7k2/ for its reports", header)
         self.abra("run", "--key", "k", "--text", "x")
-        self.assertNotIn("work id:", self.prompts()[1])
+        self.assertIn("work id: abra-x7k2", self.prompts()[1])
         for bad in ("", "Upper", "a--b", "-a", "a-", "a_b", "a" * 65, "--x"):
             result = self.abra("run", "--key", "k2", "--text", "x", "--work-id=" + bad)
             self.assert_error(result, 1, "invalid work id")
@@ -626,7 +924,7 @@ class AbraTests(unittest.TestCase):
             self.assert_error(result, 1, "invalid session id")
         self.assertEqual(len(self.calls()), 1)
 
-    def test_retry_path_drops_session_id_and_uses_context(self):
+    def test_failed_resume_does_not_replay_history(self):
         self.assertEqual(self.abra("run", "--key", "k", "--text", "x").returncode, 0)
         context = self.file("context.txt", "old history line")
         result = self.abra(
@@ -639,13 +937,11 @@ class AbraTests(unittest.TestCase):
             context,
             STUB_MODE="resume-fails",
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("ignoring context file for k", result.stderr)
-        self.assertIn("using context file for the retry", result.stderr)
         calls = self.calls()
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 2)
         self.assertNotIn("old history line", self.prompts()[1])
-        self.assertIn("old history line", self.prompts()[2])
         for call in calls:
             self.assertFalse(any(a.startswith("--session-id") for a in call))
 

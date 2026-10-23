@@ -1,0 +1,20 @@
+{
+  "name": "@agentclientprotocol/codex-acp",
+  "version": "2.2.2",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "pinned source build for the resident codex adapter and headless cli",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "2.0.0",
+    "@openai/codex": "0.163.0",
+    "cross-spawn": "7.0.6",
+    "diff": "9.0.0",
+    "open": "11.0.4",
+    "vscode-jsonrpc": "9.0.2",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

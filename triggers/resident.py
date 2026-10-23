@@ -35,6 +35,7 @@ CLI = HERE.parent / "bin" / "abra"
 SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 DONE = ("end_turn", "max_tokens", "max_turn_requests")
 UNATTENDED = ("bypassPermissions", "agent-full-access")
+CHILD_DONE = ("completed", "failed", "cancelled", "disconnected")
 REPLY_TOOL = "mcp__" + mcp_bridge.NAME + "__" + mcp_bridge.TOOL
 MAX_FINAL = 64 * 1024
 MAX_JOBS = 20
@@ -71,27 +72,35 @@ def stdio_env(values):
 
 
 def translate(config):
-    """claude-style mcp config servers as acp mcpServers; invalid entries skipped."""
+    """claude-style mcp config servers as acp mcpServers; never drop settings."""
     servers = config.get("mcpServers") if isinstance(config, dict) else None
+    if not isinstance(servers, dict):
+        raise ValueError("mcp_config must contain mcpservers")
     result = []
     for name, entry in (servers or {}).items() if isinstance(servers, dict) else ():
         if not isinstance(entry, dict) or name == mcp_bridge.NAME:
-            log.warning("skipping a specialty mcp server with an invalid entry")
-            continue
+            raise ValueError("invalid or reserved specialty mcp server")
         kind = entry.get("type", "stdio")
+        allowed = (
+            {"type", "command", "args", "env"}
+            if kind == "stdio"
+            else {"type", "url", "headers"}
+        )
+        if set(entry) - allowed:
+            raise ValueError("unsupported specialty mcp settings")
         pairs = entry.get("headers" if kind in ("http", "sse") else "env") or {}
         if not isinstance(pairs, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in pairs.items()
         ):
-            log.warning("skipping a specialty mcp server with invalid settings")
-            continue
+            raise ValueError("invalid specialty mcp settings")
         if kind == "stdio":
             command, args = entry.get("command"), entry.get("args") or []
-            if not isinstance(command, str) or not all(
-                isinstance(a, str) for a in args
+            if (
+                not isinstance(command, str)
+                or not isinstance(args, list)
+                or not all(isinstance(a, str) for a in args)
             ):
-                log.warning("skipping a specialty mcp server with an invalid command")
-                continue
+                raise ValueError("invalid specialty mcp command")
             result.append(
                 {
                     "name": name,
@@ -110,7 +119,7 @@ def translate(config):
                 }
             )
         else:
-            log.warning("skipping a specialty mcp server of an unsupported type")
+            raise ValueError("unsupported specialty mcp transport")
     return result
 
 
@@ -133,6 +142,7 @@ class Resident(runtime.Runtime):
         max_age=7 * 24 * 3600.0,
         rotate_idle=60.0,
         inflight=None,
+        provider=None,
     ):
         super().__init__(adapter, root, name=name, catchup_hours=catchup_hours)
         argv = shlex.split(agent_cmd) if isinstance(agent_cmd, str) else agent_cmd
@@ -141,6 +151,35 @@ class Resident(runtime.Runtime):
         self.argv = list(argv)
         self.agent_mode = agent_mode
         self.env = dict(os.environ if env is None else env)
+        self.provider = provider or self.env.get("ABRA_AGENT_PROVIDER", "claude")
+        if self.provider not in ("claude", "codex"):
+            raise ValueError("abra_agent_provider must be claude or codex")
+        self.env["ABRA_AGENT_PROVIDER"] = self.provider
+        if self.provider == "codex":
+            config = json.loads(self.env.get("CODEX_CONFIG") or "{}")
+            if not isinstance(config, dict):
+                raise ValueError("codex_config must be a json object")
+            if any(config.get(key) for key in ("mcp_servers", "profiles", "plugins")):
+                raise ValueError(
+                    "put codex mcp servers in the specialty, not codex_config"
+                )
+            if config.get("project_root_markers", []) != []:
+                raise ValueError(
+                    "resident codex project root must be the instance root"
+                )
+            config["project_root_markers"] = []
+            features = config.setdefault("features", {})
+            if not isinstance(features, dict):
+                raise ValueError("codex_config features must be an object")
+            for feature, value in (
+                ("multi_agent", True),
+                ("apps", False),
+                ("plugins", False),
+            ):
+                if feature in features and features[feature] is not value:
+                    raise ValueError("conflicting resident codex feature configuration")
+                features[feature] = value
+            self.env["CODEX_CONFIG"] = json.dumps(config)
         self.stop_timeout = stop_timeout
         self.wake_grace = wake_grace
         self.heartbeat = heartbeat
@@ -179,6 +218,11 @@ class Resident(runtime.Runtime):
         self.activity = time.monotonic()
         self.tools = set()
         self.background = set()
+        self.native_children = False
+        self.children = {}
+        self.reply_calls = set()
+        self.setup_failure = False
+        self.draining = False
         self.wake_at = None
         self.finished = 0
         self.beat_at = time.monotonic() + heartbeat if heartbeat else None
@@ -188,6 +232,8 @@ class Resident(runtime.Runtime):
 
     def start(self):
         self.cli.preflight(self.root, self.env)
+        if self.provider == "codex":
+            self.cli.codex_config_check(self.root, self.env, ignore_user_config=False)
         try:
             self._open()
             self._boot()
@@ -222,7 +268,11 @@ class Resident(runtime.Runtime):
         if isinstance(jobs, list):
             self.jobs = [j for j in jobs if isinstance(j, str)][:MAX_JOBS]
             self.events.extend(self.jobs)
-        if state.get("agent") == self.digest and state.get("session_id"):
+        if (
+            state.get("agent") == self.digest
+            and state.get("provider", "claude") == self.provider
+            and state.get("session_id")
+        ):
             self.stored = state["session_id"]
             self.started = state.get("started")
             self.kick = True
@@ -250,8 +300,12 @@ class Resident(runtime.Runtime):
             kill_timeout=self.kill_timeout,
         )
         self.client.start()
-        self.client.initialize()
-        self.steering = self.client.supports("steering")
+        self.client.initialize(subagents=self.provider == "codex")
+        self.native_children = self.provider == "codex" and self.client.supports(
+            "subagents"
+        )
+        # codex steering may start a turn that this client cannot await.
+        self.steering = self.provider == "claude" and self.client.supports("steering")
         log.info("resident agent ready (steering %s)", self.steering)
         self.dispatcher = threading.Thread(target=self._loop, daemon=True)
         self.dispatcher.start()
@@ -261,16 +315,17 @@ class Resident(runtime.Runtime):
         and kill the agent's process group. pending messages stay stored."""
         if self.holder is None:
             return
-        self.stopping.set()
+        self.draining = True
         with self.changed:
             self.changed.notify_all()
             drained = self.changed.wait_for(
-                lambda: (self.turn is None and not self.steer_busy)
-                or self.crashed.is_set(),
+                lambda: (self.turn is None and self._quiet()) or self.crashed.is_set(),
                 self.stop_timeout,
             )
+            self.stopping.set()
+            self.changed.notify_all()
         if not drained:
-            log.warning("stopping with a turn still running; its messages stay pending")
+            log.warning("stopping with work still running; its messages stay pending")
         if (
             self.client
             and self.session
@@ -317,14 +372,7 @@ class Resident(runtime.Runtime):
         """block until nothing is pending or running, or the agent stopped."""
         with self.changed:
             return self.changed.wait_for(
-                lambda: self.crashed.is_set()
-                or (
-                    self.turn is None
-                    and not self.order
-                    and not self.events
-                    and not self.kick
-                    and not any(e["pending"] for e in self.convs.values())
-                ),
+                lambda: self.crashed.is_set() or (self.turn is None and self._quiet()),
                 timeout,
             )
 
@@ -343,7 +391,7 @@ class Resident(runtime.Runtime):
     # intake hooks
 
     def submit(self, event):
-        if self.stopping.is_set():
+        if self.draining or self.stopping.is_set():
             log.info("ignoring event while stopping")
             return False
         return super().submit(event)
@@ -371,7 +419,7 @@ class Resident(runtime.Runtime):
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         event = self.cli.job_event(name, "job:" + name + ":" + day, text)
         with self.lock:
-            if self.stopping.is_set():
+            if self.draining or self.stopping.is_set():
                 raise ValueError("the runtime is stopping")
             if len(self.jobs) >= MAX_JOBS:
                 raise ValueError("too many jobs are waiting")
@@ -442,7 +490,7 @@ class Resident(runtime.Runtime):
                 self.steer_busy = True
                 return (lambda: self._steer(batch)), None
         delays = []
-        if self.turn is None and self.session and self._quiet():
+        if not self.draining and self.turn is None and self.session and self._quiet():
             idle = moment - self.activity
             age = time.time() - runtime.seconds(self.started)
             due = []
@@ -472,6 +520,7 @@ class Resident(runtime.Runtime):
         if (
             self.turn is None
             and self.session
+            and not self.draining
             and self.beat_at is not None
             and not self.beating
         ):
@@ -488,6 +537,7 @@ class Resident(runtime.Runtime):
             or self.events
             or self.kick
             or self.background
+            or any(child["state"] == "running" for child in self.children.values())
             or self.tools
             or self.wake_at is not None
             or self.steer_busy
@@ -506,6 +556,10 @@ class Resident(runtime.Runtime):
             self.started = None
             self.background = set()
             self.tools = set()
+            self.children = {}
+            self.reply_calls = set()
+            self.finished = 0
+            self.wake_at = None
             self._save_state()
             self.changed.notify_all()
         log.info("cleared the resident session; the next event starts a new one")
@@ -519,7 +573,8 @@ class Resident(runtime.Runtime):
         self.events.append(
             "background work finished ("
             + str(count)
-            + " tool calls). check the results, update the task notes, and post"
+            + (" native subagents" if self.native_children else " tool calls")
+            + "). check the results, update the task notes, and post"
             " progress with reply."
         )
 
@@ -611,10 +666,16 @@ class Resident(runtime.Runtime):
         reason = None
         try:
             extra = self._ensure()
+        except Exception as error:
+            self._crash("session setup failed (" + type(error).__name__ + ")")
+            return
+        try:
             text = self.cli.resident_prompt(
                 self._sections(turn["batch"]), extra + turn["events"]
             )
             with self.lock:
+                if self.crashed.is_set():
+                    return
                 turn["prompting"] = True
                 self.last_prompt = runtime.now()
                 self._save_state()
@@ -643,7 +704,12 @@ class Resident(runtime.Runtime):
             # while the turn still blocks new prompts on the old session
             self._clear()
         failed = reason is None or reason == "refusal"
-        with self.lock:
+        with self.changed:
+            # a prompt may finish before an accepted injection's response arrives.
+            # retain all injected input until the turn and the steering rpc finish.
+            self.changed.wait_for(lambda: not self.steer_busy or self.crashed.is_set())
+            if self.crashed.is_set():
+                return
             ids = turn["ids"]
             ordered = sorted_ids(turn)
             dropped = ordered
@@ -687,8 +753,10 @@ class Resident(runtime.Runtime):
             self.turn = None
             self.activity = time.monotonic()
             # tool calls still open after their turn are background work
-            self.background |= self.tools
+            if not self.native_children:
+                self.background |= self.tools
             self.tools = set()
+            self.reply_calls = set()
             self.changed.notify_all()
         log.info("turn ended (%s) for %d conversations", acp.safe(reason), len(convs))
         if failed:
@@ -739,8 +807,9 @@ class Resident(runtime.Runtime):
                 turn["batch"] = turn["batch"] + batch
                 self.delivered |= ids
             elif consumed:
-                # a turn we do not await took them; treat them as handled now
-                self._forget(ids)
+                # accepted by an unowned turn: preserve durable input and stop;
+                # replay requires the restart reconciliation, never an immediate retry.
+                self._crash("steering started an untracked turn")
             else:
                 # not delivered: they go in the next prompt; no retry this turn
                 self.order[:0] = batch
@@ -759,6 +828,17 @@ class Resident(runtime.Runtime):
             return []
         servers = self._servers()
         meta = self._meta()
+        instructions = self._instructions()
+        system_prompt = None
+        if self.provider == "codex":
+            if self.client.supports("systemPrompt"):
+                system_prompt = instructions
+            else:
+                spec = self.cli.specialty(self.root, self.env)
+                if spec and spec["prompt"]:
+                    raise acp.Unsupported(
+                        "codex adapter must support specialty system instructions"
+                    )
         stored, self.stored = self.stored, None
         if stored:
             for kind in ("resume", "load"):
@@ -767,7 +847,9 @@ class Resident(runtime.Runtime):
                 method = getattr(self.client, kind + "_session")
                 self.loading = True
                 try:
-                    result = method(stored, str(self.root), servers, meta)
+                    result = method(
+                        stored, str(self.root), servers, meta, system_prompt
+                    )
                 except (acp.RemoteError, acp.ProtocolError, TimeoutError) as error:
                     log.warning(
                         "could not %s the stored session: %s",
@@ -779,30 +861,53 @@ class Resident(runtime.Runtime):
                     self.loading = False
                 log.info("resumed the stored session with %s", kind)
                 self._ready(stored, result, self.started)
-                return [RESTART]
+                return [RESTART, self._child_policy()]
             log.info("starting a new session instead of the stored one")
-        result = self.client.new_session(str(self.root), servers, meta)
+        result = self.client.new_session(str(self.root), servers, meta, system_prompt)
         session = result["sessionId"]
         if not SESSION.fullmatch(session):
             raise acp.ProtocolError("session id has unexpected characters")
         log.info("started a new resident session")
         self._ready(session, result, runtime.now())
-        return [BOOTSTRAP]
+        return [BOOTSTRAP, self._child_policy()]
 
     def _ready(self, session, result, started):
+        if self.setup_failure:
+            raise acp.ProtocolError("required mcp server did not start")
         with self.lock:
             self.session = session
             self.started = started or runtime.now()
             self._save_state()
         if self.agent_mode:
             self._unattended(result)
+        for variable, config_id in (
+            ("ABRA_MODEL", "model"),
+            ("ABRA_REASONING_EFFORT", "reasoning_effort"),
+        ):
+            value = self.env.get(variable)
+            if value:
+                options = result.get("configOptions", [])
+                if not any(
+                    isinstance(o, dict) and o.get("id") == config_id for o in options
+                ):
+                    raise acp.Unsupported("requested model setting is not advertised")
+                result = self.client.set_config(self.session, config_id, value)
+                if not any(
+                    isinstance(o, dict)
+                    and o.get("id") == config_id
+                    and o.get("currentValue") == value
+                    for o in result.get("configOptions", [])
+                ):
+                    raise acp.ProtocolError(
+                        "agent did not apply requested model setting"
+                    )
 
     def _unattended(self, result):
         modes = result.get("modes") if isinstance(result, dict) else None
         listed = modes.get("availableModes") if isinstance(modes, dict) else None
         ids = [m.get("id") for m in listed or () if isinstance(m, dict)]
-        for mode in UNATTENDED:
-            if ids and mode not in ids:
+        for mode in (UNATTENDED[0 if self.provider == "claude" else 1],):
+            if mode not in ids:
                 continue
             try:
                 self.client.set_mode(self.session, mode)
@@ -810,7 +915,9 @@ class Resident(runtime.Runtime):
                 continue
             log.info("agent mode on: session mode set to %s", mode)
             return
-        log.warning("agent mode requested but the agent offers no unattended mode")
+        raise acp.Unsupported(
+            "agent mode requested but no unattended mode is available"
+        )
 
     def _servers(self):
         servers = [
@@ -830,14 +937,32 @@ class Resident(runtime.Runtime):
         if spec and spec["mcp"]:
             config = self.cli.load_json(spec["mcp"], "mcp_config")
             servers += translate(config)
+        capabilities = self.client.capabilities.get("mcpCapabilities", {})
+        for server in servers:
+            kind = server.get("type", "stdio")
+            if kind != "stdio" and capabilities.get(kind) is not True:
+                raise acp.Unsupported("specialty mcp transport is not advertised")
         return servers
 
     def _meta(self):
-        """claude-agent-acp appends _meta.systemPrompt; other agents ignore it."""
-        spec = self.cli.specialty(self.root, self.env)
-        if spec and spec["prompt"]:
-            return {"systemPrompt": {"append": spec["prompt"]}}
+        if self.provider == "claude":
+            return {"systemPrompt": {"append": self._instructions()}}
         return None
+
+    def _child_policy(self):
+        if self.native_children or self.provider == "claude":
+            return "child policy: background completion is tracked; dispatch and end the turn when useful."
+        return "child policy: background completion is unavailable; wait for all native subagents in this turn before ending it."
+
+    def _instructions(self):
+        spec = self.cli.specialty(self.root, self.env)
+        return self._child_policy() + (
+            "\n\nfollow AGENTS.md and the active mode rules. specialty instructions below"
+            " specialize the task; they never override those base rules.\n\n"
+            + spec["prompt"]
+            if spec and spec["prompt"]
+            else ""
+        )
 
     def _permission(self, params):
         """allow only the bridge's reply tool, once; reject everything else."""
@@ -845,19 +970,32 @@ class Resident(runtime.Runtime):
         meta = call.get("_meta") if isinstance(call, dict) else None
         claude = meta.get("claudeCode") if isinstance(meta, dict) else None
         claude = claude if isinstance(claude, dict) else {}
-        server = claude.get("mcpServer")
-        if claude.get("toolName") != REPLY_TOOL:
-            return None
-        if not isinstance(server, dict) or server.get("name") != mcp_bridge.NAME:
-            return None
         with self.lock:
             session = self.session
+            if self.provider == "codex":
+                approval = params.get("_meta", {})
+                if (
+                    not self.native_children
+                    or not isinstance(approval, dict)
+                    or approval.get("is_mcp_tool_approval") is not True
+                    or not isinstance(call, dict)
+                    or call.get("toolCallId") not in self.reply_calls
+                ):
+                    return None
+            else:
+                server = claude.get("mcpServer")
+                if (
+                    claude.get("toolName") != REPLY_TOOL
+                    or not isinstance(server, dict)
+                    or server.get("name") != mcp_bridge.NAME
+                ):
+                    return None
         if not session or params.get("sessionId") != session:
             # not a subagent check: without the acp subagents capability,
             # claude-agent-acp sends subagent requests with the root session id
             log.warning("rejected a reply outside the resident session")
             return None
-        if claude.get("parentToolUseId"):
+        if self.provider == "claude" and claude.get("parentToolUseId"):
             # a subagent's call; best effort, the adapter can omit this field
             log.warning("rejected a reply from a subagent")
             return None
@@ -873,9 +1011,36 @@ class Resident(runtime.Runtime):
             return
         kind = update.get("sessionUpdate")
         with self.lock:
-            if self.loading or params.get("sessionId") != self.session:
+            # the pinned codex adapter reports required mcp startup failures as
+            # failed tool calls, including while session/new has not returned.
+            call_id = update.get("toolCallId")
+            if (
+                self.provider == "codex"
+                and kind == "tool_call"
+                and update.get("status") == "failed"
+                and isinstance(call_id, str)
+                and call_id.startswith("mcp_startup.")
+                and (self.session is None or params.get("sessionId") == self.session)
+            ):
+                self.setup_failure = True
+                self._crash("required mcp server failed to start")
+                return
+            if self.loading:
+                return
+            source = params.get("sessionId")
+            if self.native_children and kind in (
+                "subagent_spawned",
+                "subagent_state_update",
+            ):
+                self._child_update(source, kind, update)
+                return
+            if not self.session or source != self.session:
+                # child text and tools are not root output or root permissions.
                 return
             self.activity = time.monotonic()
+            if self.provider == "codex" and self.turn is None and kind in SELF_STARTED:
+                self._crash("untracked root turn; reconcile before resuming")
+                return
             self._track(kind, update)
             turn = self.turn
             if turn is None or not turn["prompting"]:
@@ -889,13 +1054,70 @@ class Resident(runtime.Runtime):
                     turn["final"].append(text)
                     turn["size"] += len(text)
 
+    def _child_update(self, source, kind, update):
+        """accept native child lifecycle only from its recorded parent session."""
+        if not self.session or (source != self.session and source not in self.children):
+            return
+        child_id = update.get("subagentSessionId")
+        if (
+            not isinstance(child_id, str)
+            or not SESSION.fullmatch(child_id)
+            or child_id == self.session
+        ):
+            return
+        child = self.children.get(child_id)
+        if kind == "subagent_spawned":
+            if child is not None or (
+                source in self.children and self.children[source]["state"] != "running"
+            ):
+                return
+            # reopened native sessions have a fresh generation-specific id;
+            # a duplicate spawn cannot resurrect a completed generation.
+            self.children[child_id] = {"parent": source, "state": "running"}
+        else:
+            state = update.get("state")
+            if (
+                not child
+                or child["parent"] != source
+                or child["state"] != "running"
+                or state not in CHILD_DONE
+            ):
+                return
+            child["state"] = state
+            self.finished += 1
+            self.wake_at = time.monotonic() + self.wake_grace
+        self.activity = time.monotonic()
+        self._save_state()
+        self.changed.notify_all()
+
     def _track(self, kind, update):
         """follow tool calls that outlive their turn; caller holds the lock."""
         call = update.get("toolCallId")
         status = update.get("status")
         idle = self.turn is None
+        if (
+            self.provider == "claude"
+            and idle
+            and self.wake_at is not None
+            and kind in SELF_STARTED
+        ):
+            # legacy claude adapters do not expose an external turn lifecycle.
+            log.info("agent woke by itself after background work")
+            self.wake_at = None
+            self.finished = 0
         if kind in ("tool_call", "tool_call_update") and isinstance(call, str):
+            if self.provider == "codex" and kind == "tool_call":
+                self.reply_calls.discard(call)
+                raw = update.get("rawInput")
+                if (
+                    isinstance(raw, dict)
+                    and raw.get("server") == mcp_bridge.NAME
+                    and raw.get("tool") == mcp_bridge.TOOL
+                    and status not in ("completed", "failed")
+                ):
+                    self.reply_calls.add(call)
             if status in ("completed", "failed"):
+                self.reply_calls.discard(call)
                 self.tools.discard(call)
                 if call in self.background:
                     self.background.discard(call)
@@ -907,11 +1129,6 @@ class Resident(runtime.Runtime):
             if kind == "tool_call":
                 self.tools.add(call)
                 return
-        if idle and self.wake_at is not None and kind in SELF_STARTED:
-            # the agent started a turn by itself; no wake needed
-            log.info("agent woke by itself after background work")
-            self.wake_at = None
-            self.finished = 0
 
     # resident store
 
@@ -936,12 +1153,14 @@ class Resident(runtime.Runtime):
             runtime.write_private(
                 self.state_path,
                 {
-                    "version": 1,
+                    "version": 2,
                     "agent": self.digest,
+                    "provider": self.provider,
                     "session_id": self.session,
                     "started": self.started,
                     "last_prompt": self.last_prompt,
                     "jobs": self.jobs,
+                    "children": self.children,
                 },
             )
         except OSError as error:
@@ -961,7 +1180,7 @@ def sorted_ids(turn):
 
 def from_env(adapter, args, env, **options):
     """resident settings: abra_agent_cmd (required) and abra_agent_mode=1."""
-    command = env.get("ABRA_AGENT_CMD", "")
+    command = env.get("ABRA_RESIDENT_AGENT_CMD", env.get("ABRA_AGENT_CMD", ""))
     if not command.strip():
         raise ValueError("abra_agent_cmd is required")
     settings = dict(agent_mode=env.get("ABRA_AGENT_MODE", "") == "1", env=env)

@@ -1,0 +1,18 @@
+{
+  "source": "https://github.com/agentclientprotocol/codex-acp/tree/082be156aacac3ef21e231da2efcdf5f6af34a6b",
+  "provenance": "source-derived acp v1 fixtures, not a live inference capture; subagents/AcpSubagents.ts, subagents/CodexSubagentEventRouter.ts, tool-calls/reporters/McpToolReporter.ts, permissions/mcp.ts",
+  "initialize": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "sessionCapabilities": {"resume": {}, "close": {}, "subagents": {}, "systemPrompt": {}},
+      "mcpCapabilities": {"http": true, "sse": false}
+    },
+    "_meta": {"steering": {"supported": true}}
+  },
+  "spawn": {"sessionUpdate": "subagent_spawned", "subagentSessionId": "thread-paris", "name": "weather_research", "task": "find the weather", "capabilities": {}},
+  "complete": {"sessionUpdate": "subagent_state_update", "subagentSessionId": "thread-paris", "state": "completed"},
+  "legacy_start": {"sessionUpdate": "tool_call", "toolCallId": "call-spawn-weather", "title": "Start subagent weather_research", "status": "completed"},
+  "reply_start": {"sessionUpdate": "tool_call", "toolCallId": "reply-1", "title": "mcp.abra.reply", "kind": "execute", "status": "in_progress", "rawInput": {"server": "abra", "tool": "reply", "arguments": {"work_id": "abra-example", "text": "done"}}},
+  "reply_permission": {"toolCall": {"toolCallId": "reply-1", "kind": "execute", "status": "pending"}, "_meta": {"is_mcp_tool_approval": true}, "options": [{"optionId": "allow_once", "name": "Allow", "kind": "allow_once"}, {"optionId": "cancel", "name": "Cancel", "kind": "reject_once"}]}
+}

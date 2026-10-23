@@ -41,7 +41,18 @@ SHARED = (
     "ABRA_TRIGGER",
     "ABRA_SPECIALTY_DIR",
     "ABRA_AGENT_MODE",
+    "ABRA_AGENT_PROVIDER",
+    "ABRA_AGENT_CMD",
+    "ABRA_RESIDENT_AGENT_CMD",
+    "ABRA_CODEX_BIN",
+    "ABRA_CLAUDE_BIN",
+    "ABRA_MODEL",
+    "ABRA_REASONING_EFFORT",
     "ABRA_MAX_CONCURRENCY",
+    "CODEX_HOME",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_ACCESS_TOKEN",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GH_TOKEN",
@@ -51,6 +62,9 @@ SHARED = (
     "npm_config_update_notifier",
 )
 SECRETS = (
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_ACCESS_TOKEN",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GH_TOKEN",
@@ -76,6 +90,14 @@ def trigger(env):
     if value not in TRIGGERS:
         raise SetupError("unknown abra_trigger; expected one of: none, slack, linear")
     return value or "none"
+
+
+def provider(env):
+    """validate the provider before seeding or starting children."""
+    value = env.get("ABRA_AGENT_PROVIDER", "claude")
+    if value not in ("claude", "codex"):
+        raise SetupError("unknown abra_agent_provider; expected claude or codex")
+    return value
 
 
 def instance_root(env):
@@ -168,6 +190,15 @@ def seed_home(home):
             shutil.copyfile(skeleton, target)
 
 
+def codex_home(env):
+    """create the persistent codex home without replacing existing state."""
+    path = Path(env.get("CODEX_HOME") or str(HOME / ".codex"))
+    if not path.is_absolute() or ".." in path.parts:
+        raise SetupError("codex_home must be an absolute path without '..'")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env["CODEX_HOME"] = str(path)
+
+
 def host_key(path):
     """generate the ed25519 host key once into the volume; reuse it afterwards."""
     directory = path.parent
@@ -252,6 +283,7 @@ def commands(env, root, selected):
 
 def setup(env):
     selected = trigger(env)
+    selected_provider = provider(env)
     root = instance_root(env)
     keys, count = read_keys(env.get("ABRA_AUTHORIZED_KEYS", "") or DEFAULT_KEYS)
     if not os.access(HOME, os.W_OK):
@@ -261,7 +293,9 @@ def setup(env):
     log("loaded " + str(count) + " authorized keys")
     env = dict(env)
     env["ABRA_ROOT"] = str(root)
+    env["ABRA_AGENT_PROVIDER"] = selected_provider
     seed_home(HOME)
+    codex_home(env)
     seed_root(SOURCE, root)
     host_key(HOME / HOST_KEY)
     write_private(RUN / "sshd_env", sshd_env(env))
