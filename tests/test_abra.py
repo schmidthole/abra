@@ -149,6 +149,29 @@ class AbraTests(unittest.TestCase):
         self.assert_error(conflict, 1, "work id conflicts")
         self.assertEqual(len(self.calls()), 2)
 
+    def test_codex_captured_fresh_and_resume_protocol(self):
+        self.use_codex()
+        fixture_dir = SOURCE.parent.parent / "tests/fixtures/codex-exec-0.163.0"
+        for name in ("fresh", "resume"):
+            result = self.abra(
+                "run",
+                "--key",
+                "captured",
+                "--text",
+                "remember the marker",
+                STUB_FIXTURE=str(fixture_dir / ("captured-" + name + ".jsonl")),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "copper-otter-731\n")
+            self.assertEqual(
+                self.sessions()["captured"]["session_id"],
+                "0199a213-81c0-7800-8aa1-bbab2a035a53",
+            )
+        self.assertEqual(self.calls()[1][:2], ["exec", "resume"])
+        self.assertEqual(
+            self.calls()[1][-2:], ["0199a213-81c0-7800-8aa1-bbab2a035a53", "-"]
+        )
+
     def test_codex_partial_failures_preserve_thread_and_never_replay(self):
         self.use_codex()
         for mode in (

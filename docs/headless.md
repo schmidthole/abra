@@ -152,8 +152,10 @@ configuration check is not an operating-system security boundary.
 
 unit fixtures cover provider selection, exact resume, legacy migration, provider
 switch rejection, partial failures without replay, work id continuity, concurrent
-keys, permissions, and specialty translation. the versioned JSONL contract fixture
-is synthetic, derived from the official example; it is not a live model capture.
+keys, permissions, and specialty translation. versioned JSONL fixtures include a
+synthetic command/failure contract and normalized authenticated fresh/resume
+captures from codex-cli 0.163.0. those captures verify one thread retained a harmless
+marker across two real turns; they do not establish tool or delegation parity.
 
 before deploying, run fresh and resumed no-tool smoke prompts in a disposable
 root and persistent dedicated `CODEX_HOME`; verify the same native thread is
