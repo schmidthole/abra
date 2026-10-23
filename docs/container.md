@@ -15,6 +15,7 @@ only what abra needs, pinned:
 | python 3, git, make, openssh, tini, tmux, nano, vim-tiny, less, ripgrep, jq, curl, procps | signed debian archive | apt signatures |
 | node and npm | nodejs.org release tarball | sha256 in the `Dockerfile` |
 | gh | official signed apt repo (cli.github.com) | keyring sha256, apt signatures |
+| codex cli `0.163.0` and codex-acp | adapter source commit `082be156aacac3ef21e231da2efcdf5f6af34a6b`; `/opt/codex-acp`, both commands on `PATH` | source commit checked; `docker/codex-acp/package-lock.json` integrity hashes, install scripts off |
 | claude code | npm, `@anthropic-ai/claude-code` | npm registry integrity |
 | claude-agent-acp | `/opt/claude-agent-acp`, `npm ci` from `docker/claude-agent-acp/package-lock.json`, install scripts off | lockfile integrity hash for every package |
 | tasks-axi, gh-axi | npx cache prefetched at the `bin/tasks` and `bin/github` pins | npm registry integrity |
@@ -22,7 +23,13 @@ only what abra needs, pinned:
 | slack adapter deps | venv `/opt/venvs/slack` | `docker/requirements-slack.txt` hashes |
 | black | venv `/opt/venvs/black`, on `PATH` | `requirements-dev.txt` hashes |
 
-versions are `ARG`s at the top of the `Dockerfile`. debian packages are upgraded
+versions are `ARG`s at the top of the `Dockerfile` or exact dependencies in
+`docker/*/package.json`. the codex adapter is built from source because the
+published `2.2.2` package predates the required native subagent lifecycle
+protocol; its version string alone does not identify the compatible build.
+`CODEX_PATH=/usr/local/bin/codex` makes the adapter use the same pinned cli as
+headless runs. upgrade this pair together and repeat protocol and live tests.
+debian packages are upgraded
 at build time from the pinned release's security archive, so a rebuild picks up
 security fixes. `docker/requirements-slack.txt` must keep the same versions as
 `triggers/requirements-slack.txt` (a test checks this).
@@ -34,6 +41,7 @@ security fixes. `docker/requirements-slack.txt` must keep the same versions as
 | `/home/abra` | the persistent volume: everything below lives here |
 | `/home/abra/abra` | instance root (`ABRA_ROOT`), seeded on first start |
 | `/home/abra/.claude` | claude code config and sessions |
+| `/home/abra/.codex` | dedicated `CODEX_HOME`: codex auth, configuration, and sessions |
 | `/home/abra/.config/gh` | gh config, if you use `gh auth login` |
 | `/home/abra/.abra-sshd` | ssh host key, generated on first start (0600) |
 | `/etc/abra/ssh/authorized_keys` | mounted operator public keys (`ABRA_AUTHORIZED_KEYS` overrides) |
@@ -48,13 +56,14 @@ by that user.
 `tini` is pid 1 and reaps agent subprocesses. it runs `docker/entrypoint.py`,
 which:
 
-1. checks `ABRA_TRIGGER`: unset or `none` runs sshd only; `slack` or `linear`
+1. validates `ABRA_AGENT_PROVIDER` (`claude` by default, or `codex`) and checks `ABRA_TRIGGER`: unset or `none` runs sshd only; `slack` or `linear`
    also runs that listener; anything else exits 1.
 2. reads the authorized keys file. a missing, empty, oversized, or malformed file
    exits 1 (fail closed). the keys are copied to `/run/abra/authorized_keys` (0600)
    at each start, so rotate keys by updating the secret and restarting.
 3. seeds `ABRA_ROOT` from `/opt/abra` only if the path does not exist. an existing
-   root is never written to.
+   root is never written to. creates the dedicated codex home when missing,
+   preserving existing authentication and sessions.
 4. generates the ed25519 host key into the volume on first start and reuses it
    afterwards.
 5. starts `sshd` on port 2222 and, with `ABRA_TRIGGER=slack`,
@@ -82,8 +91,10 @@ docker build -t abra:local .
 
 `.dockerignore` keeps `.git`, `data/`, `operator/`, `specialty/`, `.worktrees/`,
 `.sources/`, env files, `*.prod.*`, `*production*`, `prod-*`, `NOTES.md`,
-`.claude/settings.local.json`, and caches out of the image. no secret is used at
-build time.
+`.claude/settings.local.json`, codex auth/config/session/history/database files,
+and caches out of the image. project `.codex/skills` and `.codex/rules` remain
+available. provision codex configuration at runtime in the dedicated home; do
+not copy an operator home into the image. no secret is used at build time.
 
 ## run
 
@@ -115,31 +126,89 @@ platform's secret store.
 | `ABRA_NAME` | bot name for the listener, default `abra` |
 | `ABRA_ROOT` | instance root, default `/home/abra/abra` |
 | `ABRA_AUTHORIZED_KEYS` | authorized keys path, default `/etc/abra/ssh/authorized_keys` |
-| `ABRA_AGENT_CMD` | acp agent the listener hosts, default the image's `claude-agent-acp`, which runs the image's claude (`CLAUDE_CODE_EXECUTABLE`) |
-| `ABRA_AGENT_MODE` | `1` sets the resident session to `bypassPermissions` (and makes `bin/abra` skip prompts); recommended here, since the container is the sandbox |
+| `ABRA_AGENT_PROVIDER` | `claude` (default) or `codex`; selects both headless and resident backends |
+| `ABRA_RESIDENT_AGENT_CMD` | optional acp command override; defaults to `claude-agent-acp` or `codex-acp` by provider |
+| `ABRA_CLAUDE_BIN`, `ABRA_CODEX_BIN` | optional headless cli overrides; keep these separate from acp commands |
+| `ABRA_MODEL`, `ABRA_REASONING_EFFORT` | explicit model and reasoning selection; unsupported options fail rather than silently inheriting a different value |
+| `CODEX_HOME` | dedicated persistent codex home, default `/home/abra/.codex`; do not share an interactive operator configuration |
+| `CODEX_API_KEY`, `OPENAI_API_KEY`, `CODEX_ACCESS_TOKEN` | optional codex credentials; see authentication below |
+| `ABRA_AGENT_MODE` | `1` selects the provider's unattended mode for resident and headless runs; enable only when this container is the intended sandbox |
 | `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`, `ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE` | resident session timing, see [triggers.md](triggers.md) |
 | `ABRA_MAX_CONCURRENCY`, `ABRA_SPECIALTY_DIR` | as in [README.md](../README.md) and [specialty.md](specialty.md) |
+
+### codex authentication and launch
+
+start with `ABRA_TRIGGER=none` and `ABRA_AGENT_PROVIDER=codex`, retaining the same
+home volume. over ssh, authenticate using either:
+
+```sh
+codex login --device-auth
+# alternatively, read an api key from the runtime environment:
+printenv OPENAI_API_KEY | codex login --with-api-key
+codex login status
+```
+
+these are alternatives; device authentication uses a chatgpt account and the
+second command uses api billing. saved authentication is reused after restart.
+`CODEX_API_KEY` is also supported directly by `codex exec`; for resident mode,
+provision the saved login before enabling a listener. an access token can be
+provided with `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`.
+see the official [authentication documentation](https://learn.chatgpt.com/docs/auth)
+and [non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+after login and specialty setup, recreate the container using the same volume:
+
+```sh
+docker run -d --name abra-codex \
+  -p 127.0.0.1:2222:2222 \
+  -v abra-home:/home/abra \
+  -v "$PWD/authorized_keys:/etc/abra/ssh/authorized_keys:ro" \
+  -e ABRA_AGENT_PROVIDER=codex -e ABRA_AGENT_MODE=1 \
+  -e ABRA_MODEL -e ABRA_REASONING_EFFORT \
+  -e GH_TOKEN -e SLACK_BOT_TOKEN -e SLACK_APP_TOKEN \
+  -e ABRA_TRIGGER=slack -e ABRA_NAME=abra \
+  --stop-timeout 300 abra:local
+```
+
+set `ABRA_MODEL` to a model available to the authenticated account before launch;
+set reasoning effort only when that model supports it. the claude launch above
+can use `ABRA_AGENT_PROVIDER=claude` explicitly. the image supplies both cli and
+acp binaries without setting a global `ABRA_AGENT_CMD` to an acp executable.
+legacy `ABRA_AGENT_CMD` resident overrides remain supported; new deployments
+should use `ABRA_RESIDENT_AGENT_CMD`.
+
+the dedicated codex home lives inside the mounted container home. keep its MCP
+configuration empty: the runtime provides the reply server and specialty servers,
+and the upstream adapter can otherwise prefer a same-named user-configured
+server. do not bind-mount your personal `.codex` directory. the seeded abra root
+has no `.git`; the headless codex backend explicitly skips its git-repository
+check for this trusted root. see [headless.md](headless.md) and
+[triggers.md](triggers.md) for configuration and failure behavior.
 
 ### environment in ssh sessions
 
 sshd starts sessions with a clean environment, so the entrypoint writes an
 `Include`d sshd file, `/run/abra/sshd_env` (0600), that sets exactly these
-variables for every ssh session, when set: `ABRA_ROOT`, `ABRA_NAME`,
-`ABRA_TRIGGER`, `ABRA_SPECIALTY_DIR`, `ABRA_AGENT_MODE`, `ABRA_MAX_CONCURRENCY`,
-`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `DISABLE_AUTOUPDATER`,
-`npm_config_cache`, `npm_config_prefer_offline`, and `npm_config_update_notifier`.
-this lets an operator run `bin/abra`, `bin/tasks`, and `claude` by hand. the
-resident settings (`ABRA_AGENT_CMD`, `ABRA_WAKE_GRACE`, `ABRA_HEARTBEAT`,
-`ABRA_IDLE_CLEAR`, `ABRA_MAX_SESSION_AGE`) and `CLAUDE_CODE_EXECUTABLE` are not
-shared; the trigger listener gets the container's full environment.
+variables for every ssh session when set: instance settings (`ABRA_ROOT`,
+`ABRA_NAME`, `ABRA_TRIGGER`, `ABRA_SPECIALTY_DIR`, `ABRA_AGENT_MODE`,
+`ABRA_MAX_CONCURRENCY`), provider selection and command/model overrides
+(`ABRA_AGENT_PROVIDER`, `ABRA_AGENT_CMD`, `ABRA_RESIDENT_AGENT_CMD`,
+`ABRA_CLAUDE_BIN`, `ABRA_CODEX_BIN`, `ABRA_MODEL`, `ABRA_REASONING_EFFORT`), `CODEX_HOME`,
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`, `OPENAI_API_KEY`,
+`CODEX_ACCESS_TOKEN`, `GH_TOKEN`, `DISABLE_AUTOUPDATER`, and the three npm settings
+(`npm_config_cache`, `npm_config_prefer_offline`, `npm_config_update_notifier`).
+this lets an operator run `bin/abra`, `bin/tasks`, `claude`, and `codex` by hand.
+resident timing settings and provider executable internals are not shared; the
+trigger listener gets the container's full environment. credentials are removed
+from the sshd process environment and conveyed to authenticated ssh sessions
+only through the private `SetEnv` file.
 the slack tokens and `LINEAR_API_KEY` are left out of the session environment,
 but this is not a security boundary; export the linear key by hand in a session
 that needs `linear-axi`. a value containing `"`, `\`, or control characters is not
 shared and its name is logged.
 
 ssh sessions run as the same user as the entrypoint and the listener, so anyone
-holding an authorized key can read every secret given to the container (claude
-or anthropic, gh, slack, and linear), for example from `/proc/<pid>/environ`. only
+holding an authorized key can read every secret given to the container (claude, openai/codex, gh, slack, and linear), for example from `/proc/<pid>/environ`. only
 authorize keys of people trusted with all of them, and scope the tokens to what
 abra needs.
 
@@ -184,7 +253,7 @@ idle clear or restart) starts with the startup checks.
 
 the image and the instance root upgrade separately.
 
-- tools (node, claude code, gh, python deps, sshd): rebuild the image and
+- tools (node, claude code, codex, acp adapters, gh, python deps, sshd): rebuild the image and
   recreate the container. the volume, and so the root, is kept.
 - abra itself: the root is the operator's copy. the seeded copy has no git
   history; to manage it with git, replace it once with a clone while it holds no
@@ -202,13 +271,14 @@ the image and the instance root upgrade separately.
 ## security
 
 - the volume holds the trigger store with message text in plaintext, claude
-  sessions (the resident session included), and any gh or claude login. it must be encrypted at
-  rest and not shared with other workloads.
+  and codex sessions (the resident session included), and any provider or gh
+  login. it must be encrypted at rest and not shared with other workloads.
 - expose port 2222 only to operators (localhost binding, private network, or port
   forwarding). the host key is generated per volume; pin it in `known_hosts`.
 - secrets come only from the runtime environment and mounted secrets. none is in
   an image layer, and the entrypoint never prints their values.
-- `ABRA_AGENT_MODE=1` makes the resident session and `bin/abra` skip claude
-  permission prompts; the container is then the sandbox, so keep its tokens
+- `ABRA_AGENT_MODE=1` makes the resident session and `bin/abra` use
+  provider-specific unattended permissions; the container is then the sandbox,
+  so keep its tokens
   narrowly scoped. without it, the runtime rejects every permission request except
   abra's own reply tool.
