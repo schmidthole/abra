@@ -140,8 +140,10 @@ mcp configuration means an empty explicit server set.
 
 `--ignore-user-config` excludes the normal `CODEX_HOME/config.toml`. because codex
 can merge other config layers, abra also rejects non-empty `mcp_servers`,
-`profiles`, or `plugins` in `/etc/codex/config.toml` and ancestor/project
-`.codex/config.toml` files. the error names the source; move tool definitions into
+`profiles`, or `plugins` in `/etc/codex/config.toml` and the install root's
+`.codex/config.toml`. `project_root_markers=[]` explicitly makes that working
+root the project boundary, including git-free deployments; unrelated ancestor
+config and instructions are not inherited. the error names the source; move tool definitions into
 the specialty or use an isolated deployment. ordinary project settings and
 `AGENTS.md` are allowed. managed deployment policies remain authoritative; this
 configuration check is not an operating-system security boundary.

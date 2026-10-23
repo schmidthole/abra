@@ -527,10 +527,8 @@ def codex_config_check(root, env, ignore_user_config=True):
         import tomllib
     except ImportError:
         raise ValueError("codex mode requires python 3.11 or newer") from None
-    paths = [Path("/etc/codex/config.toml")]
-    paths.extend(
-        directory / ".codex/config.toml" for directory in (root, *root.parents)
-    )
+    # both adapters pin project_root_markers=[] so the install root is the boundary.
+    paths = [Path("/etc/codex/config.toml"), root / ".codex/config.toml"]
     user_config = (
         Path(env.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
     ).resolve()
@@ -560,6 +558,7 @@ def codex_command(session, spec, env, new_session):
     argv += ["--json", "--ignore-user-config", "--skip-git-repo-check"]
     argv += ["--enable", "multi_agent", "--disable", "apps", "--disable", "plugins"]
     argv += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"']
+    argv += ["-c", "project_root_markers=[]"]
     argv += ["-c", "mcp_servers=" + toml_value(codex_mcp(spec))]
     if spec and spec["prompt"]:
         instructions = (

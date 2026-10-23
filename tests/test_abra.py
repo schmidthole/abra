@@ -245,6 +245,7 @@ class AbraTests(unittest.TestCase):
         self.assertIn('sandbox_mode="workspace-write"', call)
         self.assertIn("--ignore-user-config", call)
         self.assertIn("--skip-git-repo-check", call)
+        self.assertIn("project_root_markers=[]", call)
         self.assertEqual(call[call.index("--enable") + 1], "multi_agent")
         disabled = [call[i + 1] for i, arg in enumerate(call) if arg == "--disable"]
         self.assertEqual(disabled, ["apps", "plugins"])
@@ -332,6 +333,31 @@ class AbraTests(unittest.TestCase):
         config.write_text('model_reasoning_effort="high"\n')
         result = self.abra("run", "--key", "k", "--text", "x")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_codex_install_root_excludes_unrelated_parent_config(self):
+        self.use_codex()
+        parent_config = self.root.parent / ".codex/config.toml"
+        parent_config.parent.mkdir()
+        parent_config.write_text('[mcp_servers.unrelated]\ncommand="tool"\n')
+        for git_marker in (False, True):
+            if git_marker:
+                (self.root / ".git").write_text("gitdir: /unused/worktree")
+            result = self.abra(
+                "run",
+                "--key",
+                "k",
+                "--text",
+                "x",
+                CODEX_HOME=str(self.root / "data/codex-home"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("project_root_markers=[]", self.calls()[-1])
+        local = self.root / ".codex/config.toml"
+        local.parent.mkdir()
+        local.write_text(parent_config.read_text())
+        result = self.abra("run", "--key", "k", "--text", "x")
+        self.assert_error(result, 1, "ambient codex")
+        self.assertEqual(len(self.calls()), 2)
 
     def test_codex_config_check_can_include_resident_user_config(self):
         self.use_codex()
