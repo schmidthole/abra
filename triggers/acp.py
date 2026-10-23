@@ -275,7 +275,7 @@ class Client:
 
     # acp methods
 
-    def initialize(self):
+    def initialize(self, subagents=False):
         result = self._result(
             "initialize",
             {
@@ -283,6 +283,7 @@ class Client:
                 "clientCapabilities": {
                     "fs": {"readTextFile": False, "writeTextFile": False},
                     "terminal": False,
+                    **({"subagents": {}} if subagents else {}),
                 },
                 "clientInfo": {"name": "abra", "version": "1"},
             },
@@ -301,9 +302,12 @@ class Client:
         return result
 
     def supports(self, name):
-        """whether the agent advertised load, resume, close, or steering."""
+        """whether the agent advertised the requested protocol capability."""
         if name == "load":
             return self.capabilities.get("loadSession") is True
+        if name in ("subagents", "systemPrompt"):
+            session = self.capabilities.get("sessionCapabilities")
+            return isinstance(session, dict) and isinstance(session.get(name), dict)
         if name in ("resume", "close"):
             session = self.capabilities.get("sessionCapabilities")
             return isinstance(session, dict) and session.get(name) is not None
@@ -313,22 +317,26 @@ class Client:
             return isinstance(steering, dict) and steering.get("supported") is True
         raise ValueError("unknown capability " + repr(name))
 
-    def new_session(self, cwd, mcp_servers=(), meta=None):
-        params = self._setup(None, cwd, mcp_servers, meta)
+    def new_session(self, cwd, mcp_servers=(), meta=None, system_prompt=None):
+        params = self._setup(None, cwd, mcp_servers, meta, system_prompt)
         result = self._result("session/new", params)
         if not isinstance(result.get("sessionId"), str) or not result["sessionId"]:
             raise ProtocolError("session/new returned no session id")
         return result
 
-    def load_session(self, session_id, cwd, mcp_servers=(), meta=None):
+    def load_session(
+        self, session_id, cwd, mcp_servers=(), meta=None, system_prompt=None
+    ):
         """replays history as session/update notifications before returning."""
         self._require("load", "session/load")
-        params = self._setup(session_id, cwd, mcp_servers, meta)
+        params = self._setup(session_id, cwd, mcp_servers, meta, system_prompt)
         return self._result("session/load", params)
 
-    def resume_session(self, session_id, cwd, mcp_servers=(), meta=None):
+    def resume_session(
+        self, session_id, cwd, mcp_servers=(), meta=None, system_prompt=None
+    ):
         self._require("resume", "session/resume")
-        params = self._setup(session_id, cwd, mcp_servers, meta)
+        params = self._setup(session_id, cwd, mcp_servers, meta, system_prompt)
         return self._result("session/resume", params)
 
     def close_session(self, session_id):
@@ -340,6 +348,12 @@ class Client:
             raise ValueError("mode id must be a non-empty string")
         return self._result(
             "session/set_mode", {"sessionId": _sid(session_id), "modeId": mode_id}
+        )
+
+    def set_config(self, session_id, config_id, value):
+        return self._result(
+            "session/set_config_option",
+            {"sessionId": _sid(session_id), "configId": config_id, "value": value},
         )
 
     def prompt(self, session_id, prompt, timeout=None):
@@ -376,7 +390,7 @@ class Client:
             raise Unsupported(method + " is not advertised by the agent")
 
     @staticmethod
-    def _setup(session_id, cwd, mcp_servers, meta):
+    def _setup(session_id, cwd, mcp_servers, meta, system_prompt=None):
         if not isinstance(cwd, str) or not os.path.isabs(cwd):
             raise ValueError("cwd must be an absolute path")
         servers = list(mcp_servers)
@@ -389,6 +403,11 @@ class Client:
             if not isinstance(meta, dict):
                 raise ValueError("meta must be an object")
             params["_meta"] = meta
+        if system_prompt is not None:
+            params["systemPrompt"] = {
+                "mode": "append",
+                "content": [{"type": "text", "text": system_prompt}],
+            }
         return params
 
     # reader thread

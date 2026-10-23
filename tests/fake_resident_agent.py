@@ -28,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "triggers"))
 import mcp_bridge  # noqa: E402
 
 config = json.loads(Path(sys.argv[1]).read_text())
+codex = json.loads(
+    (Path(__file__).parent / "fixtures/codex-acp-082be156.json").read_text()
+)
 lock = threading.Lock()
 held = None
 servers = []
@@ -181,6 +184,9 @@ def handle_turn(sid, text):
     if "do-background" in text:
         update(sid, "tool_call", toolCallId="bg1", title="agent", status="in_progress")
         threading.Thread(target=background, args=(sid,), daemon=True).start()
+    if "do-native-child" in text:
+        update(sid, **native("spawn"))
+        threading.Thread(target=native_background, args=(sid,), daemon=True).start()
     if "do-fail" in text:
         return {"code": -32000, "message": "secret failure detail"}
     if "do-refuse" in text:
@@ -198,6 +204,18 @@ def background(sid):
     if config.get("wake"):
         time.sleep(0.05)
         chunk(sid, "background finished by itself")
+
+
+def native(name):
+    fields = dict(codex[name])
+    fields["kind"] = fields.pop("sessionUpdate")
+    return fields
+
+
+def native_background(sid):
+    time.sleep(float(config.get("background", 0.3)))
+    update(sid, **native("complete"))
+    update(sid, **native("complete"))
 
 
 def finish(request_id, outcome):
@@ -224,6 +242,8 @@ def session_result(sid):
             "currentModeId": config["modes"][0],
             "availableModes": [{"id": m, "name": m} for m in config["modes"]],
         }
+    if config.get("codex"):
+        result["configOptions"] = [{"id": "model"}, {"id": "reasoning_effort"}]
     return result
 
 
@@ -245,15 +265,33 @@ def handle(message):
                 "sessionCapabilities": {"resume": {}, "close": {}},
             }
         result = {"protocolVersion": 1, "agentCapabilities": capabilities}
+        if config.get("codex"):
+            result = json.loads(json.dumps(codex["initialize"]))
+            if config.get("no_subagents"):
+                del result["agentCapabilities"]["sessionCapabilities"]["subagents"]
         if config.get("advertise", config.get("steering", True)):
             result["_meta"] = {"steering": {"supported": True}}
         send({"id": request_id, "result": result})
     elif method == "session/new":
         servers = params["mcpServers"]
         update("s-new", "available_commands_update", availableCommands=[])
+        if config.get("mcp_failure"):
+            update(
+                "s-new",
+                "tool_call",
+                toolCallId="mcp_startup.abra.fixture",
+                status="failed",
+            )
         send({"id": request_id, "result": session_result("s-" + str(os.getpid()))})
     elif method in ("session/resume", "session/load"):
         servers = params["mcpServers"]
+        if config.get("mcp_failure"):
+            update(
+                params["sessionId"],
+                "tool_call",
+                toolCallId="mcp_startup.abra.fixture",
+                status="failed",
+            )
         if config.get("fail_resume"):
             send({"id": request_id, "error": {"code": -32002, "message": "gone"}})
         else:
@@ -265,6 +303,25 @@ def handle(message):
         if method == "session/close" and held is not None:
             finish(held[0], "cancelled")
             held = None
+    elif method == "session/set_config_option":
+        send(
+            {
+                "id": request_id,
+                "result": {
+                    "configOptions": [
+                        {
+                            "id": key,
+                            "currentValue": (
+                                params["value"]
+                                if key == params["configId"]
+                                else "default"
+                            ),
+                        }
+                        for key in ("model", "reasoning_effort")
+                    ]
+                },
+            }
+        )
     elif method == "session/prompt":
         threading.Thread(target=prompt, args=(request_id, params)).start()
     elif method == "session/cancel":
@@ -274,6 +331,7 @@ def handle(message):
     elif method == "_session/steering" and config.get("steering", True):
         forced = config.get("steer_outcome")
         if forced:
+            time.sleep(float(config.get("steer_delay", 0)))
             send({"id": request_id, "result": {"outcome": forced}})
         elif held is not None:
             send({"id": request_id, "result": {"outcome": "injected"}})

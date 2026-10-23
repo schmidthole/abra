@@ -13,8 +13,11 @@ event, not an interactive user.
 - answer with the `reply(work_id, text)` tool; that is the only way to post. only
   the coordinator posts; never let a subagent call it. the runtime's check for
   subagent calls is best effort, so this rule is yours to keep.
-- never wait on subagents in-turn: dispatch, post progress with reply, and end the
-  turn. you are woken when background work finishes or new messages arrive.
+- follow the trusted runtime's `child policy` notice. when background completion
+  is tracked, dispatch, post progress with reply, and end the turn when useful;
+  the runtime wakes you for completion. when unavailable, wait for every native
+  subagent in the current turn before ending it. never assume a completed spawn
+  tool means its child has finished.
 - a question becomes a reply plus a held task; the answer arrives as a later event.
 - `runtime event:` lines in the trusted header, before any nonce-fenced block, are
   runtime notices (bootstrap, restart, jobs, background completion, heartbeat,

@@ -83,6 +83,10 @@ class ResidentTests(unittest.TestCase):
         options.setdefault("kill_timeout", 2)
         options.setdefault("timeout", 20)
         options.setdefault("heartbeat", 0)
+        if options.get("provider") == "codex":
+            options["env"] = dict(
+                options.get("env", os.environ), CODEX_HOME=str(self.root / "codex-home")
+            )
         instance = resident.Resident(
             adapter or self.adapter,
             self.root,
@@ -139,6 +143,38 @@ class ResidentTests(unittest.TestCase):
         self.assertIsInstance(instance, resident.Resident)
         self.assertEqual(instance.argv, ["agent", "--acp"])
         self.assertTrue(instance.agent_mode)
+
+    def test_codex_features_are_explicit_and_preserve_other_config(self):
+        instance = self.make(provider="codex", env={"CODEX_CONFIG": '{"model":"test"}'})
+        config = json.loads(instance.env["CODEX_CONFIG"])
+        self.assertEqual(
+            config,
+            {
+                "model": "test",
+                "project_root_markers": [],
+                "features": {"multi_agent": True, "apps": False, "plugins": False},
+            },
+        )
+        with self.assertRaises(ValueError):
+            self.make(
+                provider="codex",
+                env={"CODEX_CONFIG": '{"features":{"multi_agent":false}}'},
+            )
+        with self.assertRaises(ValueError):
+            self.make(
+                provider="codex", env={"CODEX_CONFIG": '{"mcp_servers":{"other":{}}}'}
+            )
+
+    def test_codex_rejects_ambient_user_mcp_configuration(self):
+        home = self.root / "codex-home"
+        home.mkdir()
+        (home / "config.toml").write_text(
+            '[mcp_servers.other]\ncommand = "other-tool"\n'
+        )
+        instance = self.make(provider="codex")
+        with self.assertRaisesRegex(ValueError, "ambient codex"):
+            instance.start()
+        self.assertEqual(self.received(), [])
 
     def test_reply_tool_answers_and_framing(self):
         instance = self.start()
@@ -237,11 +273,246 @@ class ResidentTests(unittest.TestCase):
         self.assertEqual(len(self.received("_session/steering")), 1)
         self.assertIn("second", self.prompts()[1])
 
-    def test_steering_started_new_turn_counts_as_handled(self):
+    def test_steering_started_new_turn_preserves_input_and_stops(self):
         instance = self.steer_with("startedNewTurn")
         self.assertEqual(len(self.prompts()), 1)
         self.assertEqual(self.adapter.acks("2"), ["running"])
+        self.assertTrue(instance.crashed.is_set())
+        self.assertEqual(len(instance.convs["t:b:1"]["pending"]), 1)
+
+    def test_late_injected_response_keeps_messages_until_completion(self):
+        self.configure(steer_outcome="injected", steer_delay=0.5, slow=0.2)
+        instance = self.start()
+        instance.submit(event("start", "1", "first do-slow"))
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        instance.submit(event("start", "2", "second", conv="t:b:1"))
+        self.wait_for(lambda: bool(self.received("_session/steering")))
+        time.sleep(0.25)
+        self.assertIsNotNone(instance.turn)
+        stored = json.loads(instance.path.read_text())
+        self.assertEqual(len(stored["convs"]["t:b:1"]["pending"]), 1)
+        self.assertTrue(instance.wait_idle(5))
         self.assertEqual(instance.convs["t:b:1"]["pending"], [])
+        self.assertEqual(len(self.prompts()), 1)
+
+    def test_legacy_tool_first_self_start_suppresses_wake(self):
+        instance = self.make()
+        instance.finished = 1
+        instance.wake_at = time.monotonic()
+        with instance.lock:
+            instance._track(
+                "tool_call", {"toolCallId": "followup", "status": "in_progress"}
+            )
+        self.assertIsNone(instance.wake_at)
+        self.assertEqual(instance.finished, 0)
+        self.assertEqual(instance.tools, {"followup"})
+
+    def codex_start(self, **options):
+        self.configure(codex=True, background=0.3, slow=0.5)
+        return self.start(provider="codex", **options)
+
+    def native_update(self, instance, name, source=None, **fields):
+        fixture = json.loads((TESTS / "fixtures/codex-acp-082be156.json").read_text())
+        instance._update(
+            {
+                "sessionId": source or instance.session,
+                "update": dict(fixture[name], **fields),
+            }
+        )
+
+    def test_codex_child_completion_wakes_once_and_blocks_idle(self):
+        instance = self.codex_start(wake_grace=0.05, idle_clear=0.1)
+        instance.submit(event("start", "1", "go do-native-child"))
+        self.wait_for(lambda: bool(instance.children))
+        self.assertFalse(instance.wait_idle(0.05))
+        self.assertEqual(self.received("session/close"), [])
+        self.wait_for(lambda: len(self.prompts()) >= 2)
+        self.assertTrue(instance.wait_idle(5))
+        wakes = [
+            p for p in self.prompts() if "runtime event: background work finished" in p
+        ]
+        self.assertEqual(len(wakes), 1)
+        self.assertEqual(instance.finished, 0)
+        initial = self.received("initialize")[0]["params"]
+        self.assertEqual(initial["clientCapabilities"]["subagents"], {})
+
+    def test_codex_descendants_generations_and_unrelated_updates(self):
+        instance = self.codex_start(wake_grace=60, idle_clear=0)
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.wait_idle(5))
+        self.native_update(instance, "spawn", source="unknown")
+        self.assertEqual(instance.children, {})
+        self.native_update(instance, "spawn")
+        self.native_update(
+            instance, "spawn", source="thread-paris", subagentSessionId="nested"
+        )
+        self.native_update(instance, "complete", subagentSessionId="nested")
+        self.assertEqual(instance.children["nested"]["state"], "running")
+        self.native_update(instance, "complete")
+        self.assertFalse(instance._quiet())
+        self.native_update(instance, "spawn")
+        self.assertEqual(instance.children["thread-paris"]["state"], "completed")
+        self.native_update(
+            instance, "spawn", subagentSessionId="thread-paris:generation:2"
+        )
+        self.native_update(instance, "complete")
+        self.assertEqual(
+            instance.children["thread-paris:generation:2"]["state"], "running"
+        )
+        self.native_update(
+            instance, "complete", source="thread-paris", subagentSessionId="nested"
+        )
+        self.native_update(
+            instance, "complete", subagentSessionId="thread-paris:generation:2"
+        )
+        self.assertEqual(instance.finished, 3)
+        saved = json.loads(instance.state_path.read_text())
+        self.assertEqual(saved["children"]["nested"]["parent"], "thread-paris")
+        instance._clear()
+        self.assertEqual(instance.children, {})
+        self.native_update(instance, "spawn", source="old-session")
+        self.assertEqual(instance.children, {})
+
+    def test_codex_queue_only_steering_retains_midturn_input(self):
+        instance = self.codex_start()
+        instance.submit(event("start", "1", "first do-slow do-reply"))
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        instance.submit(event("start", "2", "second do-reply", conv="t:b:1"))
+        stored = json.loads(instance.path.read_text())
+        self.assertEqual(len(stored["convs"]["t:b:1"]["pending"]), 1)
+        self.assertTrue(instance.wait_idle(5))
+        self.assertEqual(self.received("_session/steering"), [])
+        self.assertEqual(len(self.prompts()), 2)
+        for conv in ("t:c1:1", "t:b:1"):
+            self.assertIn(
+                "re " + self.work_id(instance, conv), self.adapter.replies(conv)
+            )
+
+    def test_codex_permission_correlates_exact_root_reply_call(self):
+        instance = self.codex_start()
+        instance.submit(event("start", "1", "do-slow"))
+        self.wait_for(lambda: len(self.prompts()) == 1)
+        fixture = json.loads((TESTS / "fixtures/codex-acp-082be156.json").read_text())
+        params = dict(fixture["reply_permission"], sessionId=instance.session)
+        self.assertIsNone(instance._permission(params))
+        self.native_update(instance, "reply_start", source="unknown-child")
+        self.assertIsNone(instance._permission(params))
+        self.native_update(instance, "reply_start")
+        self.assertEqual(instance._permission(params), "allow_once")
+        self.assertIsNone(instance._permission(dict(params, sessionId="child")))
+        self.assertIsNone(instance._permission(dict(params, _meta={})))
+        instance._update(
+            {
+                "sessionId": instance.session,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "reply-1",
+                    "status": "completed",
+                },
+            }
+        )
+        self.assertIsNone(instance._permission(params))
+        self.assertTrue(instance.wait_idle(5))
+
+    def test_codex_model_and_system_instructions(self):
+        instance = self.codex_start(
+            env=dict(os.environ, ABRA_MODEL="gpt-test", ABRA_REASONING_EFFORT="medium")
+        )
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.wait_idle(5))
+        setup = self.received("session/new")[0]["params"]
+        self.assertEqual(setup["systemPrompt"]["mode"], "append")
+        self.assertIn(
+            "background completion is tracked",
+            setup["systemPrompt"]["content"][0]["text"],
+        )
+        settings = [e["params"] for e in self.received("session/set_config_option")]
+        self.assertEqual(
+            [(p["configId"], p["value"]) for p in settings],
+            [("model", "gpt-test"), ("reasoning_effort", "medium")],
+        )
+
+    def test_codex_without_native_capability_uses_in_turn_wait_policy(self):
+        self.configure(codex=True, no_subagents=True)
+        instance = self.start(provider="codex")
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.wait_idle(5))
+        self.assertFalse(instance.native_children)
+        self.assertIn("wait for all native subagents in this turn", self.prompts()[0])
+
+    def test_codex_completion_during_other_conversation_schedules_reconciliation(self):
+        instance = self.codex_start(wake_grace=0.01)
+        instance.submit(event("start", "1", "go do-native-child"))
+        self.wait_for(lambda: bool(instance.children) and instance.turn is None)
+        instance.submit(event("start", "2", "other do-slow do-reply", conv="t:b:1"))
+        self.assertTrue(instance.wait_idle(5))
+        self.assertEqual(len(self.prompts()), 3)
+        self.assertIn("runtime event: background work finished", self.prompts()[2])
+        self.assertIn(
+            "re " + self.work_id(instance, "t:b:1"), self.adapter.replies("t:b:1")
+        )
+
+    def test_codex_restart_does_not_adopt_dead_child_generations(self):
+        instance = self.codex_start(wake_grace=60)
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.wait_idle(5))
+        self.native_update(instance, "spawn")
+        instance.stop()
+        self.log.unlink()
+        restarted = self.codex_start()
+        self.assertTrue(restarted.wait_idle(5))
+        self.assertEqual(restarted.children, {})
+        self.assertIn(resident.RESTART, self.prompts()[0])
+
+    def test_codex_unattended_selects_only_codex_mode(self):
+        self.configure(codex=True, modes=["bypassPermissions", "agent-full-access"])
+        instance = self.start(provider="codex", agent_mode=True)
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.wait_idle(5))
+        self.assertEqual(
+            self.received("session/set_mode")[0]["params"]["modeId"],
+            "agent-full-access",
+        )
+
+    def test_specialty_mcp_rejects_silent_loss_of_configuration(self):
+        for server in (
+            {"command": "tool", "timeout": 5},
+            {"type": "unsupported", "url": "https://example.org"},
+            {"command": "tool", "args": "arg"},
+        ):
+            with self.assertRaises(ValueError):
+                resident.translate({"mcpServers": {"sample": server}})
+
+    def test_unattended_and_mcp_failure_stop_before_prompt(self):
+        for config in ({"codex": True}, {"codex": True, "mcp_failure": True}):
+            self.configure(**config)
+            instance = self.start(
+                provider="codex", agent_mode=not config.get("mcp_failure")
+            )
+            instance.submit(event("start", str(len(self.instances)), "hello"))
+            self.assertTrue(instance.crashed.wait(5))
+            self.assertEqual(self.prompts(), [])
+            self.assertTrue(instance.convs["t:c1:1"]["pending"])
+            instance.stop()
+
+    def test_codex_unsolicited_root_turn_stops_without_consuming_input(self):
+        instance = self.codex_start()
+        instance.submit(event("start", "1", "hello"))
+        self.assertTrue(instance.wait_idle(5))
+        self.native_update(instance, "reply_start")
+        self.assertTrue(instance.crashed.is_set())
+
+    def test_provider_change_does_not_resume_other_provider_session(self):
+        first = self.start()
+        first.submit(event("start", "1", "hello"))
+        self.assertTrue(first.wait_idle(5))
+        first.stop()
+        self.log.unlink()
+        second = self.codex_start()
+        second.submit(event("message", "2", "hello"))
+        self.assertTrue(second.wait_idle(5))
+        self.assertEqual(self.received("session/resume"), [])
+        self.assertEqual(len(self.received("session/new")), 1)
 
     def test_steering_method_not_found_disables_steering(self):
         self.configure(steering=False, advertise=True, slow=0.6)
@@ -536,6 +807,15 @@ class ResidentTests(unittest.TestCase):
         self.assertIn("re " + self.work_id(instance), self.adapter.replies())
         self.assertEqual(instance.convs["t:c1:1"]["pending"], [])
 
+    def test_stop_drains_native_children_and_reconciliation(self):
+        instance = self.codex_start(wake_grace=0.01)
+        instance.submit(event("start", "1", "go do-native-child"))
+        self.wait_for(lambda: bool(instance.children))
+        instance.stop()
+        self.assertEqual(instance.children["thread-paris"]["state"], "completed")
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertIn("runtime event: background work finished", self.prompts()[1])
+
     def test_stop_timeout_keeps_messages_pending(self):
         instance = self.start(stop_timeout=0.3)
         instance.submit(event("start", "1", "wait do-hold"))
@@ -663,7 +943,7 @@ class ResidentTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=60,
-            env=dict(os.environ, ABRA_AGENT_CMD=command),
+            env=dict(os.environ, ABRA_AGENT_CMD=command, ABRA_WAKE_GRACE="0"),
         )
 
     def test_cli_adapter_in_resident_mode(self):
@@ -675,6 +955,13 @@ class ResidentTests(unittest.TestCase):
         self.assertTrue(replies[1].startswith("re abra-"))
         acks = [(r["msg_id"], r["state"]) for r in records if r["type"] == "ack"]
         self.assertEqual(acks, [("1", "running"), ("2", "running")])
+
+    def test_cli_eof_drains_background_completion_and_wake(self):
+        self.configure(background=0.1)
+        result = self.run_cli("go do-background")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertIn("runtime event: background work finished", self.prompts()[1])
 
     def test_cli_sigterm_drains_and_cleans_up(self):
         self.configure(slow=0.5)
