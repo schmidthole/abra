@@ -34,7 +34,7 @@ KEY_TYPE = re.compile(
 )
 KEY_DATA = re.compile(r"[A-Za-z0-9+/]{16,16384}={0,3}")
 # variables ssh sessions need to run abra by hand; slack tokens and the linear key
-# are not put in the ssh session env.
+# and client secret are not put in the ssh session env.
 SHARED = (
     "ABRA_ROOT",
     "ABRA_NAME",
@@ -57,6 +57,7 @@ SECRETS = (
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
     "LINEAR_API_KEY",
+    "LINEAR_CLIENT_SECRET",
 )
 # printable ascii without quotes or backslashes, so sshd_config quoting stays exact.
 SAFE_VALUE = re.compile(r"[\x20\x21\x23-\x5b\x5d-\x7e]{0,8192}")

@@ -6,7 +6,7 @@ FROM debian:trixie-20261020@sha256:4c25275446ca371766b8b093c696782eabce06263fcca
 ARG NODE_VERSION=24.22.1
 ARG NODE_SHA256_AMD64=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
 ARG NODE_SHA256_ARM64=dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e
-ARG GH_VERSION=2.103.0
+ARG GH_VERSION=2.103.2
 # sha256 of https://cli.github.com/packages/githubcli-archive-keyring.gpg
 # (signing key 7f38bbb59d064dbcb3d84d725612b36462313325)
 ARG GH_KEYRING_SHA256=6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b
@@ -16,7 +16,7 @@ ARG TASKS_AXI_VERSION=0.2.5
 ARG GH_AXI_VERSION=0.1.35
 # linear-axi is not published to npm (the npm package of that name is
 # unrelated); it is built from its source repo at this commit.
-ARG LINEAR_AXI_COMMIT=85b701f3bec4f83242a7fec170c8d0e9b9f7d722
+ARG LINEAR_AXI_COMMIT=99bd0288e34c72d5fe459d3a44b215a12c4b1a26
 
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
