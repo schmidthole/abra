@@ -211,9 +211,9 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   claude-agent-acp sends their requests with the root session id too. a request
   carrying `parentToolUseId` (a subagent's call) is rejected, but that is best
   effort, since the adapter can miss it. "only the coordinator posts" therefore
-  rests on the AGENTS.md rule plus this check; a reply that slips through still
-  reaches only this instance's work ids and is rate limited. everything else is
-  rejected. other agents do not send these fields, so outside
+  rests on the `docs/modes/resident.md` rule plus this check; a reply that slips
+  through still reaches only this instance's work ids and is rate limited.
+  everything else is rejected. other agents do not send these fields, so outside
   agent mode (for example codex) abra cannot post and only the single-conversation
   free-text fallback reaches the thread. with `ABRA_AGENT_MODE=1` (container only) it sets
   the session mode to `bypassPermissions` (claude) or `agent-full-access` (codex)
@@ -226,7 +226,8 @@ printf '%s\n' '{"kind": "start", "conv": "cli:demo:1", "msg_id": "1", "sender": 
   (at most 20) are kept in `resident.json` until a turn delivers them, so a crash
   does not lose them. with no runtime listening, the job runs one-shot as before.
 - specialty: `SPECIALTY.md` goes to claude-agent-acp as `_meta.systemPrompt.append`,
-  and the bootstrap event runs the AGENTS.md startup, which reads it for any agent.
+  and the bootstrap event runs the AGENTS.md startup, which reads it for any agent
+  through `docs/modes/specialty.md`.
   the pack's `mcp_config` stdio and http servers are passed in `mcpServers`.
 - wake: tool calls still open when their turn ends count as background work. when
   one completes while no runtime prompt runs, the runtime waits `ABRA_WAKE_GRACE`

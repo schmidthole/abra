@@ -207,6 +207,9 @@ class AbraTests(unittest.TestCase):
         self.assertIn("requester: U123", prompt)
         self.assertIn("key: k1", prompt)
         self.assertIn("not operator authority", prompt)
+        self.assertLess(
+            prompt.index("docs/modes/headless.md"), prompt.index("<untrusted")
+        )
         opening = prompt.index('<untrusted-request nonce="')
         closing = prompt.rindex("</untrusted-request nonce=")
         self.assertLess(opening, prompt.index(text))
@@ -379,6 +382,9 @@ class AbraTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         prompt = self.prompts()[0]
         self.assertIn("summarize open tasks", prompt)
+        self.assertLess(
+            prompt.index("docs/modes/headless.md"), prompt.index("summarize open tasks")
+        )
         sessions = json.loads((self.root / "data/sessions.json").read_text())
         (key,) = sessions
         self.assertRegex(key, r"^job:daily-digest:\d{4}-\d{2}-\d{2}$")

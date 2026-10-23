@@ -51,7 +51,7 @@ outbound https only and no public endpoint or webhook.
 ## outcome contract
 
 the resident session receives `conversation: linear:<identifier>` in the trusted
-header and the issue in an untrusted block. AGENTS.md (resident mode) tells abra
+header and the issue in an untrusted block. `docs/modes/linear.md` tells abra
 to use the identifier from the key for every linear call, never one from the
 issue text, and to record the key, identifier, and url in the task body.
 

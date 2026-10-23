@@ -158,7 +158,8 @@ def fence(tag, nonce, text, attributes=""):
 def preamble(key, lines, work_id, history, nonce):
     """trusted event header, optional work item line and prior history block."""
     text = (
-        "headless event delivered through bin/abra. there is no interactive user.\n"
+        "headless event delivered through bin/abra. there is no interactive user."
+        " read docs/modes/headless.md before acting.\n"
         "key: " + key + "\n" + lines
     )
     if work_id:
@@ -231,7 +232,8 @@ def resident_prompt(sections, events=()):
     nonce = new_nonce(texts + list(events))
     text = (
         "resident event delivered by the trigger runtime. there is no interactive"
-        " user. post to a conversation only with the reply tool and its work id.\n"
+        " user. post to a conversation only with the reply tool and its work id."
+        " follow docs/modes/resident.md, and docs/modes/linear.md for linear: keys.\n"
     )
     for event in events:
         text += "\nruntime event: " + event + "\n"
@@ -313,7 +315,8 @@ def job_prompt(name, key, text, history=None):
     """jobs never carry prior history; the argument keeps render calls uniform."""
     return (
         "headless scheduled job delivered through bin/abra. there is no interactive"
-        " user.\nkey: " + key + "\njob: " + name + "\n\n"
+        " user. read docs/modes/headless.md before acting.\n"
+        "key: " + key + "\njob: " + name + "\n\n"
         "the operator-configured job prompt from the specialty follows.\n\n" + text
     )
 

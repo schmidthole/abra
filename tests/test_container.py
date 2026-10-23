@@ -453,6 +453,7 @@ class ImageConfigTests(unittest.TestCase):
             "docker/entrypoint.py",
             "triggers/slack.py",
             "AGENTS.md",
+            "docs/modes/headless.md",
             ".gitignore",
             "templates/worker.md",
         ):
