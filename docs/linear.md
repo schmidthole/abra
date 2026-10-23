@@ -112,7 +112,7 @@ removing the blocked label is up to the human; the adapter ignores labels.
 
    ```sh
    git clone https://github.com/schmidthole/linear-axi.git && cd linear-axi
-   git checkout 85b701f3bec4f83242a7fec170c8d0e9b9f7d722
+   git checkout 99bd0288e34c72d5fe459d3a44b215a12c4b1a26
    npm ci --ignore-scripts && npm run build && npm link
    linear-axi --help
    ```
