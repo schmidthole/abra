@@ -19,3 +19,7 @@ when invoked through `bin/abra` there is no interactive user.
 - stale sessions are removed by the deployer with
   `bin/abra sessions prune --older-than DAYS`; never prune from inside a turn.
 - do not end the turn while subagents are still running; wait for them in-turn.
+- the work id is the stable application identity; a codex thread id is assigned
+  by codex after launch, and is not a tasks-axi id.
+- a failed event is not automatically replayed. when asked to recover, reconcile
+  persisted notes and any external side effects before continuing the work.

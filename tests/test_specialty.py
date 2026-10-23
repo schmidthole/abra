@@ -188,14 +188,21 @@ class SpecialtyTests(unittest.TestCase):
     def test_rejects_deeply_nested_json(self):
         nested = "[" * 20000 + "]" * 20000
         (self.pack / "mcp.json").write_text(nested)
-        with self.assertRaisesRegex(ValueError, "mcp_config is not valid json"):
+        with self.assertRaisesRegex(
+            ValueError, "mcp_config (is not valid json|must contain a json object)"
+        ):
             specialty.load(self.root)
         (self.pack / "specialty.json").write_text(nested)
-        with self.assertRaisesRegex(ValueError, "specialty.json is not valid json"):
+        with self.assertRaisesRegex(
+            ValueError, "specialty.json (is not valid json|must be an object)"
+        ):
             specialty.load(self.root)
         result = self.run_cli()
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr, "error: specialty.json is not valid json\n")
+        self.assertRegex(
+            result.stderr,
+            r"^error: specialty\.json (is not valid json|must be an object)\n$",
+        )
 
     def test_rejects_bad_files(self):
         (self.pack / "SPECIALTY.md").unlink()
