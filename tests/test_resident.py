@@ -156,6 +156,10 @@ class ResidentTests(unittest.TestCase):
         self.assertEqual(self.adapter.acks("1"), ["running"])
         text = self.prompts()[0]
         self.assertIn("runtime event: " + resident.BOOTSTRAP, text)
+        self.assertIn("docs/modes/resident.md", resident.BOOTSTRAP)
+        header = text[: text.index("<untrusted")]
+        self.assertIn("follow docs/modes/resident.md", header)
+        self.assertIn("docs/modes/linear.md for linear: keys", header)
         self.assertIn("conversation: t:c1:1\nwork id: " + work_id + "\n", text)
         self.assertRegex(
             text,

@@ -46,9 +46,9 @@ CHECKPOINT = (
 )
 SELF_STARTED = ("agent_message_chunk", "agent_thought_chunk", "tool_call")
 BOOTSTRAP = (
-    "new resident session. run the AGENTS.md startup and reconcile every"
-    " unfinished task from its notes; agents and processes from any previous"
-    " session are gone."
+    "new resident session. run the AGENTS.md startup, read docs/modes/resident.md,"
+    " and reconcile every unfinished task from its notes; agents and processes"
+    " from any previous session are gone."
 )
 RESTART = (
     "the trigger runtime restarted and resumed this session. background agents and"
