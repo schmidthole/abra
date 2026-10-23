@@ -177,8 +177,11 @@ class LinearAdapter:
 
     # linear-axi
 
-    def run(self, *args):
-        """one linear-axi call with --json; returns the parsed object or raises."""
+    def run(self, *args, best_effort=False):
+        """one linear-axi call with --json; returns the parsed object or raises.
+
+        a best-effort call never requests a token renewal.
+        """
         argv = [self.command] + list(args) + ["--json"]
         with tempfile.TemporaryFile() as out:
             try:
@@ -205,7 +208,7 @@ class LinearAdapter:
         if result.returncode:
             code = value.get("code") if isinstance(value, dict) else None
             if isinstance(code, str) and CODE.fullmatch(code):
-                if code == "AUTH_ERROR" and self.actor == "app":
+                if code == "AUTH_ERROR" and self.actor == "app" and not best_effort:
                     self.expire("linear rejected the app token")
                 raise LinearError(
                     code.lower() + " (exit " + str(result.returncode) + ")"
@@ -222,10 +225,10 @@ class LinearAdapter:
             self.renew.set()
             self.stopper()
 
-    def call(self, what, *args):
+    def call(self, what, *args, best_effort=False):
         """run, logging a failure by code; returns none on failure."""
         try:
-            return self.run(*args)
+            return self.run(*args, best_effort=best_effort)
         except LinearError as error:
             log.warning("linear-axi %s failed: %s", what, error)
             return None
@@ -364,7 +367,9 @@ class LinearAdapter:
     def think(self, issue):
         """best effort: a thought on the bot's agent session, so it is not unresponsive."""
         try:
-            data = self.call("agent sessions", "api", "--query=" + SESSIONS_QUERY)
+            data = self.call(
+                "agent sessions", "api", "--query=" + SESSIONS_QUERY, best_effort=True
+            )
             nodes = (((data or {}).get("data") or {}).get("agentSessions") or {}).get(
                 "nodes"
             )
@@ -393,6 +398,7 @@ class LinearAdapter:
                 "api",
                 "--query=" + THOUGHT_MUTATION,
                 "--variables=" + json.dumps(variables),
+                best_effort=True,
             )
             result = ((data or {}).get("data") or {}).get("agentActivityCreate") or {}
             if result.get("success") is True:
@@ -774,6 +780,8 @@ def main(argv=None, env=None):
     handler.addFilter(redact)
     logging.basicConfig(level=logging.INFO, handlers=[handler])
     renew_at = None
+    # wired before startup, so an auth error during start still stops the listener
+    done = threading.Event()
     try:
         config = settings(env)
         actor, auth = config["actor"], config.pop("auth")
@@ -794,6 +802,7 @@ def main(argv=None, env=None):
             actor=actor,
             **names,
         )
+        adapter.stopper = done.set
         instance = runtime.from_args(
             adapter, args, agent_env(env, actor, config["env"])
         )
@@ -803,8 +812,6 @@ def main(argv=None, env=None):
     except (ValueError, OSError) as error:
         log.error("error: %s", error)
         return 1
-    done = threading.Event()
-    adapter.stopper = done.set
     timer = None
     if renew_at is not None:
         timer = threading.Timer(

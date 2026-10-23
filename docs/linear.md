@@ -189,8 +189,9 @@ the response. the token stays in memory and reaches linear-axi children and the
 agent as `LINEAR_ACCESS_TOKEN`.
 
 the token lasts about 30 days and has no refresh token. one day before expiry
-(or half its lifetime, if shorter), or on the first linear-axi `AUTH_ERROR`, the
-listener stops gracefully (running turn finished, pending messages stored) and
+(or half its lifetime, if shorter), or on the first linear-axi `AUTH_ERROR`
+(including one during startup catch-up; the best-effort agent session calls
+only log theirs), the listener stops gracefully (running turn finished, pending messages stored) and
 exits 1, so the supervisor (the container entrypoint and orchestrator) restarts
 it with a fresh token.
 
@@ -282,3 +283,6 @@ them with a `response`.
 - app mode: if the process stops between a claim and its hand back (a token
   expiry or auth error included), the issue can stay in progress and delegated;
   delegate it again and set it to todo to retry.
+- app mode: when the hand back cannot read the issue, it skips the creator
+  assignment but still clears the delegate, so an unassigned issue can end with
+  no assignee and no delegate (the failed read is logged).

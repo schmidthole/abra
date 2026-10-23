@@ -9,7 +9,8 @@ bot user id), "issues" keyed by identifier, and "fail": a list of command names
 "ambiguous" makes a todo listing without --team fail as linear-axi does when
 several teams share the state name. state names resolve case-insensitively to
 their canonical form, as in linear-axi. "auth_fail" lists commands that exit 1
-with AUTH_ERROR. app mode authenticates with LINEAR_ACCESS_TOKEN: issues carry a
+with AUTH_ERROR ("api issue", "api sessions", and "api activity" name one
+graphql call), as does setting both credentials, as in linear-axi. app mode authenticates with LINEAR_ACCESS_TOKEN: issues carry a
 "delegate", "sessions" holds agent sessions, and thoughts land in "activities".
 """
 
@@ -65,6 +66,10 @@ def handle(state, args):
         error("Authentication failed", "AUTH_ERROR")
     if args[0] == "api":
         query = flag(args, "--query") or ""
+        kind = "sessions" if "agentSessions" in query else "issue"
+        kind = "activity" if "agentActivityCreate" in query else kind
+        if "viewer" not in query and "api " + kind in state.get("auth_fail", []):
+            error("Authentication failed: permission denied", "AUTH_ERROR")
         if "agentSessions" in query:
             emit({"data": {"agentSessions": {"nodes": state.get("sessions", [])}}})
         if "agentActivityCreate" in query:
@@ -128,7 +133,7 @@ def handle(state, args):
         delegate = flag(args, "--delegate")
         issue["delegate"] = {"none": None, "me": viewer}.get(delegate, delegate)
         bump(state, issue)
-        emit({"result": "issue updated", "issue": {"delegate": delegate}})
+        emit({"result": "issue updated", "issue": {"delegate": issue["delegate"]}})
     if command == "issue label":
         issue.setdefault("labels", []).append(args[4])
         emit({"result": "label added", "issue": {"labels": issue["labels"]}})
@@ -161,9 +166,12 @@ def main():
         if args[-1:] != ["--json"]:
             error("stub requires --json", "VALIDATION_ERROR", 2)
         args = args[:-1]
-        if not (
-            os.environ.get("LINEAR_API_KEY") or os.environ.get("LINEAR_ACCESS_TOKEN")
-        ):
+        key, token = (
+            os.environ.get(name) for name in ("LINEAR_API_KEY", "LINEAR_ACCESS_TOKEN")
+        )
+        if key and token:
+            error("Both LINEAR_API_KEY and LINEAR_ACCESS_TOKEN are set", "AUTH_ERROR")
+        if not (key or token):
             error("LINEAR_API_KEY is not set", "AUTH_ERROR")
         state = json.loads(STATE.read_text())
         try:

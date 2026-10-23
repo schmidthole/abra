@@ -842,6 +842,39 @@ class AppAdapterTests(Base):
                 self.adapter_ref.think({"id": "x", "identifier": "ENG-1"})
         self.assertIn("agent session update failed: keyerror", logs.output[0].lower())
 
+    def test_agent_session_auth_error_never_requests_a_restart(self):
+        for failing in ("api sessions", "api activity"):
+            self.edit(
+                lambda s: (
+                    s.update(
+                        auth_fail=[failing],
+                        sessions=[
+                            {
+                                "id": SESSION,
+                                "status": "pending",
+                                "appUser": {"id": BOT},
+                                "issue": {"id": issue()["id"]},
+                            }
+                        ],
+                    ),
+                )
+            )
+            with self.assertLogs("abra.triggers", level="WARNING") as logs:
+                self.adapter_ref.think({"id": issue()["id"], "identifier": "ENG-1"})
+            self.assertIn("auth_error", "\n".join(logs.output))
+            self.assertFalse(self.adapter_ref.renew.is_set())
+        self.adapter_ref.poll(self.instance)
+        self.assertEqual(len(self.instance.convs["linear:ENG-1"]["pending"]), 1)
+        self.assertFalse(self.adapter_ref.renew.is_set())
+
+    def test_both_credentials_are_rejected_by_the_stub_as_by_linear_axi(self):
+        env = dict(self.adapter_ref.env, LINEAR_API_KEY=KEY)
+        adapter = linear.LinearAdapter(
+            "abra", str(self.bin / "linear-axi"), env, timeout=20, actor="app"
+        )
+        with self.assertRaisesRegex(ValueError, "auth_error"):
+            adapter.identify()
+
     def test_auth_error_requests_a_restart(self):
         stopped = threading.Event()
         self.adapter_ref.stopper = stopped.set
@@ -1140,6 +1173,18 @@ class AppMainTests(Base):
         )
         for name in ("LINEAR_CLIENT_SECRET", "LINEAR_CLIENT_ID", "LINEAR_API_KEY"):
             self.assertNotIn(name, agent)
+
+    def test_auth_error_during_start_still_restarts(self):
+        # a first run stores the conversation, so the next start catches it up
+        self.main(lifetime=4)
+        self.edit(lambda s: s.update(auth_fail=["api issue"]))
+        self.endpoint.reply(granted())
+        started = time.monotonic()
+        code, output = self.main()
+        self.assertEqual(code, 1)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertIn("linear rejected the app token", output)
+        self.assertIn("needs renewal", output)
 
     def test_auth_error_restarts_after_a_graceful_stop(self):
         self.edit(lambda s: s.update(auth_fail=["issue state"]))
