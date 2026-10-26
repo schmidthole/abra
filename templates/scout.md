@@ -17,6 +17,11 @@ decision-critical research claims, inspect original sources rather than treating
 search summaries or citations alone as proof. record contradictory evidence and
 remaining uncertainty instead of silently resolving it.
 
+for implementation recommendations, identify relevant existing helpers, patterns,
+dependencies, and platform facilities before proposing new machinery. recommend
+the smallest option that meets the stated requirements, with its limits and the
+conditions that would justify a more complex approach.
+
 write a concise report only at
 the supplied report path, with file/line or source links and an actionable answer.
 return the report path and key findings to the coordinator.
