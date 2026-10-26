@@ -40,10 +40,12 @@ templates are portable prompts, not a new spawning api or custom agent runtime.
 
 ## pi tasks view
 
-an optional read-only pi widget shows unfinished tasks above the editor, with
-in-flight, queued, held and blocked distinctions. see
-[extensions/tasks](extensions/tasks/README.md) for explicit loading, root selection,
-commands and tests. it is not auto-loaded and does not change the backlog.
+a read-only pi widget automatically shows unfinished tasks above the editor in
+trusted pi sessions started from this checkout, with in-flight, queued, held and
+blocked distinctions. install its local dependencies once; for an already running
+session, run `/reload` once. see [extensions/tasks](extensions/tasks/README.md) for
+setup, project trust, refresh behavior and tests. no skill invocation is needed:
+this is pi presentation only; the agent-neutral tasks cli and backlog are unchanged.
 
 ## worktrees
 

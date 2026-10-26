@@ -15,6 +15,7 @@ const executeFile = promisify(execFile);
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const widgetKey = "abra-tasks";
 const rowLimit = 3;
+const settledRefreshWindowMs = 250;
 
 export interface Task {
   id: string;
@@ -157,6 +158,7 @@ export default function tasksExtension(pi: ExtensionAPI) {
   let visible = true;
   let generation = 0;
   let pending: AbortController | undefined;
+  let lastTurnRefresh = -Infinity;
 
   function cancel() {
     generation++;
@@ -189,13 +191,19 @@ export default function tasksExtension(pi: ExtensionAPI) {
       }),
       { placement: "aboveEditor" },
     );
+    return true;
   }
 
   pi.on("session_start", async (_event, ctx) => {
     await refresh(ctx);
   });
+  pi.on("turn_end", async (_event, ctx) => {
+    if (await refresh(ctx)) lastTurnRefresh = performance.now();
+  });
   pi.on("agent_settled", async (_event, ctx) => {
-    await refresh(ctx);
+    // reuse a just-finished turn read, but never skip a later turn or manual read.
+    if (performance.now() - lastTurnRefresh >= settledRefreshWindowMs)
+      await refresh(ctx);
   });
   pi.on("session_shutdown", async () => {
     cancel();

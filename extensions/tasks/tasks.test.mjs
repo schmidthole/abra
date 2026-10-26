@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, test } from "node:test";
@@ -26,6 +34,9 @@ const { parseTasks, readTasks, tasksRoot, taskLines, safeText } =
 const { visibleWidth } = await import(pathToFileURL(tuiPath));
 const { loadExtensions } = await import(
   pathToFileURL(join(host, "dist/core/extensions/loader.js"))
+);
+const { DefaultResourceLoader } = await import(
+  pathToFileURL(join(host, "dist/core/resource-loader.js"))
 );
 const { getThemeByName } = await import(
   pathToFileURL(join(host, "dist/modes/interactive/theme/theme.js"))
@@ -83,31 +94,55 @@ async function harness(path, callback, mode = "tui") {
     assert.deepEqual(loaded.errors, []);
     assert.equal(loaded.extensions.length, 1);
     const extension = loaded.extensions[0];
-    const widgets = [];
-    const notifications = [];
-    const ctx = {
-      mode,
-      hasUI: mode === "tui" || mode === "rpc",
-      ui: {
-        setWidget: (key, content, options) =>
-          widgets.push({ key, content, options }),
-        notify: (...args) => notifications.push(args),
-      },
-    };
-    const emit = async (event) => {
-      for (const handler of extension.handlers.get(event) ?? [])
-        await handler({ type: event }, ctx);
-    };
-    const command = (args = "") =>
-      extension.commands.get("tasks").handler(args, ctx);
-    const render = (width = 120) =>
-      widgets.at(-1).content({}, theme).render(width);
-    await callback({ ctx, widgets, notifications, emit, command, render });
-    await emit("session_shutdown");
+    await withExtension(extension, callback, mode);
   } finally {
     if (previous === undefined) delete process.env.ABRA_TASKS_ROOT;
     else process.env.ABRA_TASKS_ROOT = previous;
   }
+}
+
+async function withExtension(extension, callback, mode = "tui") {
+  const widgets = [];
+  const notifications = [];
+  const ctx = {
+    mode,
+    hasUI: mode === "tui" || mode === "rpc",
+    ui: {
+      setWidget: (key, content, options) =>
+        widgets.push({ key, content, options }),
+      notify: (...args) => notifications.push(args),
+    },
+  };
+  const emit = async (event) => {
+    for (const handler of extension.handlers.get(event) ?? [])
+      await handler({ type: event }, ctx);
+  };
+  const command = (args = "") =>
+    extension.commands.get("tasks").handler(args, ctx);
+  const render = (width = 120) =>
+    widgets.at(-1).content({}, theme).render(width);
+  try {
+    await callback({ ctx, widgets, notifications, emit, command, render });
+  } finally {
+    await emit("session_shutdown");
+  }
+}
+
+async function discover(cwd, trusted, options = {}) {
+  const agentDir = await mkdtemp(join(temporary, "agent-"));
+  const loader = new DefaultResourceLoader({ cwd, agentDir, ...options });
+  let decisions = 0;
+  await loader.reload({
+    resolveProjectTrust: async ({ extensionsResult }) => {
+      decisions++;
+      assert.equal(extensionsResult.extensions.length, 0);
+      return trusted;
+    },
+  });
+  assert.equal(decisions, 1);
+  const result = loader.getExtensions();
+  assert.deepEqual(result.errors, []);
+  return result.extensions;
 }
 
 test("root defaults to extension checkout, not session cwd; override must be absolute", () => {
@@ -281,15 +316,94 @@ test("real pi loader, component factory, events, manual refresh and hide/show", 
   );
 });
 
-test("errors replace stale tasks and recovery is explicit", async () => {
+test("project settings discover the widget without explicit paths, only after trust", async () => {
+  const discovered = await discover(root, true);
+  assert.equal(discovered.length, 1);
+  assert.equal(discovered[0].path, join(directory, "index.ts"));
+  assert.ok(discovered[0].commands.has("tasks"));
+  assert.deepEqual(await discover(root, false), []);
+  assert.deepEqual(await discover(root, true, { noExtensions: true }), []);
+});
+
+test("trusted checkout discovery reads its default root without an environment override", async () => {
+  const path = await fixture(
+    "project-discovery",
+    output([task("auto-loaded")]),
+  );
+  await mkdir(join(path, ".pi"));
+  await cp(join(root, ".pi/settings.json"), join(path, ".pi/settings.json"));
+  const extensionDir = join(path, "extensions/tasks");
+  await mkdir(extensionDir, { recursive: true });
+  await cp(join(directory, "index.ts"), join(extensionDir, "index.ts"));
+  await symlink(
+    join(directory, "node_modules"),
+    join(extensionDir, "node_modules"),
+  );
+  const previous = process.env.ABRA_TASKS_ROOT;
+  delete process.env.ABRA_TASKS_ROOT;
+  try {
+    const extensions = await discover(path, true);
+    assert.equal(extensions.length, 1);
+    await withExtension(extensions[0], async ({ emit, render, widgets }) => {
+      assert.equal(widgets.length, 0);
+      await emit("session_start");
+      assert.equal(widgets.at(-1).options.placement, "aboveEditor");
+      assert.match(render().map(safeText).join("\n"), /auto-loaded/);
+      assert.equal(
+        (await readFile(join(path, "calls"), "utf8")).trim().split("\n").length,
+        1,
+      );
+    });
+  } finally {
+    if (previous !== undefined) process.env.ABRA_TASKS_ROOT = previous;
+  }
+});
+
+test("every turn refreshes without command parsing; immediate settled reads coalesce within a bounded window", async (t) => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const path = await fixture("turns");
+  await harness(path, async ({ emit, command, render, widgets }) => {
+    await emit("session_start");
+    await writeFile(join(path, "output"), output([task("listed")]));
+    await emit("turn_end");
+    assert.match(render().map(safeText).join("\n"), /listed/);
+    await emit("agent_settled");
+    assert.equal(widgets.length, 2);
+    await writeFile(join(path, "output"), output([task("mutated")]));
+    await emit("turn_end");
+    assert.match(render().map(safeText).join("\n"), /mutated/);
+    await command("refresh");
+    assert.equal(widgets.length, 4);
+    now = 251;
+    await writeFile(join(path, "output"), output([task("external")]));
+    await emit("agent_settled");
+    assert.match(render().map(safeText).join("\n"), /external/);
+    assert.equal(widgets.length, 5);
+    await command("hide");
+    await emit("turn_end");
+    await emit("agent_settled");
+    assert.equal(widgets.length, 6);
+    assert.equal(widgets.at(-1).content, undefined);
+    assert.equal(
+      (await readFile(join(path, "calls"), "utf8")).trim().split("\n").length,
+      5,
+    );
+    await command("show");
+    await emit("turn_end");
+    assert.equal(widgets.length, 8);
+  });
+});
+
+test("turn refresh replaces stale tasks on errors and recovers on the next turn", async () => {
   const path = await fixture("recovery");
-  await harness(path, async ({ emit, command, render }) => {
+  await harness(path, async ({ emit, render }) => {
     await emit("session_start");
     await writeFile(join(path, "output"), "broken");
-    await command();
+    await emit("turn_end");
     assert.deepEqual(render().map(safeText), ["tasks: invalid cli data"]);
     await writeFile(join(path, "output"), output([]));
-    await command();
+    await emit("turn_end");
     assert.deepEqual(render().map(safeText), ["tasks: no unfinished tasks"]);
   });
   await harness("relative", async ({ emit, render }) => {
@@ -316,15 +430,16 @@ setTimeout(() => process.stdout.write(fs.readFileSync('output')), 150);
     const second = command("refresh");
     await Promise.all([first, second]);
     assert.equal(widgets.length, 1);
-    const hiding = command("refresh");
+    const hiding = emit("turn_end");
     await command("hide");
     await hiding;
     assert.equal(widgets.length, 2);
     assert.equal(widgets.at(-1).content, undefined);
-    const showing = command("show");
+    await command("show");
+    const showing = emit("turn_end");
     await emit("session_shutdown");
     await showing;
-    assert.equal(widgets.length, 2);
+    assert.equal(widgets.length, 3);
   });
 });
 
@@ -335,6 +450,7 @@ for (const mode of ["rpc", "json", "print"]) {
       path,
       async ({ widgets, notifications, emit, command }) => {
         await emit("session_start");
+        await emit("turn_end");
         await emit("agent_settled");
         for (const args of ["", "refresh", "hide", "show", "bad"])
           await command(args);
