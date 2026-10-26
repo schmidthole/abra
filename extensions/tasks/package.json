@@ -1,0 +1,25 @@
+{
+  "name": "abra-pi-tasks",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test tasks.test.mjs",
+    "format": "prettier --write index.ts tasks.test.mjs package.json README.md",
+    "format:check": "prettier --check index.ts tasks.test.mjs package.json README.md"
+  },
+  "dependencies": {
+    "@toon-format/toon": "2.3.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "prettier": "3.8.1"
+  }
+}

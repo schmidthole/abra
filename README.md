@@ -38,6 +38,13 @@ instructs the coordinator to use native subagents and fill the role templates;
 claude code loads it through `CLAUDE.md`, which adds claude-specific notes.
 templates are portable prompts, not a new spawning api or custom agent runtime.
 
+## pi tasks view
+
+an optional read-only pi widget shows unfinished tasks above the editor, with
+in-flight, queued, held and blocked distinctions. see
+[extensions/tasks](extensions/tasks/README.md) for explicit loading, root selection,
+commands and tests. it is not auto-loaded and does not change the backlog.
+
 ## worktrees
 
 ```sh
