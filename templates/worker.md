@@ -13,6 +13,11 @@ smallest idiomatic change. add meaningful tests, run existing unit tests, run th
 formatter, and update documentation where behavior or usage changes. do not edit
 the coordinator backlog or registry, publish, merge, or spawn additional agents.
 
+validate the approved direction against the code. do not silently make new
+product, architecture, or scope decisions. if the direction has gaps or conflicts
+with the code, pause and return the evidence and required decision to the
+coordinator rather than choosing an unapproved direction.
+
 commit only task-owned files after inspecting the diff. report the full commit
 hash, changed behavior, tests and formatter commands with outcomes, and any
 remaining limitations. never claim an unrun check passed. respond to independent
