@@ -20,6 +20,10 @@ check the following in order:
 
 1. intent and review: each acceptance criterion is satisfied; inspect correctness,
    edge cases, regressions, security relevant to the change, and unnecessary scope.
+   support each finding with source evidence, a reproducible failure, or a contract
+   contradiction. distinguish defects introduced or made reachable by the candidate
+   from pre-existing issues; pre-existing issues do not excuse unmet acceptance
+   criteria or failed required gates.
 2. tests: independently run relevant tests and add temporary behavioral probes in
    this detached worktree if existing coverage cannot substantiate the change.
    missing required dependencies or unexecutable checks are blocked, not passed.
