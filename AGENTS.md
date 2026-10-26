@@ -154,7 +154,12 @@ retained path and reason in the task notes. retain branches and reports.
 
 ## implementation conventions
 
-- take the most minimalistic approach to solving all problems.
+- choose the smallest maintainable solution that fully meets the acceptance
+  criteria, not the shortest diff or fewest lines.
+- reuse suitable project helpers and conventions, then standard-library or
+  platform features. justify new dependencies and abstractions by a present need.
+- simplicity must not remove required validation, error handling, security,
+  accessibility, or compatibility.
 - follow canonical conventions for the programming language.
 - run unit tests after each block of work and add tests for new features.
 - run the language formatter after each block of work; here, use `make format`

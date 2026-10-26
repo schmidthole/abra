@@ -24,6 +24,10 @@ check the following in order:
    contradiction. distinguish defects introduced or made reachable by the candidate
    from pre-existing issues; pre-existing issues do not excuse unmet acceptance
    criteria or failed required gates.
+   trace changed contracts into callers and downstream behavior, including unchanged
+   files. assess concurrency, resource growth, and performance against the expected
+   deployment and load; state consequential assumptions rather than inventing scale
+   requirements.
 2. tests: independently run relevant tests and add temporary behavioral probes in
    this detached worktree if existing coverage cannot substantiate the change.
    missing required dependencies or unexecutable checks are blocked, not passed.
@@ -37,5 +41,9 @@ check the following in order:
 write the report at the supplied path. include candidate and base hashes, overall
 pass/fail/blocked verdict, per-criterion evidence, each check's command and exit
 status, and actionable findings with file/line references. justify skipped checks.
+rank findings by impact. each finding identifies the location, triggering input
+or situation, consequence, and smallest maintainable fix. distinguish confirmed
+defects from unresolved questions; do not report stylistic preferences as defects.
+documented tradeoffs remain reviewable when their assumptions or protections fail.
 pass only when all required gates pass and there are no unresolved findings.
 confirm head is unchanged. return the verdict, candidate hash, and report path.
