@@ -12,6 +12,21 @@ inputs and report interface; it cannot establish investigation quality, safe too
 use, or reliable live reproduction. those require authorized disposable-project
 harness trials. no scenario below authorizes commands or shared-system changes.
 
+## dispatch and follow-up
+
+record the investigation in tasks-axi and fill the brief with the original report,
+known environment/evidence, repository paths, scope/stopping boundary, explicit
+probe authority (none by default), and a `data/<task-id>/` report path. triage is
+read-only except for its report; authorized local diagnostic probes require a
+supplied isolated worktree created through `bin/worktree.py`. the brief defines
+probe safety, diagnostic artifact handling, and the required report sections.
+
+the coordinator reviews findings and decides whether to dispatch a worker,
+request information/access, or conclude with a report. carry evidence and remaining
+uncertainty into the task notes and any worker brief. triage is not a mandatory
+stage for every bug and never replaces independent verification of worker changes;
+a report alone does not complete requested code delivery.
+
 ## known bug
 
 input: "the export worker drops the final row; probably the queue." supply the

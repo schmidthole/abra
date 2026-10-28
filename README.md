@@ -40,26 +40,14 @@ templates are portable prompts, not a new spawning api or custom agent runtime.
 
 ## roles
 
-- worker: implements a clear, bounded change in an isolated worktree.
-- scout: researches a bounded question without changing project files.
-- triage: investigates unclear reported behavior, identifies affected systems and
-  plausible causes, and works through safe identification/reproduction checks.
-- verify: independently reviews and tests an exact worker commit in a detached
-  worktree; it does not repair product code.
-
-the coordinator fills [templates/triage.md](templates/triage.md) with the brief
-report, known environment/evidence, repositories, scope/stopping boundary, report
-path under `data/<task-id>/`, and explicit probe authority (none by default).
-triage is read-only except for the report; explicitly authorized local diagnostic
-probes require a supplied isolated worktree from `bin/worktree.py`. no production
-mutations, product fixes, nested agents, publishing, or backlog/registry updates.
-unknown ownership and cross-system behavior are valid investigation outcomes.
-
-the report separates reproduction status from cause confidence, planned checks
-from executed outcomes, and diagnostic artifacts from product changes. it includes
-behavior, affected systems/evidence, hypotheses, remaining information/access,
-next action, and a worker handoff only when sufficiently established. see the
-[triage contract walkthroughs](docs/triage.md) for examples and validation limits.
+- [worker](templates/worker.md): implements a clear, bounded change in an isolated
+  worktree.
+- [scout](templates/scout.md): researches a bounded question without changing
+  project files.
+- [triage](templates/triage.md): investigates unclear reported behavior and
+  reproduction ([contract walkthroughs](docs/triage.md)).
+- [verify](templates/verify.md): independently reviews and tests an exact worker
+  commit in a detached worktree; it does not repair product code.
 
 ## worktrees
 
@@ -201,12 +189,10 @@ clear implementation request → worker → independent review/tests/docs/lint �
 fixes and fresh verification if needed → authorized pr → ci → delivery. for a
 local-only request, stop at the verified commit.
 
-unclear behavior → optional triage → coordinator decision: bounded worker task,
-information/access request, or report-only conclusion. general research goes to
-scouts. scouts and triage return reports, not verified fixes; neither bypasses
-independent worker verification. a report alone does not complete a request for
-code delivery. these roles reuse native subagents, tasks-axi, worktrees, and
-`data/<task-id>/`; there is no triage runtime or scheduler.
+general research → scout report; unclear behavior → optional triage report.
+the coordinator reviews findings and decides on a bounded worker task, an
+information/access request, or a report-only conclusion. reports do not replace
+independent worker verification or complete a request for code delivery.
 
 this adopts no-mistakes' review/test/docs/lint/pr/ci goal using native subagents.
 it does not install its git proxy or enforce a server-side publishing gate:
