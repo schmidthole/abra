@@ -27,7 +27,8 @@ following (non-comprehensive) examples:
 - `bin/abra`: one-shot headless runner; one resumed session per conversation key.
 - `triggers/`: shared trigger runtime and thin adapters; the runtime hosts one
   resident agent session over acp. see `docs/triggers.md`.
-- `templates/`: briefs for native worker, scout, and verify subagents.
+- `templates/`: portable briefs for native worker, scout, triage, and verify subagents;
+  triage specializes in behavior investigation and reproduction, not fixes.
 - `operator/`: gitignored operator-owned drafts and notes handed off to abra.
 - `specialty/` (or `$ABRA_SPECIALTY_DIR`): optional pack that specializes abra;
   `bin/specialty.py check` lints it. see `docs/specialty.md`.
@@ -95,7 +96,19 @@ that final checkpoint alone or claim unsaved context is recoverable.
 
 ## dispatch
 
-- answer small questions directly. use scout subagents for bounded investigations.
+- answer small questions directly. route clear implementation requests to workers
+  and general research to scouts. use optional triage (`templates/triage.md`) when
+  reported behavior needs system/cause identification or reproduction before a
+  bounded implementation task is clear; it is not a mandatory stage for every bug.
+- record triage in tasks-axi and supply the original report, known evidence,
+  repository paths, scope/stopping boundary, explicit probe authority (none by
+  default), and a `data/<task-id>/` report path. triage is read-only except for its
+  report; authorized local diagnostic probes require a supplied isolated worktree
+  created through `bin/worktree.py`. no production mutations or product fixes.
+- the coordinator reviews triage findings and decides whether to dispatch a worker,
+  request information/access, or conclude with a report. carry evidence and remaining
+  uncertainty into the task notes and any worker brief; triage never replaces
+  independent verification of worker changes.
 - do no work or make changes outside of worktrees.
 - for implementation, record a tasks-axi item and its original user request,
   acceptance criteria, repo, delivery expectation, and relevant constraints.
@@ -139,7 +152,8 @@ that final checkpoint alone or claim unsaved context is recoverable.
    required pending/failed checks prevent delivery as verified. no checks is not
    "ci passed"; report it accurately. merge only within the user's authority.
 8. mark done only when the requested delivery is complete: verified local commit,
-   verified pr with required ci passed, or scout report. retain the outcome link.
+   verified pr with required ci passed, or a requested scout/triage report. retain
+   the outcome link; a triage report alone does not complete requested code delivery.
 
 save reports under `data/<task-id>/`. if a verification path already exists,
 inspect it; use a distinct attempt task-id for a fresh verification directory.

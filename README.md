@@ -38,6 +38,29 @@ instructs the coordinator to use native subagents and fill the role templates;
 claude code loads it through `CLAUDE.md`, which adds claude-specific notes.
 templates are portable prompts, not a new spawning api or custom agent runtime.
 
+## roles
+
+- worker: implements a clear, bounded change in an isolated worktree.
+- scout: researches a bounded question without changing project files.
+- triage: investigates unclear reported behavior, identifies affected systems and
+  plausible causes, and works through safe identification/reproduction checks.
+- verify: independently reviews and tests an exact worker commit in a detached
+  worktree; it does not repair product code.
+
+the coordinator fills [templates/triage.md](templates/triage.md) with the brief
+report, known environment/evidence, repositories, scope/stopping boundary, report
+path under `data/<task-id>/`, and explicit probe authority (none by default).
+triage is read-only except for the report; explicitly authorized local diagnostic
+probes require a supplied isolated worktree from `bin/worktree.py`. no production
+mutations, product fixes, nested agents, publishing, or backlog/registry updates.
+unknown ownership and cross-system behavior are valid investigation outcomes.
+
+the report separates reproduction status from cause confidence, planned checks
+from executed outcomes, and diagnostic artifacts from product changes. it includes
+behavior, affected systems/evidence, hypotheses, remaining information/access,
+next action, and a worker handoff only when sufficiently established. see the
+[triage contract walkthroughs](docs/triage.md) for examples and validation limits.
+
 ## worktrees
 
 ```sh
@@ -174,9 +197,16 @@ home volume holding the instance root. see [docs/container.md](docs/container.md
 
 ## pipeline
 
-worker → independent review/tests/docs/lint → fixes and fresh verification if needed
-→ authorized pr → ci → delivery. for a local-only request, stop at the verified
-commit. scouts return reports without entering the code delivery pipeline.
+clear implementation request → worker → independent review/tests/docs/lint →
+fixes and fresh verification if needed → authorized pr → ci → delivery. for a
+local-only request, stop at the verified commit.
+
+unclear behavior → optional triage → coordinator decision: bounded worker task,
+information/access request, or report-only conclusion. general research goes to
+scouts. scouts and triage return reports, not verified fixes; neither bypasses
+independent worker verification. a report alone does not complete a request for
+code delivery. these roles reuse native subagents, tasks-axi, worktrees, and
+`data/<task-id>/`; there is no triage runtime or scheduler.
 
 this adopts no-mistakes' review/test/docs/lint/pr/ci goal using native subagents.
 it does not install its git proxy or enforce a server-side publishing gate:
@@ -217,7 +247,9 @@ make test
 
 tests use temporary git repositories to check alias resolution, collisions,
 dirty-checkout preservation, worker isolation, and exact-commit verification.
-runner tests use a stub harness through `ABRA_CLAUDE_BIN`.
+runner tests use a stub harness through `ABRA_CLAUDE_BIN`. triage template tests
+check the portable input/report interface only; the scenario walkthroughs are
+static contract reviews, not evidence of live agent behavior.
 
 references: [tasks-axi](https://github.com/kunchenguid/tasks-axi),
 [gh-axi](https://github.com/kunchenguid/gh-axi),
