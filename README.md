@@ -49,6 +49,14 @@ templates are portable prompts, not a new spawning api or custom agent runtime.
 - [verify](templates/verify.md): independently reviews and tests an exact worker
   commit in a detached worktree; it does not repair product code.
 
+all four roles own a per-assignment json [checkpoint](docs/agent-tracking.md) at
+`data/<task-id>/agents/<assignment>.json`, outside project worktree cleanup. the
+coordinator supplies its absolute path and full shared instructions at dispatch,
+including specialty overrides. stable assignment ids survive native run restarts;
+replacement agents get new trackers referencing their predecessors. these are
+last-reported progress for recovery and later dashboards, not liveness, verified
+success, or a second task system. tasks-axi remains coordinator-owned.
+
 ## worktrees
 
 ```sh
@@ -212,6 +220,9 @@ the same blind spot. a closed harness session is not an always-on service.
 
 these are live harness acceptance checks, not claims already established by the
 script tests. use disposable projects and explicitly authorized github delivery.
+for checkpoint recovery, exercise interruption, same-assignment resume, replacement,
+and malformed/missing/stale cases from the [walkthroughs](docs/agent-tracking.md#recovery-walkthroughs)
+before relying on live agent compliance.
 
 ## development
 
@@ -235,7 +246,9 @@ tests use temporary git repositories to check alias resolution, collisions,
 dirty-checkout preservation, worker isolation, and exact-commit verification.
 runner tests use a stub harness through `ABRA_CLAUDE_BIN`. triage template tests
 check the portable input/report interface only; the scenario walkthroughs are
-static contract reviews, not evidence of live agent behavior.
+static contract reviews, not evidence of live agent behavior. checkpoint tests
+likewise guard the json example, shared inputs, and write/recovery instructions;
+they do not establish live model compliance.
 
 references: [tasks-axi](https://github.com/kunchenguid/tasks-axi),
 [gh-axi](https://github.com/kunchenguid/gh-axi),

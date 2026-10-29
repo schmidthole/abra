@@ -16,8 +16,10 @@ harness trials. no scenario below authorizes commands or shared-system changes.
 
 record the investigation in tasks-axi and fill the brief with the original report,
 known environment/evidence, repository paths, scope/stopping boundary, explicit
-probe authority (none by default), and a `data/<task-id>/` report path. triage is
-read-only except for its report; authorized local diagnostic probes require a
+probe authority (none by default), and a `data/<task-id>/` report path. triage also
+receives the [shared checkpoint contract](agent-tracking.md), assignment id, and absolute tracker
+path. triage is read-only except for its report and the narrow tracker/atomic
+temporary-file write exception; authorized local diagnostic probes require a
 supplied isolated worktree created through `bin/worktree.py`. the brief defines
 probe safety, diagnostic artifact handling, and the required report sections.
 
