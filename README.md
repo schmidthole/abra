@@ -38,6 +38,17 @@ instructs the coordinator to use native subagents and fill the role templates;
 claude code loads it through `CLAUDE.md`, which adds claude-specific notes.
 templates are portable prompts, not a new spawning api or custom agent runtime.
 
+## roles
+
+- [worker](templates/worker.md): implements a clear, bounded change in an isolated
+  worktree.
+- [scout](templates/scout.md): researches a bounded question without changing
+  project files.
+- [triage](templates/triage.md): investigates unclear reported behavior and
+  reproduction ([contract walkthroughs](docs/triage.md)).
+- [verify](templates/verify.md): independently reviews and tests an exact worker
+  commit in a detached worktree; it does not repair product code.
+
 ## worktrees
 
 ```sh
@@ -174,9 +185,14 @@ home volume holding the instance root. see [docs/container.md](docs/container.md
 
 ## pipeline
 
-worker → independent review/tests/docs/lint → fixes and fresh verification if needed
-→ authorized pr → ci → delivery. for a local-only request, stop at the verified
-commit. scouts return reports without entering the code delivery pipeline.
+clear implementation request → worker → independent review/tests/docs/lint →
+fixes and fresh verification if needed → authorized pr → ci → delivery. for a
+local-only request, stop at the verified commit.
+
+general research → scout report; unclear behavior → optional triage report.
+the coordinator reviews findings and decides on a bounded worker task, an
+information/access request, or a report-only conclusion. reports do not replace
+independent worker verification or complete a request for code delivery.
 
 this adopts no-mistakes' review/test/docs/lint/pr/ci goal using native subagents.
 it does not install its git proxy or enforce a server-side publishing gate:
@@ -217,7 +233,9 @@ make test
 
 tests use temporary git repositories to check alias resolution, collisions,
 dirty-checkout preservation, worker isolation, and exact-commit verification.
-runner tests use a stub harness through `ABRA_CLAUDE_BIN`.
+runner tests use a stub harness through `ABRA_CLAUDE_BIN`. triage template tests
+check the portable input/report interface only; the scenario walkthroughs are
+static contract reviews, not evidence of live agent behavior.
 
 references: [tasks-axi](https://github.com/kunchenguid/tasks-axi),
 [gh-axi](https://github.com/kunchenguid/gh-axi),
