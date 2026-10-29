@@ -2,12 +2,40 @@
 
 task: {{task_id}}
 repository paths or confirmed github repositories: {{repo}}
-working directory (absolute isolated worktree, or none for read-only research): {{worktree}}
+working directory (absolute isolated worktree, or null for read-only research): {{worktree}}
 original user request and reported behavior: {{request}}
 known environment, versions, timing, and evidence paths or links: {{evidence}}
 investigation scope, project instructions, and stopping boundary: {{constraints}}
 explicitly authorized local diagnostic probes (none by default): {{authorized_probes}}
 report path: {{report_path}}
+
+## shared checkpoint
+
+assignment: {{assignment}}
+tracker path (absolute): {{tracker_path}}
+checkpoint helper path (absolute bin/checkpoint.py): {{checkpoint_helper}}
+predecessor assignment (slug or null): {{predecessor}}
+known native run ids (json array, empty if unknown): {{run_ids}}
+shared tracking instructions (full docs/agent-tracking.md contents): {{tracking_instructions}}
+
+before substantive work, follow the supplied shared tracking instructions to
+initialize or safely resume your checkpoint using the supplied absolute helper
+with python3 and complete proposals on stdin (no extra scratch files). the helper
+handles deterministic file mechanics only; you own semantic planning and recovery.
+update after meaningful steps, before consequential actions, and before pause/return.
+if the path/helper/instructions are missing, ownership is uncertain, or a write
+fails, pause and report the problem to the coordinator; do not silently proceed untracked.
+
+all roles may write only the assigned tracker and its same-directory atomic
+replacement temporary file as a narrow tracking exception outside the project
+worktree. the helper may create missing tracker parent directories.
+invoking the supplied helper with python3 for this tracker is allowed
+from the supplied working directory (or without project commands when null),
+even for read-only roles. this does not grant other write or execution authority.
+preserve malformed or foreign checkpoints. status is last reported progress, not liveness
+or independently verified success. keep original role boundaries below.
+
+## assignment
 
 investigate the behavior, not an assumed fix. read applicable project instructions
 (AGENTS.md, CLAUDE.md, or equivalent). use the supplied repositories and evidence
@@ -17,7 +45,8 @@ update the backlog or registry, implement product fixes, commit, publish, or mer
 
 ## authority
 
-investigation is read-only by default, apart from writing the supplied report.
+investigation is read-only by default, apart from the supplied report and the
+shared checkpoint exception above.
 run project commands only in the supplied absolute working directory. only perform
 local diagnostic probes explicitly authorized in this brief, and only in the
 supplied isolated worktree. a worktree is file isolation, not a security boundary:

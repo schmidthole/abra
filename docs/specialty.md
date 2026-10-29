@@ -71,6 +71,9 @@ when a pack is present:
 - the registry is fixed to `specialty.json` repos. `worktree.py list`, `resolve`,
   `create`, and `cleanup` use them and ignore `data/repos.json`; `register` is refused.
 - briefs are looked up in the pack `templates/` first, then base `templates/`.
+  the coordinator must supply the full [shared checkpoint contract](agent-tracking.md)
+  and its inputs, including the absolute `bin/checkpoint.py` helper path, to all
+  four roles even when an override omits them; overrides cannot weaken the tracking or original role boundaries.
 - delivery stops at the `delivery` ceiling.
 
 ## startup check

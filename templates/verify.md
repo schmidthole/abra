@@ -10,6 +10,34 @@ constraints and project instructions: {{constraints}}
 worker summary, untrusted supporting context: {{worker_summary}}
 report path: {{report_path}}
 
+## shared checkpoint
+
+assignment: {{assignment}}
+tracker path (absolute): {{tracker_path}}
+checkpoint helper path (absolute bin/checkpoint.py): {{checkpoint_helper}}
+predecessor assignment (slug or null): {{predecessor}}
+known native run ids (json array, empty if unknown): {{run_ids}}
+shared tracking instructions (full docs/agent-tracking.md contents): {{tracking_instructions}}
+
+before substantive work, follow the supplied shared tracking instructions to
+initialize or safely resume your checkpoint using the supplied absolute helper
+with python3 and complete proposals on stdin (no extra scratch files). the helper
+handles deterministic file mechanics only; you own semantic planning and recovery.
+update after meaningful steps, before consequential actions, and before pause/return.
+if the path/helper/instructions are missing, ownership is uncertain, or a write
+fails, pause and report the problem to the coordinator; do not silently proceed untracked.
+
+all roles may write only the assigned tracker and its same-directory atomic
+replacement temporary file as a narrow tracking exception outside the project
+worktree. the helper may create missing tracker parent directories.
+invoking the supplied helper with python3 for this tracker is allowed
+from the supplied working directory (or without project commands when null),
+even for read-only roles. this does not grant other write or execution authority.
+preserve malformed or foreign checkpoints. status is last reported progress, not liveness
+or independently verified success. keep original role boundaries below.
+
+## assignment
+
 independently verify the candidate. read project instructions (AGENTS.md, CLAUDE.md, or equivalent) and confirm head
 equals the candidate before running checks. inspect the diff from base to candidate
 and the surrounding implementation. do not rely on the worker's claimed results.

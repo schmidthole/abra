@@ -98,7 +98,9 @@ that final checkpoint alone or claim unsaved context is recoverable.
 - answer small questions directly. route clear implementation requests to workers,
   general research to scouts, and unclear reported behavior needing identification
   or reproduction to optional triage (`templates/triage.md`; see `docs/triage.md`).
-- do no work or make changes outside of worktrees.
+- run project commands and change project files only in worktrees. supplied
+  reports and the narrow shared checkpoint writes below are exceptions, not
+  permission to modify other coordinator state.
 - for implementation, record a tasks-axi item and its original user request,
   acceptance criteria, repo, delivery expectation, and relevant constraints.
 - fetch the selected repo's configured remote when needed to refresh its base;
@@ -108,6 +110,20 @@ that final checkpoint alone or claim unsaved context is recoverable.
 - fill the appropriate template completely and spawn a native subagent.
   use fresh context for scout and verify agents when the harness supports it.
   pass the full brief, not merely a template path. record the native agent id.
+- for every worker, scout, verify, and triage assignment, follow
+  `docs/agent-tracking.md`: reserve a unique absolute
+  `data/<task-id>/agents/<assignment>.json` path outside project worktrees, create
+  its parent, and supply the absolute `bin/checkpoint.py` helper path and full
+  shared specification with the brief, including
+  specialty overrides. the agent alone writes its tracker and same-directory
+  atomic replacement temporary file. record assignment/path/native ids in task
+  notes and send later-known native ids to the owner; never edit concurrently.
+- on recovery, read the brief/checkpoint and reconcile native ownership, actual
+  files, commits, and artifacts before resuming or repeating actions. checkpoints
+  are last reported progress, not liveness or verification. the same assignment
+  may resume only after ownership is reconciled; a replacement gets a new tracker
+  referencing its predecessor and leaves the old one intact. preserve malformed,
+  foreign, missing-on-resume, or stale evidence and resolve discrepancies first.
 - subagents share filesystem access: tell each its absolute working directory and
   require every command to target it. worktrees isolate files, not permissions.
 - use native wait and messaging to collect results and steer workers. stay with
