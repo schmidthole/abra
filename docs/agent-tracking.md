@@ -1,7 +1,8 @@
 # subagent checkpoints
 
-this is a shared prompt convention for worker, scout, verify, and triage, not a
-runtime or another task system. tasks-axi remains the coordinator's authority.
+this is a shared checkpoint convention for worker, scout, verify, and triage,
+with a deterministic standard-library file helper, not a runtime or another task
+system. tasks-axi remains the coordinator's authority.
 each assignment owns one readable json checkpoint next to its task reports:
 `data/<task-id>/agents/<assignment>.json` in the coordinator's abra root, outside
 project worktrees. checkpoints survive worktree cleanup; they are not event logs.
@@ -17,6 +18,9 @@ create its parent directory before launch. record assignment, tracker path, and
 native run ids when available in the existing task notes; do not invent run ids or
 require an agent to know its id before launch.
 
+supply the absolute path to abra's `bin/checkpoint.py` as `checkpoint_helper` in
+every brief; agents in arbitrary project worktrees cannot assume abra is their
+current directory. invoke it with python3, not a project-local relative path.
 fill the role brief's tracking inputs, including `predecessor` (`null` for a new
 assignment) and `run_ids` (`[]` if unknown). paste this entire specification into
 `tracking_instructions`; a link alone is insufficient for agents in other repos.
@@ -100,42 +104,116 @@ example initial checkpoint (hypothetical paths, no native id known yet):
 }
 ```
 
+## deterministic helper
+
+`bin/checkpoint.py` has only `init`, `read` (strict validation plus read), and
+`update`. run `python3 /absolute/abra/bin/checkpoint.py --help` and each
+subcommand's `--help` for arguments. it has no dashboard, patch flags, runtime,
+locking, liveness inference, automatic recovery, or tasks-axi mutation. agents
+still decide coherent plans/progress/blockers and reconcile ownership/evidence.
+
+all commands require an absolute tracker path, `--assignment`, `--role`, and
+`--working-directory` (an absolute string or literal `null`). supply
+`--predecessor` only when non-null. these are the coordinator-supplied identity,
+not values inferred from an untrusted existing checkpoint. the filename must be
+`<assignment>.json`. identity is immutable, including predecessor and directory.
+`read` returns `{"checkpoint": <validated object>, "revision": "<sha256>"}`;
+writes return the same envelope. revision is the sha256 of the exact file bytes,
+not a timestamp or approval token. retain it with the checkpoint you read.
+
+`init` and `update` require `--proposal -` for a complete checkpoint on stdin,
+or `--proposal /absolute/authorized/file.json` to read an already-authorized file.
+there is no new proposal/scratch-file write exception. stdin is preferred for all
+roles, especially read-only ones. all version 1 fields remain required, including
+a syntactically valid `updated_at` in proposals; the helper replaces that field
+with its own actual utc write time. do not send the output envelope as a proposal.
+`update --revision <last-read-revision>` rejects a changed destination before
+publication; reread and reconcile rather than blindly retrying with a fresh token.
+
+example bash invocations from any project directory (paths are hypothetical):
+
+```sh
+helper=/absolute/abra/bin/checkpoint.py
+tracker=/absolute/abra/data/example/agents/scout-01.json
+identity=(--assignment scout-01 --role scout --working-directory null)
+# send the complete initial json object above on stdin, then end input.
+python3 "$helper" init "$tracker" "${identity[@]}" --proposal -
+python3 "$helper" read "$tracker" "${identity[@]}"
+# retain the returned revision; prepare a coherent complete proposal in memory.
+# complete_proposal is the full version 1 object, not an arbitrary field patch.
+printf '%s\n' "$complete_proposal" | python3 "$helper" update "$tracker" \
+  "${identity[@]}" --revision "$last_read_revision" --proposal -
+```
+
+input is bounded to 1 mib, utf-8, duplicate-free strict json (including nested
+keys; no non-finite constants), exact version 1 fields/types/statuses/nulls.
+operational/input errors are nonzero with a json error on stderr identifying
+the operation and path (`-` for stdin); argument usage errors use argparse stderr.
+errors exclude malformed payloads and
+foreign checkpoint contents; successful output is on stdout. reference strings
+are validated but not dereferenced; existence, redaction, truth and authority are
+still the agent's responsibility. commit references use full lowercase 40/64 hex
+hashes; report/log references are absolute paths or urls with a scheme and location
+(including local `file:///` urls).
+
+tracker/proposal paths must be absolute without `..`; symlinks in any component
+and non-regular targets are rejected, not followed. directories are opened and
+pinned with no-follow traversal; init may create missing parents (mode 0700).
+only the assigned tracker and its exclusively created same-directory temporary
+regular file (mode 0600) are written. the helper validates the complete replacement
+before publication, never truncates the destination in place, and cleans only its
+own temporary. `init` uses an exclusive hard-link publication, never a clobbering
+rename; any existing destination is preserved, even malformed or foreign files.
+`update` rechecks identity and revision immediately before atomic `os.replace`.
+if it changed unexpectedly, stop and preserve it instead of overwriting.
+
+these are local posix filesystem operations, not a security boundary or a
+compare-and-swap transaction. reconciled single-writer ownership and trusted
+parent directories remain required: revision checks cannot exclude a concurrent
+writer between the final check and replacement. no locks, fsync/power-loss
+durability or model compliance are promised. failures/interruption before
+publication leave the previous checkpoint intact; publication exposes a complete
+new file, never a partially truncated one. an uncatchable termination can leave
+an owned temporary (including a second link after init publication); leftovers
+are not authoritative and are never automatically promoted or deleted on resume.
+if cleanup/output fails after publication, publication may already have succeeded:
+reread and reconcile instead of claiming rollback or retrying init blindly.
+
 ## agent write and update procedure
 
-1. before substantive work, read the brief and any existing tracker. if the path
-   or shared instructions are missing, stop and request them from the coordinator;
-   do not silently work untracked or choose a path. validate existing json against
-   this format and the supplied assignment, role, predecessor, and directory.
-   preserve malformed json, unsupported versions, foreign identity, symlinks, and
-   unexpected file types unchanged; report the path and problem, not its contents.
-   do not reset a checkpoint to get past a conflict.
+1. before substantive work, read the brief and any existing tracker using the
+   supplied absolute helper path. if the path/helper/shared instructions are
+   missing, stop and request them from the coordinator; do not silently work
+   untracked or choose a path. validate against the supplied assignment, role,
+   predecessor, and directory. preserve malformed json, unsupported versions,
+   foreign identity, symlinks, and unexpected file types unchanged; report the
+   path and problem, not its contents. do not reset a checkpoint to get past a
+   conflict.
 2. initialize an absent tracker only when the brief authorizes a fresh assignment.
    for an existing owned tracker follow the recovery procedure below first. update
    after meaningful steps, before consequential actions (for example a commit or
    diagnostic probe), and before pausing or returning. record intention in
-   `next_action`, then actual outcomes in `checkpoint` after execution. update the
-   timestamp on each write; append native ids only when supplied or known.
-3. write a complete replacement into an exclusively created temporary regular file
-   in the same directory as the assigned tracker, with a unique name such as
-   `<assignment>.json.tmp-<unique>`. parse/check the new json before replacing.
-   close the file, recheck that the destination is still absent for initialization
-   or unchanged from the owned checkpoint read, then atomically rename/replace it
-   over the assigned tracker (for example `os.replace` on the same filesystem).
-   never truncate the destination in place. if it changed unexpectedly, stop and
-   preserve it instead of overwriting. this is not locking: single-writer ownership
-   must already be reconciled. clean up only the temporary file you created.
+   `next_action`, then actual outcomes in `checkpoint` after execution. the helper
+   owns timestamps; append native ids only when supplied or known.
+3. submit a coherent complete proposal via stdin to `init` or `update`; for update
+   use the revision from the last read/write. the helper handles exclusive temporary
+   creation, validation, stale checks and atomic publication. do not bypass a
+   conflict or edit the tracker in place. this is not locking: single-writer
+   ownership must already be reconciled.
 4. the only tracking write exception outside the project worktree is the supplied
-   tracker and its same-directory atomic replacement temporary file. it grants no
-   authority to edit other trackers, reports beyond the supplied report path,
-   backlog, registry, source checkout, or operator files. it does not broaden any
-   role's product-code or diagnostic permissions.
-5. on any write/replace failure, preserve the last checkpoint and report the exact
-   failing operation/path and a redacted error to the coordinator. pause substantive
-   work until resolved; if returning, report that the final state was not persisted.
-   never claim the tracker was updated when it was not. after interruption before
-   replacement the previous valid checkpoint remains; after replacement readers
-   see the whole new file. leftover temporaries are not authoritative. atomic
-   replacement alone does not promise power-loss durability or model compliance.
+   tracker and its same-directory atomic replacement temporary file (including
+   creating missing tracker parent directories). invoking the supplied absolute
+   helper with python3 for these operations is permitted for all four roles,
+   including read-only assignments; it grants no other project commands or writes
+   when the working directory is null. it grants no authority to edit other
+   trackers, reports beyond the supplied report path, backlog, registry, source
+   checkout, or operator files. it does not broaden product-code or diagnostic
+   permissions.
+5. on any helper failure, preserve the last checkpoint and report the failing
+   operation/path and redacted error to the coordinator. pause substantive
+   work until resolved; if returning, report that the final state was not persisted
+   or, after uncertain publication, not confirmed. never claim an update succeeded
+   when it did not. do not clean up other writers' temporary files.
 
 ## recovery walkthroughs
 

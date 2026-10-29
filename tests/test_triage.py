@@ -22,6 +22,7 @@ class TriageTemplateTests(unittest.TestCase):
             "report_path",
             "assignment",
             "tracker_path",
+            "checkpoint_helper",
             "predecessor",
             "run_ids",
             "tracking_instructions",

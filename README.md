@@ -51,8 +51,9 @@ templates are portable prompts, not a new spawning api or custom agent runtime.
 
 all four roles own a per-assignment json [checkpoint](docs/agent-tracking.md) at
 `data/<task-id>/agents/<assignment>.json`, outside project worktree cleanup. the
-coordinator supplies its absolute path and full shared instructions at dispatch,
-including specialty overrides. stable assignment ids survive native run restarts;
+coordinator supplies its absolute path, absolute `bin/checkpoint.py` helper path,
+and full shared instructions at dispatch, including specialty overrides. stable
+assignment ids survive native run restarts;
 replacement agents get new trackers referencing their predecessors. these are
 last-reported progress for recovery and later dashboards, not liveness, verified
 success, or a second task system. tasks-axi remains coordinator-owned.
@@ -247,8 +248,9 @@ dirty-checkout preservation, worker isolation, and exact-commit verification.
 runner tests use a stub harness through `ABRA_CLAUDE_BIN`. triage template tests
 check the portable input/report interface only; the scenario walkthroughs are
 static contract reviews, not evidence of live agent behavior. checkpoint tests
-likewise guard the json example, shared inputs, and write/recovery instructions;
-they do not establish live model compliance.
+guard the json example, shared inputs, and write/recovery instructions, plus
+exercise the standard-library [helper](docs/agent-tracking.md#deterministic-helper)
+against disposable files and cli inputs; they do not establish live model compliance.
 
 references: [tasks-axi](https://github.com/kunchenguid/tasks-axi),
 [gh-axi](https://github.com/kunchenguid/gh-axi),

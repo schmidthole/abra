@@ -113,7 +113,8 @@ that final checkpoint alone or claim unsaved context is recoverable.
 - for every worker, scout, verify, and triage assignment, follow
   `docs/agent-tracking.md`: reserve a unique absolute
   `data/<task-id>/agents/<assignment>.json` path outside project worktrees, create
-  its parent, and supply the full shared specification with the brief, including
+  its parent, and supply the absolute `bin/checkpoint.py` helper path and full
+  shared specification with the brief, including
   specialty overrides. the agent alone writes its tracker and same-directory
   atomic replacement temporary file. record assignment/path/native ids in task
   notes and send later-known native ids to the owner; never edit concurrently.

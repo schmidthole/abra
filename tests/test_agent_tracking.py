@@ -81,6 +81,7 @@ class AgentTrackingTests(unittest.TestCase):
                     {
                         "assignment",
                         "tracker_path",
+                        "checkpoint_helper",
                         "predecessor",
                         "run_ids",
                         "tracking_instructions",
@@ -101,8 +102,11 @@ class AgentTrackingTests(unittest.TestCase):
             "pause and report",
             "assigned tracker and its same-directory atomic",
             "outside the project\nworktree",
+            "using the supplied absolute helper",
+            "complete proposals on stdin (no extra scratch files)",
+            "even for read-only roles",
             "does not grant other write or execution authority",
-            "preserve\nmalformed or foreign checkpoints",
+            "preserve malformed or foreign checkpoints",
             "not liveness",
         ):
             self.assertIn(instruction, blocks[0])
@@ -131,14 +135,18 @@ class AgentTrackingTests(unittest.TestCase):
             "all fields below\nare required",
             "no unknown fields or duplicate keys",
             "never copy secrets",
-            "exclusively created temporary regular file",
-            "parse/check the new json before replacing",
-            "never truncate the destination in place",
+            "exclusively created same-directory temporary\nregular file",
+            "validates the complete replacement",
+            "never truncates the destination in place",
             "if it changed unexpectedly, stop",
-            "clean up only the temporary file you created",
+            "cleans only its\nown temporary",
             "pause substantive\n   work until resolved",
             "final state was not persisted",
-            "power-loss durability or model compliance",
+            "durability or model compliance",
+            "not a security boundary",
+            "between the final check and replacement",
+            "last-read-revision",
+            "no new proposal/scratch-file write exception",
         ):
             with self.subTest(instruction=instruction):
                 self.assertIn(instruction, SPEC)
@@ -178,6 +186,8 @@ class AgentTrackingTests(unittest.TestCase):
         self.assertIn("`docs/agent-tracking.md`", agents)
         self.assertIn("`data/<task-id>/agents/<assignment>.json`", agents)
         self.assertIn("agent alone writes", agents)
+        self.assertIn("absolute `bin/checkpoint.py` helper path", agents)
+        self.assertIn("`checkpoint_helper`", SPEC)
         self.assertIn("including\n  specialty overrides", agents)
         self.assertIn("reconcile native ownership", agents)
         specialty = (ROOT / "docs/specialty.md").read_text()
