@@ -74,6 +74,12 @@ when a pack is present:
   the coordinator must supply the full [shared checkpoint contract](agent-tracking.md)
   and its inputs, including the absolute `bin/checkpoint.py` helper path, to all
   four roles even when an override omits them; overrides cannot weaken the tracking or original role boundaries.
+- overrides must also receive the [workflow context](workflows.md): absolute
+  read-only workflow path, selected recipe/version and selection id, stage and
+  attempt ids. overrides cannot weaken operator selection, coordinator-only
+  manifest ownership, intent-before-action, ownership reconciliation or exact
+  candidate/acceptance verification. missing override fields are supplied by the
+  coordinator, never silently omitted. no tracker ownership changes.
 - delivery stops at the `delivery` ceiling.
 
 ## startup check

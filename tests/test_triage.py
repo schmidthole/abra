@@ -26,6 +26,10 @@ class TriageTemplateTests(unittest.TestCase):
             "predecessor",
             "run_ids",
             "tracking_instructions",
+            "workflow_path",
+            "workflow_recipe",
+            "workflow_stage",
+            "workflow_attempt",
         }
         fields = re.findall(r"\{\{([a-z_]+)\}\}", template)
         self.assertEqual(set(fields), inputs)
