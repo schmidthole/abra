@@ -58,6 +58,20 @@ replacement agents get new trackers referencing their predecessors. these are
 last-reported progress for recovery and later dashboards, not liveness, verified
 success, or a second task system. tasks-axi remains coordinator-owned.
 
+## durable workflows
+
+the operator selects a fixed [workflow recipe](docs/workflows.md): implement
+(worker -> verify -> deliver), investigate (triage -> coordinator review -> report),
+or research (scout -> report). one coordinator-owned
+`data/<task-id>/workflow.json` links stable stage attempts to existing assignment
+checkpoints and saved full briefs. `bin/workflow.py` provides strict init/read,
+revision-checked complete update and read-only show, not a runner or task system.
+tasks-axi owns lifecycle; the coordinator links the manifest in task notes and
+records operator steering, intent before dispatch/delivery and confirmed outcomes
+afterwards. unknown ownership blocks recovery; statuses never establish liveness
+or approval. stage success requires coordinator evidence and requested delivery.
+see the [recovery protocol and limitations](docs/workflows.md#interruption-recovery).
+
 ## worktrees
 
 ```sh
@@ -251,6 +265,12 @@ static contract reviews, not evidence of live agent behavior. checkpoint tests
 guard the json example, shared inputs, and write/recovery instructions, plus
 exercise the standard-library [helper](docs/agent-tracking.md#deterministic-helper)
 against disposable files and cli inputs; they do not establish live model compliance.
+
+workflow tests run disposable local simulated interruption trials under the
+worktree's `.cache/workflow-trials/`: actual git commit-before-outcome recovery,
+local pr receipts, dispatch ambiguity and ownership reconciliation, repairs and
+approval invalidation. they are not actual native harness or live github trials;
+see [trial limits](docs/workflows.md#automated-interruption-trials).
 
 references: [tasks-axi](https://github.com/kunchenguid/tasks-axi),
 [gh-axi](https://github.com/kunchenguid/gh-axi),

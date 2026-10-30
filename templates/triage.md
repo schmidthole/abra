@@ -9,6 +9,21 @@ investigation scope, project instructions, and stopping boundary: {{constraints}
 explicitly authorized local diagnostic probes (none by default): {{authorized_probes}}
 report path: {{report_path}}
 
+## coordinator workflow context
+
+workflow manifest (absolute, read-only): {{workflow_path}}
+selected recipe/version and selection id: {{workflow_recipe}}
+stage id: {{workflow_stage}}
+attempt id: {{workflow_attempt}}
+
+the coordinator alone writes the workflow manifest. use this context to relate
+this assignment to its stage attempt, not to infer authority or success. native
+run ids and detailed steps stay in your assigned checkpoint. resuming the same
+assignment does not create a new attempt; a replacement gets a new assignment and
+predecessor after ownership reconciliation. your completed status is not stage
+approval or requested delivery. report evidence and actual verdict to the coordinator.
+do not launch agents or update tasks-axi or the workflow manifest.
+
 ## shared checkpoint
 
 assignment: {{assignment}}

@@ -2,19 +2,18 @@
 """initialize, read, and update an assigned checkpoint; not an agent runtime."""
 
 import argparse
-from contextlib import contextmanager
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
-import stat
 import sys
 from urllib.parse import urlsplit
 
-MAX_BYTES = 1024 * 1024
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durable_files import MAX_BYTES, parent_directory, read_bytes, revision
+
 SLUG = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 IDENTITY = ("assignment", "role", "predecessor", "working_directory")
 FIELDS = {
@@ -169,47 +168,6 @@ def decode(raw):
 def encode(value):
     raw = (json.dumps(value, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
     decode(raw)
-    return raw
-
-
-def revision(raw):
-    return hashlib.sha256(raw).hexdigest()
-
-
-@contextmanager
-def parent_directory(path, create=False):
-    """pin each directory without following symlinks, including ancestors."""
-    path = Path(path)
-    require(
-        path.is_absolute() and ".." not in path.parts,
-        "path must be absolute without parent traversal",
-    )
-    require(path.name not in ("", ".", ".."), "invalid filename")
-    fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in path.parts[1:-1]:
-            if create:
-                try:
-                    os.mkdir(part, mode=0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
-            child = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-            )
-            os.close(fd)
-            fd = child
-        yield fd, path.name
-    finally:
-        os.close(fd)
-
-
-def read_bytes(directory, name):
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-    with os.fdopen(fd, "rb") as stream:
-        info = os.fstat(stream.fileno())
-        require(stat.S_ISREG(info.st_mode), "expected a regular file")
-        raw = stream.read(MAX_BYTES + 1)
-    require(len(raw) <= MAX_BYTES, "checkpoint exceeds byte limit")
     return raw
 
 

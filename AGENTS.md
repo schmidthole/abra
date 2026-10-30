@@ -27,6 +27,7 @@ following (non-comprehensive) examples:
 - `bin/abra`: one-shot headless runner; one resumed session per conversation key.
 - `triggers/`: shared trigger runtime and thin adapters; the runtime hosts one
   resident agent session over acp. see `docs/triggers.md`.
+- `bin/workflow.py`: coordinator-owned durable recipe manifests; see `docs/workflows.md`.
 - `templates/`: portable briefs for native worker, scout, triage, and verify subagents.
 - `operator/`: gitignored operator-owned drafts and notes handed off to abra.
 - `specialty/` (or `$ABRA_SPECIALTY_DIR`): optional pack that specializes abra;
@@ -92,6 +93,40 @@ outcomes. changed acceptance criteria require renewed verification even at the s
 commit. capture outstanding promises as tasks when no existing item owns them.
 before yielding or a requested context clear, reconcile these notes; do not rely on
 that final checkpoint alone or claim unsaved context is recoverable.
+
+## durable workflows
+
+for delegated tasks, follow `docs/workflows.md`. the operator selects a fixed
+versioned recipe: implement (worker -> verify -> deliver), investigate (triage ->
+coordinator review -> report), or research (scout -> report). recommend a recipe
+when useful, but do not silently select or branch. tasks-axi owns lifecycle;
+`data/<task-id>/workflow.json` is the single coordinator-owned workflow manifest,
+not a second task database. link its absolute path in the full tasks-axi body.
+save the full original request, acceptance criteria, authority and delivery brief
+before initialization. record explicit operator recipe/acceptance/delivery changes,
+retain history and invalidate affected verification and downstream completion.
+
+before dispatch, persist the attempt, assignment reservation, absolute tracker
+path, full filled brief reference and dispatch intent in the manifest, then spawn.
+record only confirmed outcomes afterwards; keep native ids/detailed subagent steps
+in existing task notes/checkpoints, not duplicate manifest fields. pass workflow,
+recipe/selection, stage and attempt context in all briefs, including specialty
+overrides. agent tracker ownership never changes. a stage passes only by an explicit
+coordinator evidence/decision, never because an agent checkpoint says completed.
+use the same intent -> action -> confirmed outcome protocol for delivery/publication.
+
+on recovery, read the full task, manifest, saved request/assignment briefs and all
+linked checkpoints; reconcile native ownership plus actual worktrees, commits,
+reports, prs and checks. never repeat unresolved dispatch automatically. unknown
+ownership blocks work, even when native id/checkpoint is missing. preserve missing,
+malformed, foreign, stale and conflicting evidence; no reset or automatic repair.
+same-assignment resume keeps its attempt; replacement requires reconciled stopped
+ownership, a new assignment/predecessor and an appropriate attempt link. status is
+never liveness or verified success; persistence is not exactly-once execution or
+power-loss durability. `workflow.py show` is read-only observation, not recovery
+authorization. completion requires requested delivery and explicit tasks-axi update;
+research/triage reports never stand in for code delivery. do not infer publication
+authority from a selected recipe or delivery field.
 
 ## dispatch
 
