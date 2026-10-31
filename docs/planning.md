@@ -72,7 +72,13 @@ repositories), `not-applicable` (no codebase, empty repositories), or `unavailab
 and production evidence belong in review with immutable refs, not fake repo commits.
 
 a passed refine needs spec/slices; ground/validate/deliver outputs need all three.
-unfinished/failed attempts have null result_package. reserve input identity before
+unfinished attempts and failed non-validation stages have null result_package. a
+terminal failed validate may record a full result_package solely to preserve appended
+validation findings in review.md. its product/repository/source-check identities must
+match input, with confirmed report/evidence and a coordinator decision; it is never
+approval. record this result when review bytes changed. null remains valid for
+historical failures or unchanged artifacts. neither form bypasses failure/blocked
+routing or resets the repair count. reserve input identity before
 dispatch and never rewrite it. a terminal result and report require confirmed refs in
 attempt evidence and an explicit coordinator decision. each passed stage needs report;
 validate alone uses `verdict`: ready for passed, needs revision or blocked for failed;
@@ -87,8 +93,11 @@ a blocked unresolved validation may carry blocked. other plan stages have null v
    earlier findings and supersession notes in review. hashes identify history but do
    not preserve old bytes by themselves. reserve attempt/dispatch intent before acting;
    confirm actual launch/outcomes afterwards. agent completion never approves a stage.
-3. refine may replace product direction only within operator authority; it preserves
-   review findings and grounding identity (initial absent review remains null). ground cannot
+3. refine may replace product direction only within operator authority; its input
+   must preserve the latest recorded review and grounding identity, including failed
+   validation findings and any initially supplied package. null bootstrap is allowed
+   only before a package is recorded, never to erase prior evidence. its result also
+   preserves those identities (initial absent review remains null). ground cannot
    change spec/slices; validate cannot change spec/slices or repository/source-check
    identity, and may only append validation content to review. the coordinator checks
    review diffs to prevent hidden grounding/scope changes. input/result identities
@@ -98,8 +107,10 @@ a blocked unresolved validation may carry blocked. other plan stages have null v
    changes, then fresh validation. a new refine invalidates grounding and validation;
    a new ground invalidates validation/delivery. direct changed inputs to validate or
    deliver are rejected. changed acceptance/authority requires a new saved brief and
-   operator decision, then refinement. initial validation plus at most two repair rounds
-   per selection, including successful validations later invalidated: pass/restart or
+   operator decision, then refinement. only passed refinement establishes successful
+   refinement for that acceptance; any failed refine must be retried successfully
+   before grounding, even with unchanged acceptance. initial validation plus at most
+   two repair rounds per selection, including successful validations later invalidated: pass/restart or
    revision changes never reset this budget. after exhaustion stop for the operator;
    a third ready result can still be delivered. terminal blocked verdict also stops
    that selection for operator intervention. unresolved blocked attempts must be
@@ -113,7 +124,12 @@ a blocked unresolved validation may carry blocked. other plan stages have null v
    quietly relabel or reuse approval. completed requires all three confirmed document
    refs in delivery_refs and delivery evidence, plus the delivery report ref. link the
    delivered package to tasks-axi and explicitly complete report delivery, not product
-   approval or implementation. new implementation needs separate approval and recipe.
+   approval or implementation. completion always requires current acceptance, even
+   after repair exhaustion. if acceptance changes during delivery, reconcile that
+   intent and retain its actual outcome as historical evidence, not current delivery.
+   an already-completed old delivery must likewise become non-completed on acceptance
+   change; keep old attempts/refs intact and pause/block for further direction rather
+   than certify stale scope. new implementation needs separate approval and recipe.
 
 existing reconciliation, same-assignment resume, replacement ownership and immutable
 history rules apply. a new operator-selected recipe/selection is explicit authority,

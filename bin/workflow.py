@@ -199,8 +199,17 @@ def plan_progress(selection, acceptance):
         require(stage == expected or restart, "attempt violates plan recipe order")
         package = attempt["package"]
         if stage == "refine":
-            approval = None
-            refined_acceptance = attempt["acceptance_revision"]
+            approval, refined_acceptance = None, None
+            if current is not None:
+                require(
+                    package is not None
+                    and package["review"] == current["review"]
+                    and grounding_identity(package) == grounding_identity(current),
+                    "refinement input must preserve recorded review and grounding",
+                )
+            else:
+                # preserve even an initial input if refinement fails before any output.
+                current = package
         elif stage == "ground":
             require(
                 refined_acceptance == attempt["acceptance_revision"],
@@ -233,6 +242,41 @@ def plan_progress(selection, acceptance):
         if attempt["status"] in ("active", "blocked"):
             require(index == len(entries) - 1, "unresolved attempt must be last")
             return stage
+        # failed validation may record findings, never approval.
+        result = attempt["result_package"]
+        require(
+            attempt["status"] != "passed" or result is not None,
+            "plan result package required",
+        )
+        if result is not None:
+            if stage == "refine":
+                require(
+                    all(result[n] is not None for n in ("spec", "slices")),
+                    "refinement needs product documents",
+                )
+                require(
+                    result["review"] == (package["review"] if package else None),
+                    "refinement cannot change review findings",
+                )
+                if package is not None:
+                    require(
+                        grounding_identity(result) == grounding_identity(package),
+                        "refinement cannot change grounding evidence",
+                    )
+            else:
+                require(full_package(result), "stage needs full result package")
+                require(
+                    product_identity(result) == product_identity(package),
+                    "stage cannot change product scope",
+                )
+                if stage in ("validate", "deliver"):
+                    require(
+                        grounding_identity(result) == grounding_identity(package),
+                        "stage cannot change grounding evidence",
+                    )
+            if stage == "deliver":
+                require(result == package, "deliver only the exact validated package")
+            current = result
         if attempt["status"] == "failed":
             expected = (
                 ("refine" if validations < 3 else None)
@@ -242,36 +286,8 @@ def plan_progress(selection, acceptance):
             if stage == "validate" and attempt["verdict"] == "blocked":
                 expected, stopped = None, True
             continue
-        result = attempt["result_package"]
         if stage == "refine":
-            require(
-                result is not None
-                and all(result[n] is not None for n in ("spec", "slices")),
-                "refinement needs product documents",
-            )
-            require(
-                result["review"] == (package["review"] if package else None),
-                "refinement cannot change review findings",
-            )
-            if package is not None:
-                require(
-                    grounding_identity(result) == grounding_identity(package),
-                    "refinement cannot change grounding evidence",
-                )
-        else:
-            require(full_package(result), "stage needs full result package")
-            require(
-                product_identity(result) == product_identity(package),
-                "stage cannot change product scope",
-            )
-            if stage in ("validate", "deliver"):
-                require(
-                    grounding_identity(result) == grounding_identity(package),
-                    "stage cannot change grounding evidence",
-                )
-        if stage == "deliver":
-            require(result == package, "deliver only the exact validated package")
-        current = result
+            refined_acceptance = attempt["acceptance_revision"]
         if stage == "validate":
             approval, approval_acceptance = result, attempt["acceptance_revision"]
         stages = RECIPES["plan"]
@@ -483,7 +499,9 @@ def validate(value):
                             ),
                             "product documents required",
                         )
-                    if attempt["status"] != "passed":
+                    if attempt["status"] != "passed" and not (
+                        stage["id"] == "validate" and attempt["status"] == "failed"
+                    ):
                         require(
                             attempt["result_package"] is None,
                             "unapproved result package",
@@ -641,11 +659,12 @@ def validate(value):
                         )
                     if planning and attempt["status"] == "passed":
                         require(
-                            attempt["report"] is not None, "plan stage report required"
-                        )
-                        require(
                             attempt["result_package"] is not None,
                             "plan result package required",
+                        )
+                    if planning and attempt["result_package"] is not None:
+                        require(
+                            attempt["report"] is not None, "plan stage report required"
                         )
                         require(
                             all(
@@ -753,6 +772,10 @@ def validate(value):
             "delivery references need confirmed evidence",
         )
         if selections[-1]["recipe"] == "plan":
+            require(
+                last[1]["acceptance_revision"] == acceptance,
+                "plan completion requires current acceptance",
+            )
             require(
                 all(
                     last[1]["result_package"][n]["reference"] in value["delivery_refs"]

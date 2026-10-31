@@ -50,10 +50,12 @@ class PlanWorkflowTests(unittest.TestCase):
             )
         return package
 
-    def reserve(self, stage, package=None):
+    def reserve(self, stage, package=...):
         entries = workflow.ordered(self.value["selections"][-1])
-        if package is None and entries:
-            package = copy.deepcopy(entries[-1][1]["result_package"])
+        if package is ...:
+            package = (
+                copy.deepcopy(entries[-1][1]["result_package"]) if entries else None
+            )
         number = len(entries) + 1
         id = stage + "-" + str(number)
         links = []
@@ -248,6 +250,281 @@ class PlanWorkflowTests(unittest.TestCase):
         self.assertIsNone(workflow.progress(self.value["selections"][-1], "e" * 64))
         with self.assertRaisesRegex(ValueError, "two repair rounds"):
             self.reserve("refine", self.package())
+
+    def change_acceptance(self):
+        self.value["briefs"].append(
+            {
+                **self.value["briefs"][0],
+                "acceptance_revision": "e" * 64,
+                "decision": "change",
+            }
+        )
+        self.value["decisions"].append(
+            dict(
+                id="change",
+                kind="operator",
+                summary="changed product acceptance",
+                evidence=[str(self.brief)],
+            )
+        )
+        self.value["current_stage"] = workflow.progress(
+            self.value["selections"][-1], "e" * 64
+        )
+
+    def mark_delivery_completed(self):
+        self.value.update(
+            status="completed",
+            next_action=None,
+            delivery_refs=[
+                str(self.report),
+                *[
+                    self.last()["result_package"][n]["reference"]
+                    for n in workflow.DOCUMENTS
+                ],
+            ],
+        )
+        self.save()
+
+    def test_acceptance_changes_during_and_after_delivery_never_complete_stale_scope(
+        self,
+    ):
+        for validations in (1, 3):
+            for during_intent in (False, True):
+                with self.subTest(validations=validations, during_intent=during_intent):
+                    if self.revision is not None:
+                        self.setUp()
+                    self.start()
+                    self.ready()
+                    for _ in range(validations - 1):
+                        self.reserve("ground", self.package())
+                        self.finish()
+                        self.reserve("validate")
+                        self.finish(verdict="ready")
+                    self.reserve("deliver")
+                    if during_intent:
+                        self.change_acceptance()
+                        self.save()
+                    self.finish(result=copy.deepcopy(self.last()["package"]))
+                    if not during_intent:
+                        self.mark_delivery_completed()
+                        self.change_acceptance()
+                    with self.assertRaises(ValueError):
+                        self.mark_delivery_completed()
+                    self.value.update(
+                        status="paused",
+                        next_action="operator direction for superseded delivery",
+                    )
+                    self.save()
+                    persisted = workflow.read_workflow(self.path, "example")["workflow"]
+                    historical = workflow.ordered(persisted["selections"][-1])[-1][1]
+                    self.assertEqual(historical["status"], "passed")
+                    self.assertEqual(historical["acceptance_revision"], "a" * 64)
+                    self.assertEqual(workflow.current_acceptance(persisted), "e" * 64)
+                    self.assertEqual(persisted["status"], "paused")
+                    self.assertEqual(
+                        persisted["current_stage"],
+                        "refine" if validations == 1 else None,
+                    )
+
+    def test_failed_refinement_requires_successful_retry_before_grounding(self):
+        for changed_acceptance in (False, True):
+            with self.subTest(changed_acceptance=changed_acceptance):
+                if self.revision is not None:
+                    self.setUp()
+                self.start()
+                self.ready()
+                old = copy.deepcopy(self.last()["result_package"])
+                if changed_acceptance:
+                    self.change_acceptance()
+                    self.save()
+                self.reserve("refine", old)
+                self.finish(status="failed")
+                failed_history = copy.deepcopy(self.value)
+                self.assertEqual(self.value["current_stage"], "refine")
+                with self.assertRaisesRegex(ValueError, "refinement"):
+                    self.reserve("ground", old)
+                self.value = failed_history
+                self.reserve("refine", old)
+                self.finish()
+                self.reserve("ground")
+                self.finish()
+                self.reserve("validate")
+                self.finish(verdict="ready")
+                self.reserve("deliver")
+                self.finish(result=copy.deepcopy(self.last()["package"]))
+                self.mark_delivery_completed()
+                self.assertEqual(self.value["status"], "completed")
+
+    def test_refine_input_cannot_drop_or_replace_recorded_review_and_grounding(self):
+        self.start()
+        self.ready()
+        original = copy.deepcopy(self.value)
+        for name in (
+            "null",
+            "review-null",
+            "review-stale",
+            "repositories",
+            "source_checks",
+        ):
+            with self.subTest(name=name):
+                self.value = copy.deepcopy(original)
+                stale = copy.deepcopy(self.last()["result_package"])
+                if name == "null":
+                    stale = None
+                elif name == "review-null":
+                    stale["review"] = None
+                elif name == "review-stale":
+                    stale["review"]["revision"] = "e" * 64
+                elif name == "repositories":
+                    stale[name][0]["commit"] = "e" * 40
+                else:
+                    stale[name] = "unavailable"
+                with self.assertRaisesRegex(ValueError, "refinement input"):
+                    self.reserve("refine", stale)
+
+    def test_failed_initial_refinement_cannot_reset_existing_input_identity(self):
+        self.start()
+        initial = self.package()
+        self.reserve("refine", initial)
+        self.finish(status="failed")
+        failed = copy.deepcopy(self.value)
+        with self.assertRaisesRegex(ValueError, "refinement input"):
+            self.reserve("refine", None)
+        self.value = failed
+        self.reserve("refine", initial)
+        self.finish()
+        self.assertEqual(self.last()["result_package"]["review"], initial["review"])
+
+    def test_failed_validation_records_findings_without_approving_or_losing_identity(
+        self,
+    ):
+        self.start()
+        self.grounded()
+        self.reserve("validate")
+        before = copy.deepcopy(self.last()["package"])
+        review = self.path.parent / "review.md"
+        review.write_text(
+            review.read_text() + "validation: needs revision; clarify outcomes\n"
+        )
+        findings = self.package()
+        self.finish(result=findings, status="failed", verdict="needs revision")
+        historical = copy.deepcopy(self.last())
+        failed_state = copy.deepcopy(self.value)
+        self.assertNotEqual(findings["review"], before["review"])
+        with self.assertRaisesRegex(ValueError, "refinement input"):
+            self.reserve("refine", before)
+        self.value = copy.deepcopy(failed_state)
+        with self.assertRaises(ValueError):
+            self.reserve("deliver", findings)
+        self.value = failed_state
+        self.reserve("refine", findings)
+        self.finish()
+        self.assertEqual(self.last()["result_package"]["review"], findings["review"])
+        self.assertEqual(self.stage("validate")["attempts"][0], historical)
+        self.reserve("ground")
+        self.finish()
+        self.reserve("validate")
+        self.finish(verdict="ready")
+        self.reserve("deliver")
+        self.finish(result=copy.deepcopy(self.last()["package"]))
+        self.mark_delivery_completed()
+
+    def test_refinement_accepts_product_edits_but_keeps_recorded_evidence(self):
+        self.start()
+        self.ready()
+        changed = copy.deepcopy(self.last()["result_package"])
+        changed["slices"]["revision"] = "e" * 64
+        self.reserve("refine", changed)
+        self.finish(result=changed)
+        self.reserve("ground")
+        self.finish(result=changed)
+        self.reserve("validate")
+        self.finish(result=changed, verdict="ready")
+        self.assertEqual(self.value["current_stage"], "deliver")
+
+    def test_failed_validation_without_output_remains_compatible(self):
+        self.start()
+        self.grounded()
+        self.reserve("validate")
+        prior = copy.deepcopy(self.last()["package"])
+        self.finish(status="failed", verdict="needs revision")
+        self.assertIsNone(self.last()["result_package"])
+        self.assertEqual(workflow.decode(workflow.encode(self.value)), self.value)
+        self.reserve("refine", prior)
+        self.finish()
+        self.assertEqual(self.last()["result_package"]["review"], prior["review"])
+
+    def test_failed_validation_findings_keep_budget_and_evidence_requirements(self):
+        self.start()
+        self.grounded()
+        for number in range(3):
+            self.reserve("validate")
+            findings = self.package()
+            findings["review"]["revision"] = str(number) * 64
+            self.finish(result=findings, status="failed", verdict="needs revision")
+            if number < 2:
+                self.reserve("ground", findings)
+                self.finish(result=findings)
+        exhausted = copy.deepcopy(self.value)
+        self.assertIsNone(self.value["current_stage"])
+        with self.assertRaisesRegex(ValueError, "two repair rounds"):
+            self.reserve("refine", findings)
+        self.value = exhausted
+        self.last()["evidence"].remove(findings["review"]["reference"])
+        with self.assertRaisesRegex(ValueError, "confirmed evidence"):
+            self.save()
+
+    def test_failed_validation_result_cannot_change_product_or_grounding(self):
+        self.start()
+        self.grounded()
+        self.reserve("validate")
+        original = copy.deepcopy(self.value)
+        for name in ("spec", "slices", "repositories", "source_checks", "review-null"):
+            with self.subTest(name=name):
+                self.value = copy.deepcopy(original)
+                changed = self.package()
+                if name in ("spec", "slices"):
+                    changed[name]["revision"] = "e" * 64
+                elif name == "repositories":
+                    changed[name][0]["commit"] = "e" * 40
+                elif name == "source_checks":
+                    changed[name] = "unavailable"
+                else:
+                    changed["review"] = None
+                with self.assertRaises(ValueError):
+                    self.finish(
+                        result=changed, status="failed", verdict="needs revision"
+                    )
+
+    def test_blocked_validation_result_records_findings_but_cannot_advance(self):
+        self.start("unavailable")
+        self.grounded()
+        self.reserve("validate")
+        findings = self.package()
+        self.finish(result=findings, status="failed", verdict="blocked")
+        self.assertIsNone(self.value["current_stage"])
+        for stage in ("refine", "ground", "deliver"):
+            original = copy.deepcopy(self.value)
+            with self.assertRaisesRegex(ValueError, "operator intervention"):
+                self.reserve(stage, findings)
+            self.value = original
+
+    def test_only_terminal_failed_validation_can_record_a_failed_result(self):
+        self.start()
+        self.reserve("refine")
+        with self.assertRaisesRegex(ValueError, "unapproved result package"):
+            self.finish(result=self.package(review=False), status="failed")
+        self.value = workflow.read_workflow(self.path, "example")["workflow"]
+        self.finish()
+        self.reserve("ground")
+        with self.assertRaisesRegex(ValueError, "unapproved result package"):
+            self.finish(result=self.package(), status="failed")
+        self.value = workflow.read_workflow(self.path, "example")["workflow"]
+        self.finish()
+        self.reserve("validate")
+        self.last()["result_package"] = self.package()
+        with self.assertRaisesRegex(ValueError, "unapproved result package"):
+            self.save()
 
     def test_task_local_document_paths_and_complete_evidence_are_required(self):
         self.start()
@@ -515,6 +792,15 @@ class PlanTemplateTests(unittest.TestCase):
             "byte",
             "operator",
             "not product approval",
+        ):
+            self.assertIn(phrase, " ".join(docs.split()))
+        for phrase in (
+            "latest recorded review",
+            "terminal failed validate",
+            "never approval",
+            "only passed refinement",
+            "completion always requires current acceptance",
+            "historical evidence, not current delivery",
         ):
             self.assertIn(phrase, " ".join(docs.split()))
         ground = (ROOT / "templates/plan-ground.md").read_text()
