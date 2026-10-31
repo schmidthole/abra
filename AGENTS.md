@@ -98,8 +98,10 @@ that final checkpoint alone or claim unsaved context is recoverable.
 
 for delegated tasks, follow `docs/workflows.md`. the operator selects a fixed
 versioned recipe: implement (worker -> verify -> deliver), investigate (triage ->
-coordinator review -> report), or research (scout -> report). recommend a recipe
-when useful, but do not silently select or branch. tasks-axi owns lifecycle;
+coordinator review -> report), research (scout -> report), or plan (refine -> ground
+-> validate -> deliver; report-only product direction, see `docs/planning.md`).
+recommend a recipe when useful, but do not silently select or branch. tasks-axi
+owns lifecycle;
 `data/<task-id>/workflow.json` is the single coordinator-owned workflow manifest,
 not a second task database. link its absolute path in the full tasks-axi body.
 save the full original request, acceptance criteria, authority and delivery brief
@@ -130,6 +132,9 @@ authority from a selected recipe or delivery field.
 
 ## dispatch
 
+- route product direction/specification requests through operator-selected plan v1
+  and `docs/planning.md`; its refine/ground/validate briefs reuse scout checkpoints.
+  deliver outcome-oriented work slices, not tickets or implementation designs.
 - answer small questions directly. route clear implementation requests to workers,
   general research to scouts, and unclear reported behavior needing identification
   or reproduction to optional triage (`templates/triage.md`; see `docs/triage.md`).
