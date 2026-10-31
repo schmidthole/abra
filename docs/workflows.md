@@ -17,6 +17,12 @@ selection/authority, not an invented approval.
 | `implement` | `worker`, `verify`, `deliver` | requested verified local commit, pr, or merge, within explicit authority |
 | `investigate` | `triage`, `review`, `report` | coordinator reviews findings, then delivers the requested investigation report |
 | `research` | `scout`, `report` | delivers the requested research report |
+| `plan` | `refine`, `ground`, `validate`, `deliver` | report-only product direction and outcome-oriented slices; not product approval |
+
+[planning](planning.md) defines its three portable briefs, plan-only package identity
+fields, feedback/repair budget and exact report delivery protocol. refine/ground/validate
+map to scout checkpoints, not the implementation verify role. existing v1 artifacts
+remain valid unchanged.
 
 `review`, `deliver` and `report` are coordinator stages, not new agent roles. there
 is no generic dag, plugin, scheduler, runner or automatic branching. if research or
@@ -91,7 +97,9 @@ nested objects have exactly these fields:
   and a new operator decision; never rewrite the selected recipe in place.
 - stage: `id`, `attempts`. stages exactly match the fixed recipe in order. no
   separate stage status: the coordinator's attempt outcomes determine progress.
-- attempt: `id`, `order`, `status`, `intent`, `assignments`, `acceptance_revision`,
+- attempt (existing recipes; plan adds `package` and `result_package` as defined in
+  [planning](planning.md)): `id`, `order`, `status`, `intent`, `assignments`,
+  `acceptance_revision`,
   `candidate_commit`, `verdict`, `report`, `outcome`, `evidence`, `decision`.
   `order` is contiguous from 1 across the current selection, regardless of stage;
   per-stage arrays retain that order. ids are unique across the whole workflow.
@@ -99,8 +107,9 @@ nested objects have exactly these fields:
   outcome/decision are null until resolved. evidence is a distinct reference
   array, initially empty. a terminal attempt needs nonempty outcome/evidence and
   a new distinct coordinator decision id. `candidate_commit` is null or a full lowercase
-  40/64-hex commit; passed worker and every verify/deliver attempt need the exact
-  candidate. `verdict` is null except verify (`pass`, `fail`, `blocked`). terminal
+  40/64-hex commit; passed worker and every implement verify/deliver attempt need
+  the exact candidate. `verdict` is null except verify (`pass`, `fail`, `blocked`)
+  and plan validate (`ready`, `needs revision`, `blocked`). terminal
   verification requires matching passed/pass or failed/fail and a report path/url.
   `report` is otherwise null or a path/url; successful scout, triage and report
   attempts require it. coordinator stages have `assignments: []`.

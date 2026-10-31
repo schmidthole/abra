@@ -20,8 +20,15 @@ state and label names come from `LINEAR_REVIEW_STATE` (default `In Review`) and
   verification outcome.
 - infer the repo from the issue's team, project, labels, and text against the
   registry (or the specialty's repos). if it is unclear, hand back.
-- success: run the normal pipeline to a pr, attach the pr link to the issue
-  (`linear-axi api` with the `attachmentLinkURL` mutation), comment a summary, and
+- product direction requires an explicit operator-selected `plan` recipe; follow
+  `docs/planning.md`. it remains task-local report-only and does not inherit pr,
+  publication or ticket authority from linear ingress. do not apply the pr success
+  path or publish the package. if the issue delivery contract requires a pr or
+  publication, block/hand back through the existing authorized mechanism for an
+  operator scope/delivery decision; never silently switch recipes. minimal authorized
+  blocked-status reporting is not publication of planning content.
+- implementation success: run the normal pipeline to a pr, attach the pr link
+  to the issue (`linear-axi api` with the `attachmentLinkURL` mutation), comment a summary, and
   move the issue to the review state. it stays assigned (user) or delegated (app)
   to the bot.
 - cannot complete (blocked, missing information, invalid or disproven request,

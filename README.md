@@ -62,8 +62,10 @@ success, or a second task system. tasks-axi remains coordinator-owned.
 
 the operator selects a fixed [workflow recipe](docs/workflows.md): implement
 (worker -> verify -> deliver), investigate (triage -> coordinator review -> report),
-or research (scout -> report). one coordinator-owned
-`data/<task-id>/workflow.json` links stable stage attempts to existing assignment
+research (scout -> report), or [plan](docs/planning.md)
+(refine -> ground -> validate -> deliver; report-only product direction).
+one coordinator-owned `data/<task-id>/workflow.json` links stable stage attempts
+to existing assignment
 checkpoints and saved full briefs. `bin/workflow.py` provides strict init/read,
 revision-checked complete update and read-only show, not a runner or task system.
 tasks-axi owns lifecycle; the coordinator links the manifest in task notes and
@@ -213,6 +215,8 @@ fixes and fresh verification if needed → authorized pr → ci → delivery. fo
 local-only request, stop at the verified commit.
 
 general research → scout report; unclear behavior → optional triage report.
+product direction → operator-selected [plan](docs/planning.md): spec, outcome-oriented
+work slices and independent readiness review; not tickets or implementation design.
 the coordinator reviews findings and decides on a bounded worker task, an
 information/access request, or a report-only conclusion. reports do not replace
 independent worker verification or complete a request for code delivery.
