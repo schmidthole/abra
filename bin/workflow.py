@@ -18,8 +18,13 @@ RECIPES = {
     "implement": ("worker", "verify", "deliver"),
     "investigate": ("triage", "review", "report"),
     "research": ("scout", "report"),
+    "plan": ("refine", "ground", "validate", "deliver"),
 }
-AGENT_STAGES = {"worker", "verify", "triage", "scout"}
+STAGE_ROLES = {s: s for s in ("worker", "verify", "triage", "scout")}
+STAGE_ROLES.update({s: "scout" for s in ("refine", "ground", "validate")})
+AGENT_STAGES = set(STAGE_ROLES)
+PLAN_FIELDS = {"package", "result_package"}
+DOCUMENTS = ("spec", "slices", "review")
 COMMIT = r"[0-9a-f]{40}|[0-9a-f]{64}"
 HASH = r"[0-9a-f]{64}"
 FIELDS = {
@@ -122,9 +127,183 @@ def ordered(selection):
     )
 
 
+def validate_package(package):
+    if package is None:
+        return
+    fields(package, (*DOCUMENTS, "repositories", "source_checks"), "plan package")
+    for name in DOCUMENTS:
+        document = package[name]
+        if document is not None:
+            fields(document, ("reference", "revision"), "plan document")
+            require(
+                path_string(document["reference"])
+                and Path(document["reference"]).name == name + ".md"
+                and checkpoint.matches(HASH, document["revision"]),
+                "invalid plan document identity",
+            )
+    require(
+        package["source_checks"] in ("applicable", "not-applicable", "unavailable"),
+        "invalid source checks",
+    )
+    repos = package["repositories"]
+    require(type(repos) is list, "invalid grounding repositories")
+    for repo in repos:
+        fields(repo, ("reference", "commit"), "grounding repository")
+        require(
+            reference(repo["reference"])
+            and not checkpoint.matches(COMMIT, repo["reference"])
+            and checkpoint.matches(COMMIT, repo["commit"]),
+            "invalid pinned repository",
+        )
+    require(len({r["reference"] for r in repos}) == len(repos), "duplicate repository")
+    require(
+        package["source_checks"] != "applicable" or bool(repos),
+        "source checks need pinned repositories",
+    )
+    require(
+        package["source_checks"] != "not-applicable" or not repos,
+        "no codebase cannot claim source checks",
+    )
+
+
+def full_package(package):
+    return package is not None and all(package[n] is not None for n in DOCUMENTS)
+
+
+def product_identity(package):
+    return None if package is None else [package[n] for n in ("spec", "slices")]
+
+
+def grounding_identity(package):
+    return (
+        None
+        if package is None
+        else [package[n] for n in ("repositories", "source_checks")]
+    )
+
+
+def plan_progress(selection, acceptance):
+    """replay report planning separately from implementation commit verification."""
+    expected, current, approval, approval_acceptance = "refine", None, None, None
+    validations, stopped = 0, False
+    refined_acceptance = None
+    entries = ordered(selection)
+    for index, (stage, attempt) in enumerate(entries):
+        require(not stopped, "blocked planning verdict needs operator intervention")
+        require(validations < 3 or stage == "deliver", "two repair rounds exhausted")
+        restart = stage == "refine" or (
+            stage == "ground"
+            and current is not None
+            and expected in ("refine", "validate", "deliver", None)
+        )
+        require(stage == expected or restart, "attempt violates plan recipe order")
+        package = attempt["package"]
+        if stage == "refine":
+            approval, refined_acceptance = None, None
+            if current is not None:
+                require(
+                    package is not None
+                    and package["review"] == current["review"]
+                    and grounding_identity(package) == grounding_identity(current),
+                    "refinement input must preserve recorded review and grounding",
+                )
+            else:
+                # preserve even an initial input if refinement fails before any output.
+                current = package
+        elif stage == "ground":
+            require(
+                refined_acceptance == attempt["acceptance_revision"],
+                "changed acceptance requires refinement",
+            )
+            require(
+                current is not None
+                and product_identity(package) == product_identity(current),
+                "changed product documents require refinement",
+            )
+            approval = None
+        else:
+            require(
+                package == current and full_package(package),
+                "stale or incomplete plan package",
+            )
+        if stage == "validate":
+            require(
+                refined_acceptance == attempt["acceptance_revision"],
+                "changed acceptance requires refinement",
+            )
+            validations += 1
+            approval = None
+        if stage == "deliver":
+            require(
+                approval == package
+                and approval_acceptance == attempt["acceptance_revision"],
+                "planning approval invalidated",
+            )
+        if attempt["status"] in ("active", "blocked"):
+            require(index == len(entries) - 1, "unresolved attempt must be last")
+            return stage
+        # failed validation may record findings, never approval.
+        result = attempt["result_package"]
+        require(
+            attempt["status"] != "passed" or result is not None,
+            "plan result package required",
+        )
+        if result is not None:
+            if stage == "refine":
+                require(
+                    all(result[n] is not None for n in ("spec", "slices")),
+                    "refinement needs product documents",
+                )
+                require(
+                    result["review"] == (package["review"] if package else None),
+                    "refinement cannot change review findings",
+                )
+                if package is not None:
+                    require(
+                        grounding_identity(result) == grounding_identity(package),
+                        "refinement cannot change grounding evidence",
+                    )
+            else:
+                require(full_package(result), "stage needs full result package")
+                require(
+                    product_identity(result) == product_identity(package),
+                    "stage cannot change product scope",
+                )
+                if stage in ("validate", "deliver"):
+                    require(
+                        grounding_identity(result) == grounding_identity(package),
+                        "stage cannot change grounding evidence",
+                    )
+            if stage == "deliver":
+                require(result == package, "deliver only the exact validated package")
+            current = result
+        if attempt["status"] == "failed":
+            expected = (
+                ("refine" if validations < 3 else None)
+                if stage == "validate"
+                else stage
+            )
+            if stage == "validate" and attempt["verdict"] == "blocked":
+                expected, stopped = None, True
+            continue
+        if stage == "refine":
+            refined_acceptance = attempt["acceptance_revision"]
+        if stage == "validate":
+            approval, approval_acceptance = result, attempt["acceptance_revision"]
+        stages = RECIPES["plan"]
+        expected = stages[stages.index(stage) + 1] if stage != "deliver" else None
+    if validations >= 3 and approval is None:
+        return None
+    if entries and entries[-1][1]["acceptance_revision"] != acceptance:
+        return "refine" if validations < 3 else None
+    return expected
+
+
 def progress(selection, acceptance):
     """replay the fixed recipe only; assignments never determine success."""
     name = selection["recipe"]
+    if name == "plan":
+        return plan_progress(selection, acceptance)
     stages = RECIPES[name]
     expected, candidate, approval, failures = stages[0], None, None, 0
     report_revision = None
@@ -261,7 +440,7 @@ def validate(value):
     selections = value["selections"]
     require(type(selections) is list and bool(selections), "recipe selection required")
     selection_ids, attempt_ids, assignments = set(), set(), {}
-    terminal_decisions = set()
+    terminal_decisions, assignment_stages = set(), {}
     for selection in selections:
         fields(
             selection,
@@ -298,7 +477,35 @@ def validate(value):
             require(type(stage["attempts"]) is list, "invalid attempts")
             orders = []
             for attempt in stage["attempts"]:
-                fields(attempt, ATTEMPT_FIELDS, "attempt")
+                planning = selection["recipe"] == "plan"
+                fields(
+                    attempt,
+                    ATTEMPT_FIELDS | PLAN_FIELDS if planning else ATTEMPT_FIELDS,
+                    "attempt",
+                )
+                if planning:
+                    validate_package(attempt["package"])
+                    validate_package(attempt["result_package"])
+                    require(
+                        attempt["candidate_commit"] is None,
+                        "plan documents are not candidate commits",
+                    )
+                    if stage["id"] != "refine":
+                        require(
+                            attempt["package"] is not None
+                            and all(
+                                attempt["package"][n] is not None
+                                for n in ("spec", "slices")
+                            ),
+                            "product documents required",
+                        )
+                    if attempt["status"] != "passed" and not (
+                        stage["id"] == "validate" and attempt["status"] == "failed"
+                    ):
+                        require(
+                            attempt["result_package"] is None,
+                            "unapproved result package",
+                        )
                 require(
                     checkpoint.matches(checkpoint.SLUG, attempt["id"])
                     and attempt["id"] not in attempt_ids,
@@ -330,7 +537,12 @@ def validate(value):
                 )
                 require(
                     attempt["verdict"] is None
-                    or attempt["verdict"] in ("pass", "fail", "blocked"),
+                    or attempt["verdict"]
+                    in (
+                        ("ready", "needs revision", "blocked")
+                        if planning
+                        else ("pass", "fail", "blocked")
+                    ),
                     "invalid verdict",
                 )
                 require(
@@ -361,7 +573,10 @@ def validate(value):
                         and assignment not in assignments,
                         "invalid or reused assignment",
                     )
-                    require(link["role"] == stage["id"], "assignment role mismatch")
+                    require(
+                        link["role"] == STAGE_ROLES[stage["id"]],
+                        "assignment role mismatch",
+                    )
                     require(
                         path_string(link["tracker"])
                         and Path(link["tracker"]).name == assignment + ".json",
@@ -380,6 +595,7 @@ def validate(value):
                             checkpoint.matches(checkpoint.SLUG, predecessor)
                             and predecessor in assignments
                             and assignments[predecessor]["role"] == link["role"]
+                            and assignment_stages[predecessor] == stage["id"]
                         ),
                         "invalid predecessor link",
                     )
@@ -403,6 +619,7 @@ def validate(value):
                             "predecessor ownership unresolved",
                         )
                     assignments[assignment] = link
+                    assignment_stages[assignment] = stage["id"]
                     previous = link
                 if attempt["status"] in ("passed", "failed"):
                     decision_ref(attempt["decision"], decisions, ("coordinator",))
@@ -424,6 +641,41 @@ def validate(value):
                         ),
                         "unresolved dispatch cannot finish",
                     )
+                    if planning and stage["id"] == "validate":
+                        require(
+                            attempt["report"] is not None
+                            and attempt["verdict"]
+                            in (
+                                ("ready",)
+                                if attempt["status"] == "passed"
+                                else ("needs revision", "blocked")
+                            ),
+                            "planning validation needs exact verdict and report",
+                        )
+                    if planning and attempt["report"] is not None:
+                        require(
+                            attempt["report"] in attempt["evidence"],
+                            "plan report needs confirmed evidence",
+                        )
+                    if planning and attempt["status"] == "passed":
+                        require(
+                            attempt["result_package"] is not None,
+                            "plan result package required",
+                        )
+                    if planning and attempt["result_package"] is not None:
+                        require(
+                            attempt["report"] is not None, "plan stage report required"
+                        )
+                        require(
+                            all(
+                                d["reference"] in attempt["evidence"]
+                                for d in (
+                                    attempt["result_package"][n] for n in DOCUMENTS
+                                )
+                                if d is not None
+                            ),
+                            "result documents need confirmed evidence",
+                        )
                     if stage["id"] == "verify":
                         require(
                             attempt["report"] is not None
@@ -446,10 +698,12 @@ def validate(value):
                         attempt["decision"] is None,
                         "unfinished attempt cannot claim stage decision",
                     )
-                if stage["id"] != "verify":
+                if stage["id"] != "verify" and not (
+                    planning and stage["id"] == "validate"
+                ):
                     require(
                         attempt["verdict"] is None,
-                        "verdict belongs only to verification",
+                        "verdict belongs only to verification or plan validation",
                     )
             require(orders == sorted(set(orders)), "attempts must be uniquely ordered")
         entries = ordered(selection)
@@ -458,6 +712,10 @@ def validate(value):
             "attempt order must be contiguous",
         )
         progress(selection, acceptance)
+    if selections[-1]["recipe"] == "plan":
+        require(
+            current_delivery(value) == "report", "plan supports report delivery only"
+        )
     expected = progress(selections[-1], acceptance)
     require(
         value["current_stage"] == expected,
@@ -513,6 +771,18 @@ def validate(value):
             set(value["delivery_refs"]).issubset(last[1]["evidence"]),
             "delivery references need confirmed evidence",
         )
+        if selections[-1]["recipe"] == "plan":
+            require(
+                last[1]["acceptance_revision"] == acceptance,
+                "plan completion requires current acceptance",
+            )
+            require(
+                all(
+                    last[1]["result_package"][n]["reference"] in value["delivery_refs"]
+                    for n in DOCUMENTS
+                ),
+                "plan delivery needs all three exact report references",
+            )
         delivery = current_delivery(value)
         if delivery == "local-commit":
             require(
@@ -584,7 +854,10 @@ def transition(old, new):
                         len(previous["assignments"]) == len(following["assignments"]),
                         "terminal assignments are immutable",
                     )
-                for key in ("id", "order", "intent", "acceptance_revision"):
+                keys = ("id", "order", "intent", "acceptance_revision")
+                if prior["recipe"] == "plan":
+                    keys += ("package",)
+                for key in keys:
                     require(
                         previous[key] == following[key], "attempt identity is immutable"
                     )
@@ -647,7 +920,8 @@ def transition(old, new):
             attempt["status"] == "active"
             and attempt["outcome"] is None
             and attempt["decision"] is None
-            and not attempt["evidence"],
+            and not attempt["evidence"]
+            and attempt.get("result_package") is None,
             "persist attempt intent before outcome",
         )
         require(
@@ -705,6 +979,17 @@ def identity(value, task_id, path):
     # assignment links are confined to this task, never arbitrary checkpoint files.
     for selection in value["selections"]:
         for _, attempt in ordered(selection):
+            if selection["recipe"] == "plan":
+                for key in ("package", "result_package"):
+                    package = attempt[key]
+                    if package is not None:
+                        for name in DOCUMENTS:
+                            if package[name] is not None:
+                                require(
+                                    Path(package[name]["reference"])
+                                    == Path(path).parent / (name + ".md"),
+                                    "plan documents must belong to this task",
+                                )
             for link in attempt["assignments"]:
                 require(
                     Path(link["tracker"])

@@ -80,6 +80,10 @@ when a pack is present:
   manifest ownership, intent-before-action, ownership reconciliation or exact
   candidate/acceptance verification. missing override fields are supplied by the
   coordinator, never silently omitted. no tracker ownership changes.
+- plan briefs (`plan-refine.md`, `plan-ground.md`, `plan-validate.md`) follow the same
+  override lookup and shared scout checkpoint/workflow contracts. preserve the
+  [planning](planning.md) boundaries, package byte checks, fresh independent validation
+  and report-only delivery even when a specialty permits code delivery.
 - delivery stops at the `delivery` ceiling.
 
 ## startup check
