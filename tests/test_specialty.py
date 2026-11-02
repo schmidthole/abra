@@ -44,7 +44,6 @@ class SpecialtyTests(unittest.TestCase):
         (self.pack / "SPECIALTY.md").write_text("# example\n")
         (self.pack / "jobs/nightly.md").write_text("run the nightly check\n")
         (self.pack / "templates/worker.md").write_text("# worker\n")
-        (self.pack / "mcp.json").write_text('{"mcpServers": {}}\n')
         self.manifest = {
             "name": "example",
             "description": "an example specialty",
@@ -59,7 +58,6 @@ class SpecialtyTests(unittest.TestCase):
             },
             "secrets": ["EXAMPLE_TOKEN"],
             "egress": ["api.example.com"],
-            "mcp_config": "mcp.json",
             "jobs": {"nightly": {"prompt": "jobs/nightly.md", "schedule": "0 3 * * *"}},
             "delivery": "local-commit",
         }
@@ -102,6 +100,24 @@ class SpecialtyTests(unittest.TestCase):
         )
         self.assertEqual((pack["secrets"], pack["egress"], pack["jobs"]), ([], [], {}))
 
+    def test_jobs_remain_validated_metadata_without_execution(self):
+        pack = specialty.load(self.root)
+        self.assertEqual(pack["jobs"], self.manifest["jobs"])
+        self.assertNotIn("mcp_config", pack)
+        # schedules remain opaque metadata, not a new scheduling contract.
+        self.manifest["jobs"]["nightly"]["schedule"] = "operator-defined schedule"
+        self.write()
+        with mock.patch.object(specialty.subprocess, "run") as run:
+            self.assertEqual(specialty.load(self.root)["jobs"], self.manifest["jobs"])
+        run.assert_not_called()
+
+    def test_removed_mcp_config_is_rejected_without_reading_its_path(self):
+        for value in ("mcp.json", "../outside.json", None):
+            with self.subTest(value=value):
+                self.rejects(
+                    "unknown keys.*mcp_config", lambda m: m.update(mcp_config=value)
+                )
+
     def test_env_override(self):
         other = Path(self.temporary.name) / "other"
         other.mkdir()
@@ -139,7 +155,7 @@ class SpecialtyTests(unittest.TestCase):
             "job .*prompt is missing": lambda m: m["jobs"]["nightly"].update(
                 prompt="jobs/missing.md"
             ),
-            "mcp_config is missing": lambda m: m.update(mcp_config="nope.json"),
+            "job .*schedule": lambda m: m["jobs"]["nightly"].update(schedule=""),
         }
         for pattern, change in cases.items():
             with self.subTest(pattern=pattern):
@@ -187,9 +203,6 @@ class SpecialtyTests(unittest.TestCase):
 
     def test_rejects_deeply_nested_json(self):
         nested = "[" * 20000 + "]" * 20000
-        (self.pack / "mcp.json").write_text(nested)
-        with self.assertRaisesRegex(ValueError, "mcp_config is not valid json"):
-            specialty.load(self.root)
         (self.pack / "specialty.json").write_text(nested)
         with self.assertRaisesRegex(ValueError, "specialty.json is not valid json"):
             specialty.load(self.root)
@@ -210,10 +223,6 @@ class SpecialtyTests(unittest.TestCase):
             specialty.load(self.root)
         (self.pack / "specialty.json").write_text('{"name": "a", "name": "b"}')
         with self.assertRaisesRegex(ValueError, "duplicate json key"):
-            specialty.load(self.root)
-        self.write()
-        (self.pack / "mcp.json").write_text("[]")
-        with self.assertRaisesRegex(ValueError, "json object"):
             specialty.load(self.root)
 
     def test_check_secrets_and_repos(self):

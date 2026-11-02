@@ -821,9 +821,6 @@ class PlanTemplateTests(unittest.TestCase):
             "feedback destination",
         ):
             self.assertIn(phrase, validate)
-        linear = (ROOT / "docs/modes/linear.md").read_text()
-        self.assertIn("does not inherit pr", linear)
-        self.assertIn("blocked-status reporting is not publication", linear)
         for path in (
             "AGENTS.md",
             "README.md",

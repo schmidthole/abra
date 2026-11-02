@@ -25,7 +25,6 @@ TOP_KEYS = {
     "repos",
     "secrets",
     "egress",
-    "mcp_config",
     "jobs",
     "delivery",
 }
@@ -204,11 +203,6 @@ def load(root):
         prompt = inside(directory, job["prompt"], field + " prompt")
         bounded(prompt, field + " prompt")
         text(job["schedule"], field + " schedule", empty=False)
-    mcp_config = manifest.get("mcp_config")
-    if mcp_config is not None:
-        path = inside(directory, mcp_config, "mcp_config")
-        if not isinstance(read_json(path, "mcp_config"), dict):
-            raise ValueError("mcp_config must contain a json object")
     templates = directory / "templates"
     if templates.exists() or templates.is_symlink():
         if not inside(directory, "templates", "templates").is_dir():
@@ -224,7 +218,6 @@ def load(root):
         repos=repos(manifest["repos"]),
         secrets=strings(manifest.get("secrets", []), "secrets", ENV_NAME),
         egress=strings(manifest.get("egress", []), "egress", HOST),
-        mcp_config=mcp_config,
         jobs=jobs,
         delivery=delivery,
     )

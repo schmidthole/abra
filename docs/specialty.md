@@ -21,14 +21,14 @@ specialty/
   specialty.json      required: machine-read manifest
   templates/          optional: briefs looked up before base templates/
     worker.md
-  jobs/               optional: prompts for scheduled jobs
+  jobs/               optional: prompt files referenced by job metadata
     nightly.md
-  mcp.json            optional: mcp config referenced by mcp_config
 ```
 
 ## specialty.json
 
 unknown keys are rejected at every level, and duplicate json keys are refused.
+the former `mcp_config` key is no longer supported; remove it from existing packs.
 
 | field | required | meaning |
 | --- | --- | --- |
@@ -37,7 +37,6 @@ unknown keys are rejected at every level, and duplicate json keys are refused.
 | `repos` | yes | non-empty map of repo name to entry, same shape as `data/repos.json` entries. |
 | `secrets` | no | list of required environment variable names (never values). |
 | `egress` | no | list of lowercase hostnames the deployment should allow. informational only. |
-| `mcp_config` | no | relative path inside the pack to an mcp config json object. |
 | `jobs` | no | map of job name (slug) to `{"prompt": "<relative path>", "schedule": "<cron>"}`. |
 | `delivery` | no | delivery ceiling: `report`, `local-commit`, `draft-pr`, or `pr`. default `draft-pr`. |
 
@@ -52,10 +51,11 @@ repo entries:
 | `description` | no | string; default empty. |
 
 repo names and aliases are slugs and must be unambiguous across the whole map.
-`jobs.<name>.schedule` is informational for whatever runner schedules jobs; abra does
-not run a scheduler. merging is never granted by a specialty.
+`jobs` remains validated metadata only: prompt files must exist and schedules must
+be non-empty strings, but abra provides no scheduler or job executor. merging is
+never granted by a specialty.
 
-all relative paths (`mcp_config`, job prompts, every entry in the `templates/` tree)
+all relative paths (job prompts, every entry in the `templates/` tree)
 must resolve inside the pack: absolute paths, `..`, symlinks that escape, and broken
 or looping symlinks are refused. `specialty.json` is limited to 64 KiB, every other
 checked file to 256 KiB, and `templates/` to 1000 entries. json that is invalid or
@@ -125,7 +125,6 @@ a generic pack for illustration only; do not commit real packs to this repo.
   },
   "secrets": ["EXAMPLE_API_TOKEN"],
   "egress": ["example.com", "api.example.com"],
-  "mcp_config": "mcp.json",
   "jobs": {
     "weekly-review": {"prompt": "jobs/weekly-review.md", "schedule": "0 9 * * 1"}
   },
