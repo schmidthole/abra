@@ -441,7 +441,7 @@ def validate(value):
     require(type(selections) is list and bool(selections), "recipe selection required")
     selection_ids, attempt_ids, assignments = set(), set(), {}
     terminal_decisions, assignment_stages = set(), {}
-    for selection in selections:
+    for selection_index, selection in enumerate(selections):
         fields(
             selection,
             ("id", "recipe", "version", "rationale", "decision", "stages"),
@@ -462,7 +462,11 @@ def validate(value):
             "unsupported recipe version",
         )
         require(checkpoint.text(selection["rationale"]), "selection rationale required")
-        decision_ref(selection["decision"], decisions, ("operator",))
+        # initial routing is not authority to change scope or branch later.
+        selection_kinds = (
+            ("operator", "coordinator") if selection_index == 0 else ("operator",)
+        )
+        decision_ref(selection["decision"], decisions, selection_kinds)
         require(type(selection["stages"]) is list, "invalid stages")
         stages = selection["stages"]
         require(

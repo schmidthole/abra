@@ -4,11 +4,16 @@ one coordinator owns `data/<task-id>/workflow.json` in abra's root, outside proj
 worktrees. tasks-axi still owns the task lifecycle, holds and completion; link the
 manifest's absolute path in the existing task body. the helper never calls tasks-axi,
 launches agents, polls native state, or performs delivery. small direct answers need
-no workflow. for delegated tasks, the operator selects a predefined recipe; the
-coordinator may recommend, not silently choose or branch. save the full original
-request, acceptance criteria, authority, constraints and requested delivery in a
-brief under `data/<task-id>/` before initialization. reference the operator's actual
-selection/authority, not an invented approval.
+no workflow. for a clear initial delegated request, the coordinator selects the
+smallest suitable fixed versioned recipe, records the choice and rationale, and
+proceeds without asking the operator to choose a workflow. explicit operator
+selections prevail; ask only when intent, scope, acceptance or authority is
+materially ambiguous. save the full original request, acceptance criteria,
+authority, constraints and requested delivery in a brief under `data/<task-id>/`
+before initialization. reference the actual operator request/authority separately
+from the recipe decision; never invent approval. recipe selection does not grant
+publication, merge, production or other external-action authority. separate action
+authority and delivery ceilings still apply.
 
 ## fixed version 1 recipes
 
@@ -18,6 +23,13 @@ selection/authority, not an invented approval.
 | `investigate` | `triage`, `review`, `report` | coordinator reviews findings, then delivers the requested investigation report |
 | `research` | `scout`, `report` | delivers the requested research report |
 | `plan` | `refine`, `ground`, `validate`, `deliver` | report-only product direction and outcome-oriented slices; not product approval |
+
+choose `implement` for clear code-change requests, `investigate` for unclear
+reported behavior needing identification or reproduction, `research` for information
+gathering, and `plan` for product direction/specification. use a direct answer for
+small questions; do not add stages or ask a workflow-choice question for a clear
+request. this autonomous choice applies to initial selection only: later recipe
+changes require explicit operator approval, not automatic branching.
 
 [planning](planning.md) defines its three portable briefs, plan-only package identity
 fields, feedback/repair budget and exact report delivery protocol. refine/ground/validate
@@ -93,8 +105,11 @@ nested objects have exactly these fields:
   even at the same candidate. preserve prior saved briefs; do not edit them in
   place. the helper validates syntax/linkage, not the hash's asserted meaning.
 - selection: `id`, `recipe`, `version` (integer `1`), `rationale`, `decision`
-  (operator decision id), `stages`. changing recipe requires appending a selection
-  and a new operator decision; never rewrite the selected recipe in place.
+  (operator or coordinator decision id for the initial selection; operator decision
+  id for every later selection), `stages`. a coordinator selection decision records
+  suitability, not operator approval or action authority. brief decisions remain
+  operator-only. changing recipe requires appending a selection and a new operator
+  decision; never rewrite the selected recipe in place.
 - stage: `id`, `attempts`. stages exactly match the fixed recipe in order. no
   separate stage status: the coordinator's attempt outcomes determine progress.
 - attempt (existing recipes; plan adds `package` and `result_package` as defined in
@@ -202,14 +217,17 @@ this initial example assumes the full brief already exists at the supplied path:
   "version": 1,
   "task_id": "example",
   "updated_at": "2026-06-01T12:00:00Z",
-  "briefs": [{"reference": "/srv/abra/data/example/brief.md", "acceptance_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "requested_delivery": "local-commit", "decision": "select"}],
+  "briefs": [{"reference": "/srv/abra/data/example/brief.md", "acceptance_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "requested_delivery": "local-commit", "decision": "request"}],
   "selections": [{
     "id": "selection-01", "recipe": "implement", "version": 1,
-    "rationale": "operator requested a bounded implementation",
+    "rationale": "clear code-change request needs worker and independent exact-candidate verification",
     "decision": "select",
     "stages": [{"id": "worker", "attempts": []}, {"id": "verify", "attempts": []}, {"id": "deliver", "attempts": []}]
   }],
-  "decisions": [{"id": "select", "kind": "operator", "summary": "operator selected implement; authorized local verified commit only", "evidence": ["/srv/abra/data/example/brief.md"]}],
+  "decisions": [
+    {"id": "request", "kind": "operator", "summary": "operator requested a code change; authorized local verified commit only", "evidence": ["/srv/abra/data/example/brief.md"]},
+    {"id": "select", "kind": "coordinator", "summary": "selected implement v1 as the smallest suitable recipe; no additional action authority", "evidence": ["/srv/abra/data/example/brief.md"]}
+  ],
   "status": "active",
   "current_stage": "worker",
   "checkpoint": "saved full request, acceptance, authority and recipe selection",
