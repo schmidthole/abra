@@ -406,3 +406,135 @@ switch as eligible. ask for a separately authorized task instead of rewriting
 history. operator recipe selections remain possible otherwise, but cumulative
 implementation failures and planning validation/blocked budgets across v2 selections
 cannot be reset by a detour, acceptance change or replacement.
+
+## typed coordinator operations
+
+`init`, `read`, full-proposal `update` and full `show` remain supported. routine
+operations accept a small exact-key json object, bounded to 1 mib, duplicate-free
+at every depth, with no non-finite numbers. use the supplied task identity and the
+last observed revision:
+
+```sh
+python3 /absolute/abra/bin/workflow.py reserve /absolute/data/example/workflow.json \
+  --task-id example --revision "$last_read_revision" --request -
+```
+
+all typed commands use `--request -` (stdin preferred) or an already authorized
+absolute regular file. they copy validated current state, build a complete proposal,
+run the same full validator/transition rules, then use `write_workflow` with its
+existing identity, two revision checks, exclusive staging and atomic replacement.
+v1 stays v1; v2 stays v2. ids are deterministically the first unoccupied
+`<stage>-<n>` / `coordinator-<n>` across saved history. assignment ids/paths remain
+caller-supplied; collisions reject. output is the usual workflow/revision envelope.
+no arbitrary patch, force, approval inference, dispatch, git, tasks-axi or retry.
+
+### reserve / reserve-delivery
+
+`reserve` handles agent/coordinator review stages; `reserve-delivery` handles
+`deliver`/`report`. both require exactly:
+
+```json
+{
+  "stage": "worker",
+  "intent": "authorized local implementation; reconcile native ownership and actual artifacts before repeating",
+  "assignment": {
+    "assignment": "worker-01",
+    "predecessor": null,
+    "tracker": "/absolute/data/example/agents/worker-01.json",
+    "brief": "/absolute/data/example/worker-01.md",
+    "working_directory": "/absolute/worker-tree"
+  },
+  "candidate_commit": null,
+  "package": null,
+  "checkpoint": "full request and authority saved; no launch yet",
+  "next_action": "launch the reserved assignment"
+}
+```
+
+stage role, attempt id/order, active status, current acceptance, dispatch intent and
+empty outcome fields are mechanical; no role is inferred from a checkpoint.
+coordinator stages require `assignment: null`. supply the exact candidate for
+verify/implement deliver; plan uses null candidate and its complete package object
+(or null for initial refine). non-plan `package` is null. replacements require
+explicitly reconciled stopped predecessors, never takeover based on status.
+
+for delivery, the caller's `intent` must name the currently authorized target,
+candidate/package, delivery ceiling and actual lookup/reconciliation needed before
+retrying publication. reservation records an intention, not an observed action or
+permission. paused workflow state remains paused; full update handles unusual
+reconciled edits and explicit unblocking.
+
+### confirm-dispatch
+
+requires exactly `attempt`, `assignment`, `summary`, `evidence`, `checkpoint`,
+`next_action`. example:
+
+```json
+{"attempt":"worker-1","assignment":"worker-01","summary":"observed native launch receipt, not stage approval","evidence":["/absolute/data/example/launch-receipt.md"],"checkpoint":"launch confirmed","next_action":"wait for actual result"}
+```
+
+only an unresolved dispatch on an unfinished attempt may be confirmed. nonempty
+observed evidence and an explicit caller summary are persisted in a new coordinator
+decision; repeat confirmation rejects. no native calls or run-id fabrication.
+
+### decide / record-delivery
+
+`decide` requires exactly these fields; the helper derives the linked coordinator
+decision id and replayed current stage, never the verdict:
+
+```json
+{
+  "attempt": "verify-1",
+  "status": "passed",
+  "verdict": "pass",
+  "report": "/absolute/data/example/verify-report.md",
+  "candidate_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "result_package": null,
+  "outcome": "independent exact-candidate review and all required checks passed",
+  "evidence": ["/absolute/data/example/verify-report.md"],
+  "summary": "coordinator reviewed actual evidence and accepts this stage",
+  "checkpoint": "verification evidence reviewed",
+  "next_action": "reserve authorized delivery",
+  "blocker": null,
+  "workflow_status": "active"
+}
+```
+
+`status` is explicitly `passed` or `failed`. only verify uses `pass`/`fail` verdict;
+plan validate uses `ready`/`needs revision`/`blocked`; all other verdicts are null.
+non-plan result packages are null. plan keeps exact input/result/document/evidence
+constraints. candidate mutation, wrong stage/role, absent report/evidence, unresolved
+dispatch, terminal edits and exhausted repairs reject identically to full update.
+`workflow_status`/next action/blocker are explicit caller assertions; a checkpoint
+saying completed is never a stage pass. use full update for a blocked nonterminal
+attempt, not a manufactured terminal decision.
+
+`record-delivery` is the same exact schema **plus** `delivery_refs`, an array of
+new observed references to append (not already recorded). it handles only
+`deliver`/`report`. include actual receipt and fresh required-check evidence in
+`evidence`, not planned results. explicitly choose `workflow_status: "completed"`
+and `next_action: null` only when all requested delivery conditions hold. existing
+receipts remain history and must also be supported by the final evidence. failed
+or pending publication does not become success through code-review reuse.
+
+### recovery and read-only compact show
+
+an operation may publish before interruption/output failure. reread and reconcile
+native ownership and actual artifacts; do not blindly repeat `reserve`, confirmation
+or publication with a refreshed revision. stale tokens preserve bytes. helpers do
+not lock, guarantee exactly-once actions or prove stopped owners, truthful evidence,
+semantic equivalence, authority or power-loss durability.
+
+`workflow.py show PATH --task-id TASK --compact` observes the current selection,
+coordinator stage/status/checkpoint/next action/blocker, current/original request
+links, latest attempt's coordinator decision/verdict and latest assignment's separate
+agent status/progress (including the last agent during coordinator delivery), review
+coverage/reuse decision and all reference/checkpoint issues. full `show` is unchanged.
+no task writes or cached combined database. it does not inspect tasks-axi, native
+liveness, git/remote/pr/ci state, report truth or contract bytes; publication readiness
+is always explicitly unchecked. completed agents with failed coordinator verdicts
+remain visibly different. missing/malformed/foreign checkpoints and unresolved
+intents are observations requiring reconciliation, not authorization to repeat.
+use the full records/briefs and actual evidence for recovery even if compact looks
+complete. tasks-axi still owns lifecycle; the manifest owns coordinator decisions;
+agent checkpoints alone own detailed agent progress.

@@ -2,6 +2,7 @@
 """persist coordinator-selected workflows; never launch agents or mutate tasks-axi."""
 
 import argparse
+import copy
 from datetime import datetime, timezone
 import json
 import os
@@ -186,6 +187,7 @@ def plan_progress(selection, acceptance, validations=0, stopped=False):
     """replay report planning separately from implementation commit verification."""
     expected, current, approval, approval_acceptance = "refine", None, None, None
     refined_acceptance = None
+    inherited_stop = stopped
     entries = ordered(selection)
     for index, (stage, attempt) in enumerate(entries):
         require(not stopped, "blocked planning verdict needs operator intervention")
@@ -291,7 +293,7 @@ def plan_progress(selection, acceptance, validations=0, stopped=False):
             approval, approval_acceptance = result, attempt["acceptance_revision"]
         stages = RECIPES["plan"]
         expected = stages[stages.index(stage) + 1] if stage != "deliver" else None
-    if validations >= 3 and approval is None:
+    if inherited_stop or (validations >= 3 and approval is None):
         return None
     if entries and entries[-1][1]["acceptance_revision"] != acceptance:
         return "refine" if validations < 3 else None
@@ -395,6 +397,8 @@ def progress(selection, acceptance, context=None):
         and delivery_revision != acceptance
     ):
         return "deliver"
+    if name == "implement" and failures >= 3:
+        return None
     if name != "implement" and expected is None and report_revision != acceptance:
         return "report"
     return expected
@@ -408,7 +412,7 @@ def prior_budget(context, selection, recipe):
         return 0, False
     count, stopped = 0, False
     for prior in context["selections"]:
-        if prior is selection:
+        if prior["id"] == selection["id"]:
             break
         if prior["recipe"] == recipe:
             for stage, attempt in ordered(prior):
@@ -1013,6 +1017,17 @@ def validate(value):
             "attempt order must be contiguous",
         )
         progress(selection, acceptance, value)
+    if version == 2:
+        brief = value["briefs"][-1]
+        require(
+            (brief["implementation_identity"] is not None)
+            == (selections[-1]["recipe"] == "implement"),
+            "current contract identity does not match recipe",
+        )
+        require(
+            selections[-1]["recipe"] != "plan" or brief["report_identity"] is None,
+            "plan uses exact package identities, not report method identity",
+        )
     if selections[-1]["recipe"] == "plan":
         require(
             current_delivery(value) == "report", "plan supports report delivery only"
@@ -1392,6 +1407,224 @@ def write_workflow(path, task_id, proposed, last_revision=None, initialize=False
     return {"workflow": value, "revision": revision(raw)}
 
 
+RESERVE_FIELDS = {
+    "stage",
+    "intent",
+    "assignment",
+    "candidate_commit",
+    "package",
+    "checkpoint",
+    "next_action",
+}
+DECIDE_FIELDS = {
+    "attempt",
+    "status",
+    "verdict",
+    "report",
+    "candidate_commit",
+    "result_package",
+    "outcome",
+    "evidence",
+    "summary",
+    "checkpoint",
+    "next_action",
+    "blocker",
+    "workflow_status",
+}
+TYPED_COMMANDS = (
+    "reserve",
+    "confirm-dispatch",
+    "decide",
+    "reserve-delivery",
+    "record-delivery",
+)
+
+
+def next_id(prefix_name, occupied):
+    number = 1
+    while prefix_name + "-" + str(number) in occupied:
+        number += 1
+    return prefix_name + "-" + str(number)
+
+
+def append_decision(value, kind, summary, evidence):
+    identifier = next_id(kind, {d["id"] for d in value["decisions"]})
+    value["decisions"].append(
+        dict(id=identifier, kind=kind, summary=summary, evidence=evidence)
+    )
+    return identifier
+
+
+def build_operation(old, command, request):
+    """construct assertions only; validation and transition are the common boundary."""
+    validate(old)
+    require(command in TYPED_COMMANDS, "unknown typed operation")
+    value = copy.deepcopy(old)
+    selection = value["selections"][-1]
+    entries = ordered(selection)
+    if command in ("reserve", "reserve-delivery"):
+        fields(request, RESERVE_FIELDS, "reservation request")
+        stage = request["stage"]
+        require(
+            type(stage) is str and stage in RECIPES[selection["recipe"]],
+            "stage does not match recipe",
+        )
+        require(
+            (stage in ("deliver", "report")) == (command == "reserve-delivery"),
+            "use the delivery reservation operation for deliver or report",
+        )
+        links = []
+        if stage in AGENT_STAGES:
+            assignment = request["assignment"]
+            fields(
+                assignment,
+                LINK_FIELDS - {"role", "dispatch", "reconciliation"},
+                "reservation assignment",
+            )
+            links = [
+                dict(
+                    assignment,
+                    role=STAGE_ROLES[stage],
+                    dispatch="intent",
+                    reconciliation=None,
+                )
+            ]
+        else:
+            require(
+                request["assignment"] is None, "coordinator stage has no assignment"
+            )
+        occupied = {a["id"] for s in value["selections"] for _, a in ordered(s)}
+        attempt = dict(
+            id=next_id(stage, occupied),
+            order=len(entries) + 1,
+            status="active",
+            intent=request["intent"],
+            assignments=links,
+            acceptance_revision=current_acceptance(value),
+            candidate_commit=request["candidate_commit"],
+            verdict=None,
+            report=None,
+            outcome=None,
+            evidence=[],
+            decision=None,
+        )
+        if selection["recipe"] == "plan":
+            attempt.update(package=request["package"], result_package=None)
+        else:
+            require(request["package"] is None, "package belongs only to plan")
+        next(s for s in selection["stages"] if s["id"] == stage)["attempts"].append(
+            attempt
+        )
+        value.update(
+            checkpoint=request["checkpoint"], next_action=request["next_action"]
+        )
+    else:
+        expected = (
+            {
+                "attempt",
+                "assignment",
+                "summary",
+                "evidence",
+                "checkpoint",
+                "next_action",
+            }
+            if command == "confirm-dispatch"
+            else DECIDE_FIELDS
+        )
+        if command == "record-delivery":
+            expected = expected | {"delivery_refs"}
+        fields(request, expected, "typed outcome request")
+        require(checkpoint.text(request["attempt"]), "attempt id required")
+        found = [(s, a) for s, a in entries if a["id"] == request["attempt"]]
+        require(len(found) == 1, "attempt not in current selection")
+        stage, attempt = found[0]
+        require(
+            attempt["status"] in ("active", "blocked"),
+            "terminal attempts are immutable",
+        )
+        references(request["evidence"])
+        require(bool(request["evidence"]), "observed evidence required")
+        if command == "confirm-dispatch":
+            links = [
+                l
+                for l in attempt["assignments"]
+                if l["assignment"] == request["assignment"]
+            ]
+            require(len(links) == 1, "assignment not in attempt")
+            require(
+                links[0]["dispatch"] == "intent" and links[0]["reconciliation"] is None,
+                "dispatch is already confirmed or reconciled",
+            )
+            links[0]["dispatch"] = "confirmed"
+            append_decision(
+                value, "coordinator", request["summary"], request["evidence"]
+            )
+        else:
+            require(
+                (stage in ("deliver", "report")) == (command == "record-delivery"),
+                "delivery outcome requires record-delivery",
+            )
+            require(
+                request["status"] in ("passed", "failed"),
+                "explicit terminal stage status required",
+            )
+            require(
+                request["workflow_status"]
+                in ("active", "paused", "blocked", "completed"),
+                "invalid workflow status",
+            )
+            require(
+                command == "record-delivery"
+                or request["workflow_status"] != "completed",
+                "only delivery can complete workflow",
+            )
+            identifier = append_decision(
+                value, "coordinator", request["summary"], request["evidence"]
+            )
+            attempt.update(
+                {
+                    k: request[k]
+                    for k in (
+                        "status",
+                        "verdict",
+                        "report",
+                        "candidate_commit",
+                        "outcome",
+                        "evidence",
+                    )
+                }
+            )
+            attempt["decision"] = identifier
+            if selection["recipe"] == "plan":
+                attempt["result_package"] = request["result_package"]
+            else:
+                require(
+                    request["result_package"] is None, "package belongs only to plan"
+                )
+            value.update(status=request["workflow_status"], blocker=request["blocker"])
+            if command == "record-delivery":
+                references(request["delivery_refs"])
+                require(
+                    not set(value["delivery_refs"]) & set(request["delivery_refs"]),
+                    "delivery reference already recorded",
+                )
+                value["delivery_refs"].extend(request["delivery_refs"])
+        value.update(
+            checkpoint=request["checkpoint"], next_action=request["next_action"]
+        )
+    value["current_stage"] = progress(selection, current_acceptance(value), value)
+    validate(value)
+    transition(old, value)
+    return value
+
+
+def operate_workflow(path, task_id, command, request, last_revision):
+    current = read_workflow(path, task_id)
+    require(current["revision"] == last_revision, "stale workflow revision")
+    proposed = build_operation(current["workflow"], command, request)
+    return write_workflow(path, task_id, proposed, last_revision)
+
+
 def inspect_reference(ref):
     if checkpoint.matches(COMMIT, ref):
         return "commit reference not checked"
@@ -1405,7 +1638,7 @@ def inspect_reference(ref):
         return "missing, unsafe, oversized or unreadable reference"
 
 
-def show(path, task_id):
+def show(path, task_id, compact=False):
     result = read_workflow(path, task_id)
     value, issues, stages = result["workflow"], [], []
     checked_refs = set()
@@ -1419,6 +1652,11 @@ def show(path, task_id):
 
     for brief in value["briefs"]:
         check_ref(brief["reference"])
+        if value["version"] == 2:
+            if brief["implementation_identity"] is not None:
+                check_ref(brief["implementation_identity"]["contract"])
+            if brief["report_identity"] is not None:
+                check_ref(brief["report_identity"]["reference"])
     for decision in value["decisions"]:
         for ref in decision["evidence"]:
             check_ref(ref)
@@ -1444,6 +1682,7 @@ def show(path, task_id):
                     stage["id"] == "verify"
                     and attempt["status"] == "passed"
                     and attempt["acceptance_revision"] != current_acceptance(value)
+                    and not reused(value, attempt["id"], current_acceptance(value))
                 ):
                     issues.append(
                         {
@@ -1520,7 +1759,123 @@ def show(path, task_id):
     result["notice"] = (
         "read-only observations, not liveness, approval, or authorization to repeat actions"
     )
-    return result
+    return compact_observation(result) if compact else result
+
+
+def compact_observation(result):
+    value = result["workflow"]
+    selection = value["selections"][-1]
+    entries = ordered(selection)
+    latest = None
+    latest_assignment = None
+    review = None
+    observations = {
+        a["id"]: a
+        for s in result["stages"]
+        if s["selection"] == selection["id"]
+        for a in s["attempts"]
+    }
+    if entries:
+        stage, attempt = entries[-1]
+        latest = {
+            k: attempt[k]
+            for k in (
+                "id",
+                "verdict",
+                "candidate_commit",
+                "acceptance_revision",
+                "decision",
+                "report",
+            )
+        }
+        latest.update(
+            stage=stage,
+            coordinator_status=attempt["status"],
+            assignments=[
+                compact_assignment(link, observed)
+                for link, observed in zip(
+                    attempt["assignments"], observations[attempt["id"]]["assignments"]
+                )
+            ],
+        )
+        for stage, attempt in reversed(entries):
+            if attempt["assignments"]:
+                latest_assignment = compact_assignment(
+                    attempt["assignments"][-1],
+                    observations[attempt["id"]]["assignments"][-1],
+                )
+                latest_assignment.update(
+                    attempt=attempt["id"],
+                    stage=stage,
+                    coordinator_decision=attempt["decision"],
+                )
+                break
+    if selection["recipe"] == "implement":
+        relevant = [(s, a) for s, a in entries if s in ("worker", "verify")]
+        if (
+            relevant
+            and relevant[-1][0] == "verify"
+            and relevant[-1][1]["status"] == "passed"
+        ):
+            approved = relevant[-1][1]
+            reuse = next(
+                (
+                    r
+                    for r in value.get("implementation_reuses", [])
+                    if r["verify_attempt"] == approved["id"]
+                    and r["acceptance_revision"] == current_acceptance(value)
+                ),
+                None,
+            )
+            review = dict(
+                verify_attempt=approved["id"],
+                candidate_commit=approved["candidate_commit"],
+                covers_current_contract=approved["acceptance_revision"]
+                == current_acceptance(value)
+                or reuse is not None,
+                reuse_decision=None if reuse is None else reuse["decision"],
+            )
+    return dict(
+        task_id=value["task_id"],
+        version=value["version"],
+        revision=result["revision"],
+        selection={k: selection[k] for k in ("id", "recipe", "version")},
+        coordinator={
+            k: value[k]
+            for k in ("status", "current_stage", "checkpoint", "next_action", "blocker")
+        },
+        request={
+            k: value["briefs"][-1][k]
+            for k in (
+                "reference",
+                "acceptance_revision",
+                "requested_delivery",
+                "decision",
+            )
+        },
+        original_request=value["briefs"][0]["reference"],
+        latest_attempt=latest,
+        latest_assignment=latest_assignment,
+        code_review=review,
+        publication_readiness="not checked; fresh authority, head, target and required checks remain necessary",
+        issues=result["issues"],
+        notice=result["notice"],
+    )
+
+
+def compact_assignment(link, observed):
+    agent = observed["checkpoint"]
+    return dict(
+        assignment=link["assignment"],
+        tracker=link["tracker"],
+        brief=link["brief"],
+        dispatch=link["dispatch"],
+        reconciliation=link["reconciliation"],
+        agent_status=None if agent is None else agent["status"],
+        checkpoint=None if agent is None else agent["checkpoint"],
+        next_action=None if agent is None else agent["next_action"],
+        blocker=None if agent is None else agent["blocker"],
+    )
 
 
 def proposal(source):
@@ -1535,7 +1890,7 @@ def proposal(source):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("init", "read", "update", "show"):
+    for command in ("init", "read", "update", "show", *TYPED_COMMANDS):
         sub = commands.add_parser(command)
         sub.add_argument("path", help="absolute data/<task-id>/workflow.json path")
         sub.add_argument("--task-id", required=True)
@@ -1545,7 +1900,19 @@ def main():
                 required=True,
                 help="complete json on stdin (-) or absolute authorized file",
             )
-        if command == "update":
+        if command == "show":
+            sub.add_argument(
+                "--compact",
+                action="store_true",
+                help="current coordinator and latest agent observations, without history payload",
+            )
+        if command in TYPED_COMMANDS:
+            sub.add_argument(
+                "--request",
+                required=True,
+                help="strict operation json on stdin (-) or absolute authorized file",
+            )
+        if command == "update" or command in TYPED_COMMANDS:
             sub.add_argument("--revision", required=True)
     args = parser.parse_args()
     operation, path = args.command, args.path
@@ -1553,7 +1920,14 @@ def main():
         if args.command == "read":
             result = read_workflow(args.path, args.task_id)
         elif args.command == "show":
-            result = show(args.path, args.task_id)
+            result = show(args.path, args.task_id, args.compact)
+        elif args.command in TYPED_COMMANDS:
+            operation, path = "read-request", args.request
+            change = checkpoint.request(args.request)
+            operation, path = args.command, args.path
+            result = operate_workflow(
+                args.path, args.task_id, args.command, change, args.revision
+            )
         else:
             operation, path = "read-proposal", args.proposal
             proposed = proposal(args.proposal)

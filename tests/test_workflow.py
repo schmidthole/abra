@@ -2,6 +2,7 @@
 
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -1170,10 +1171,6 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("workflow", (ROOT / path).read_text())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WorkflowV2Tests(unittest.TestCase):
     selection = WorkflowTests.selection
     save = WorkflowTests.save
@@ -1453,3 +1450,524 @@ class WorkflowV2Tests(unittest.TestCase):
         workflow.validate(value)
         with self.assertRaisesRegex(ValueError, "version is immutable"):
             workflow.transition(self.value, value)
+
+    def test_v2_cumulative_repairs_survive_operator_reselection(self):
+        self.save(True)
+        for n in range(3):
+            self.worker()
+            self.verify(verdict="fail")
+        self.value["decisions"].append(
+            dict(
+                id="select-again",
+                kind="operator",
+                summary="operator reselects implement, not a budget reset",
+                evidence=[str(self.brief)],
+            )
+        )
+        self.value["selections"].append(
+            dict(
+                self.selection("implement", "selection-02", "select-again"),
+                change_authorization=None,
+            )
+        )
+        self.value.update(
+            current_stage=None,
+            status="paused",
+            next_action="operator intervention required",
+        )
+        self.save()
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "repair rounds exhausted"):
+            workflow.operate_workflow(
+                self.path,
+                "example",
+                "reserve",
+                TypedWorkflowTests.reservation(self, assignment="worker-extra"),
+                self.revision,
+            )
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_method_switch_rejects_changed_scope_wrong_recipe_and_auth_backfill(self):
+        self.report_workflow()
+        self.save(True)
+        self.reserve("scout")
+        self.finish()
+        self.reconcile(self.last()["assignments"][0])
+        self.save()
+        base = copy.deepcopy(self.value)
+        self.switch("plan")
+        with self.assertRaisesRegex(ValueError, "report-only|plan uses exact"):
+            self.save()
+        self.value = copy.deepcopy(base)
+        self.switch()
+        self.value["briefs"].append(
+            dict(
+                self.value["briefs"][0],
+                acceptance_revision="e" * 64,
+                decision="changed",
+            )
+        )
+        self.value["decisions"].append(
+            dict(
+                id="changed",
+                kind="operator",
+                summary="new diagnostic permission or changed question/checks/delivery",
+                evidence=[str(self.brief)],
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "unchanged full report contract"):
+            self.save()
+        self.value = copy.deepcopy(base)
+        self.value["method_authorization"] = None
+        with self.assertRaisesRegex(ValueError, "fixed at initialization"):
+            self.save()
+
+    def test_reuse_cannot_approve_different_candidate_or_mutate_history(self):
+        self.save(True)
+        self.worker()
+        self.verify()
+        self.revised()
+        self.save()
+        self.reuse()
+        self.save()
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "candidate must match"):
+            self.reserve("deliver", "c" * 40)
+        self.assertEqual(before, self.path.read_bytes())
+        self.value = workflow.read_workflow(self.path, "example")["workflow"]
+        self.value["implementation_reuses"][0]["decision"] = "select"
+        with self.assertRaisesRegex(ValueError, "inappropriate coordinator decision"):
+            self.save()
+
+
+class TypedWorkflowTests(unittest.TestCase):
+    setUp = WorkflowTests.setUp
+    selection = WorkflowTests.selection
+    save = WorkflowTests.save
+    stage = WorkflowTests.stage
+    last = WorkflowTests.last
+    worker = WorkflowTests.worker
+    verify = WorkflowTests.verify
+    reserve = WorkflowTests.reserve
+    finish = WorkflowTests.finish
+    reconcile = WorkflowTests.reconcile
+    cli = WorkflowTests.cli
+
+    def reservation(self, stage="worker", assignment="worker-01", candidate=None):
+        link = (
+            dict(
+                assignment=assignment,
+                predecessor=None,
+                tracker=str(self.path.parent / "agents" / f"{assignment}.json"),
+                brief=str(self.brief),
+                working_directory=str(self.root),
+            )
+            if stage in workflow.AGENT_STAGES
+            else None
+        )
+        return dict(
+            stage=stage,
+            intent="authorized local action; inspect actual ownership and receipts before repeating",
+            assignment=link,
+            candidate_commit=candidate,
+            package=None,
+            checkpoint="request and authority saved",
+            next_action="perform reserved action",
+        )
+
+    def confirmation(self):
+        return dict(
+            attempt=self.last()["id"],
+            assignment=self.last()["assignments"][-1]["assignment"],
+            summary="observed native launch receipt; not a stage pass",
+            evidence=[str(self.report)],
+            checkpoint="launch observed",
+            next_action="collect result",
+        )
+
+    def decision(self, stage="worker"):
+        return dict(
+            attempt=self.last()["id"],
+            status="passed",
+            verdict="pass" if stage == "verify" else None,
+            report=str(self.report) if stage == "verify" else None,
+            candidate_commit="b" * 40,
+            result_package=None,
+            outcome="reviewed actual report and required checks",
+            evidence=[str(self.report)],
+            summary="explicit coordinator approval",
+            checkpoint="confirmed bounded stage result",
+            next_action="reserve next stage",
+            blocker=None,
+            workflow_status="active",
+        )
+
+    def operate(self, command, request):
+        result = workflow.operate_workflow(
+            self.path, "example", command, request, self.revision
+        )
+        self.value, self.revision = result["workflow"], result["revision"]
+        return result
+
+    def test_reservation_equals_manual_proposal_and_reduces_input(self):
+        self.save(True)
+        request = self.reservation()
+        before = copy.deepcopy(self.value)
+        built = workflow.build_operation(before, "reserve", request)
+        manual = copy.deepcopy(before)
+        manual["selections"][0]["stages"][0]["attempts"].append(
+            dict(
+                id="worker-1",
+                order=1,
+                status="active",
+                intent=request["intent"],
+                assignments=[
+                    dict(
+                        request["assignment"],
+                        role="worker",
+                        dispatch="intent",
+                        reconciliation=None,
+                    )
+                ],
+                acceptance_revision="a" * 64,
+                candidate_commit=None,
+                verdict=None,
+                report=None,
+                outcome=None,
+                evidence=[],
+                decision=None,
+            )
+        )
+        manual.update(
+            checkpoint=request["checkpoint"], next_action=request["next_action"]
+        )
+        self.assertEqual(built, manual)
+        self.assertEqual(before, self.value)
+        self.assertLess(len(json.dumps(request)), len(json.dumps(manual)))
+        self.operate("reserve", request)
+        confirmation = self.confirmation()
+        manual = copy.deepcopy(self.value)
+        manual["selections"][0]["stages"][0]["attempts"][0]["assignments"][0][
+            "dispatch"
+        ] = "confirmed"
+        manual["decisions"].append(
+            dict(
+                id="coordinator-1",
+                kind="coordinator",
+                summary=confirmation["summary"],
+                evidence=confirmation["evidence"],
+            )
+        )
+        manual.update(
+            checkpoint=confirmation["checkpoint"],
+            next_action=confirmation["next_action"],
+        )
+        self.assertEqual(
+            workflow.build_operation(self.value, "confirm-dispatch", confirmation),
+            manual,
+        )
+        self.operate("confirm-dispatch", confirmation)
+        self.operate("decide", self.decision())
+        self.assertEqual(self.value["current_stage"], "verify")
+        self.assertEqual(self.last()["decision"], "coordinator-2")
+
+    def test_typed_delivery_keeps_intent_separate_and_requires_explicit_completion(
+        self,
+    ):
+        self.save(True)
+        for stage in ("worker", "verify"):
+            self.operate(
+                "reserve",
+                self.reservation(
+                    stage, stage + "-01", None if stage == "worker" else "b" * 40
+                ),
+            )
+            self.operate("confirm-dispatch", self.confirmation())
+            self.operate("decide", self.decision(stage))
+        self.operate(
+            "reserve-delivery", self.reservation("deliver", candidate="b" * 40)
+        )
+        self.assertIsNone(self.last()["outcome"])
+        request = dict(
+            self.decision("deliver"),
+            delivery_refs=["b" * 40],
+            workflow_status="completed",
+            next_action=None,
+            evidence=["b" * 40, str(self.report)],
+        )
+        bad = dict(request, evidence=[str(self.report)])
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "confirmed evidence"):
+            self.operate("record-delivery", bad)
+        self.assertEqual(before, self.path.read_bytes())
+        self.operate("record-delivery", request)
+        self.assertEqual(self.value["status"], "completed")
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            self.operate("record-delivery", request)
+
+    def test_wrong_role_stage_missing_decision_and_replacement_reject(self):
+        self.save(True)
+        before = self.path.read_bytes()
+        for request in [
+            dict(self.reservation(), stage="scout"),
+            dict(
+                self.reservation(),
+                assignment=dict(self.reservation()["assignment"], role="scout"),
+            ),
+        ]:
+            with self.assertRaises(ValueError):
+                self.operate("reserve", request)
+            self.assertEqual(before, self.path.read_bytes())
+        self.operate("reserve", self.reservation())
+        with self.assertRaisesRegex(
+            ValueError, "reserve one|unresolved attempt|recipe order"
+        ):
+            self.operate("reserve", self.reservation(assignment="worker-02"))
+        self.operate("confirm-dispatch", self.confirmation())
+        with self.assertRaisesRegex(ValueError, "already confirmed"):
+            self.operate("confirm-dispatch", self.confirmation())
+        for field, bad in [("summary", ""), ("evidence", []), ("verdict", "pass")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.operate("decide", dict(self.decision(), **{field: bad}))
+        self.operate("decide", self.decision())
+        replacement = self.reservation(assignment="worker-02")
+        replacement["assignment"]["predecessor"] = "worker-01"
+        with self.assertRaisesRegex(ValueError, "predecessor ownership unresolved"):
+            self.operate("reserve", replacement)
+        self.reconcile(self.last()["assignments"][0])
+        self.save()
+        self.operate("reserve", replacement)
+        self.assertEqual(self.last()["assignments"][0]["predecessor"], "worker-01")
+
+    def test_stale_foreign_and_publication_failure_preserve_bytes(self):
+        self.save(True)
+        request = self.reservation()
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "stale"):
+            workflow.operate_workflow(
+                self.path, "example", "reserve", request, "0" * 64
+            )
+        with self.assertRaisesRegex(ValueError, "identity|task-local"):
+            workflow.operate_workflow(
+                self.path, "foreign", "reserve", request, self.revision
+            )
+        for error in (OSError("write failed"), KeyboardInterrupt()):
+            with patch.object(
+                workflow.os, "replace", side_effect=error
+            ), self.assertRaises(type(error)):
+                self.operate("reserve", request)
+            self.assertEqual(before, self.path.read_bytes())
+            self.assertEqual(list(self.path.parent.glob("*.tmp-*")), [])
+        real_replace = workflow.os.replace
+
+        def published_then_failed(*args, **kwargs):
+            real_replace(*args, **kwargs)
+            raise OSError("publication succeeded but acknowledgement failed")
+
+        with patch.object(
+            workflow.os, "replace", side_effect=published_then_failed
+        ), self.assertRaises(OSError):
+            self.operate("reserve", request)
+        result = workflow.read_workflow(self.path, "example")
+        self.assertEqual(
+            result["workflow"]["selections"][0]["stages"][0]["attempts"][0]["id"],
+            "worker-1",
+        )
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.operate("reserve", request)
+        self.assertEqual(list(self.path.parent.glob("*.tmp-*")), [])
+
+    def test_typed_cli_strict_bounded_duplicate_free_requests(self):
+        self.save(True)
+        request = self.reservation()
+        raw = json.dumps(request).encode()
+        for invalid in [
+            raw.replace(b'"stage": "worker"', b'"stage": "worker", "stage": "worker"'),
+            json.dumps(dict(request, unknown=True)).encode(),
+            b"NaN",
+            b"[]",
+            b" " * (workflow.MAX_BYTES + 1),
+        ]:
+            result = self.cli(
+                "reserve", "--request", "-", "--revision", self.revision, raw=invalid
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(
+                workflow.read_workflow(self.path, "example")["revision"], self.revision
+            )
+        result = self.cli(
+            "reserve", "--request", "-", "--revision", self.revision, raw=raw
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        envelope = json.loads(result.stdout)
+        self.assertEqual(envelope["workflow"]["current_stage"], "worker")
+
+    def test_typed_ops_preserve_paused_and_block_repair_budget_escape(self):
+        self.value.update(status="paused")
+        self.save(True)
+        self.operate("reserve", self.reservation())
+        self.assertEqual(self.value["status"], "paused")
+        self.operate("confirm-dispatch", self.confirmation())
+        self.operate("decide", self.decision())
+        for n in range(3):
+            self.operate(
+                "reserve", self.reservation("verify", f"verify-{n}", candidate="b" * 40)
+            )
+            self.operate("confirm-dispatch", self.confirmation())
+            self.operate(
+                "decide",
+                dict(
+                    self.decision("verify"),
+                    status="failed",
+                    verdict="fail",
+                    workflow_status="paused",
+                ),
+            )
+            if n < 2:
+                self.operate(
+                    "reserve", self.reservation(assignment=f"worker-repair-{n}")
+                )
+                self.operate("confirm-dispatch", self.confirmation())
+                self.operate("decide", self.decision())
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "repair rounds exhausted"):
+            self.operate("reserve", self.reservation(assignment="worker-extra"))
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_post_publication_output_failure_requires_read_not_repeat(self):
+        self.save(True)
+        request_path = self.root / "request.json"
+        request_path.write_text(json.dumps(self.reservation()))
+        args = [
+            str(HELPER),
+            "reserve",
+            str(self.path),
+            "--task-id",
+            "example",
+            "--request",
+            str(request_path),
+            "--revision",
+            self.revision,
+        ]
+        real_print = print
+
+        def fail_stdout(*args, **kwargs):
+            if kwargs.get("file") is not sys.stderr:
+                raise OSError("stdout failed after publication")
+            return real_print(*args, **kwargs)
+
+        with patch.object(sys, "argv", args), patch.object(
+            sys, "stderr", io.StringIO()
+        ) as errors, patch("builtins.print", side_effect=fail_stdout):
+            self.assertEqual(workflow.main(), 1)
+            self.assertEqual(json.loads(errors.getvalue())["operation"], "reserve")
+        current = workflow.read_workflow(self.path, "example")
+        self.assertNotEqual(current["revision"], self.revision)
+        self.assertEqual(
+            current["workflow"]["selections"][0]["stages"][0]["attempts"][0]["id"],
+            "worker-1",
+        )
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.operate("reserve", self.reservation())
+
+
+class CompactWorkflowTests(unittest.TestCase):
+    setUp = WorkflowTests.setUp
+    selection = WorkflowTests.selection
+    save = WorkflowTests.save
+    stage = WorkflowTests.stage
+    last = WorkflowTests.last
+    reserve = WorkflowTests.reserve
+    finish = WorkflowTests.finish
+    worker = WorkflowTests.worker
+    verify = WorkflowTests.verify
+    agent = WorkflowTests.agent
+    cli = WorkflowTests.cli
+
+    def bytes_snapshot(self):
+        return {str(p): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+
+    def test_compact_show_separates_failed_coordinator_verdict_and_completed_agent(
+        self,
+    ):
+        self.save(True)
+        self.worker()
+        self.reserve("verify", "b" * 40)
+        self.agent(status="completed", run_ids=["native-verify"])
+        self.finish(status="failed", verdict="fail")
+        self.value.update(
+            status="blocked",
+            blocker="required verification failed",
+            next_action="request authorized repair",
+        )
+        self.save()
+        before = self.bytes_snapshot()
+        with patch.object(
+            subprocess, "run", side_effect=AssertionError("no external commands")
+        ):
+            view = workflow.show(self.path, "example", compact=True)
+        self.assertEqual(before, self.bytes_snapshot())
+        self.assertNotIn("workflow", view)
+        self.assertEqual(view["coordinator"]["blocker"], "required verification failed")
+        self.assertEqual(view["latest_attempt"]["verdict"], "fail")
+        self.assertEqual(view["latest_attempt"]["coordinator_status"], "failed")
+        self.assertEqual(
+            view["latest_attempt"]["assignments"][0]["agent_status"], "completed"
+        )
+        self.assertIsNone(view["code_review"])
+        self.assertIn("not checked", view["publication_readiness"])
+        result = self.cli("show", "--compact")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), view)
+
+    def test_compact_missing_malformed_foreign_stale_refs_and_intents_are_read_only(
+        self,
+    ):
+        self.save(True)
+        self.reserve("worker")
+        tracker = Path(self.last()["assignments"][0]["tracker"])
+        tracker.parent.mkdir(parents=True)
+        for raw in (None, b'{"foreign":"private"}', b"bad json"):
+            if raw is not None:
+                tracker.write_bytes(raw)
+            self.report.unlink(missing_ok=True)
+            self.brief.unlink(missing_ok=True)
+            before = self.bytes_snapshot()
+            view = workflow.show(self.path, "example", compact=True)
+            self.assertEqual(before, self.bytes_snapshot())
+            self.assertIsNone(view["latest_attempt"]["assignments"][0]["agent_status"])
+            issues = " ".join(i["issue"] for i in view["issues"])
+            self.assertIn("dispatch outcome unresolved", issues)
+            self.assertIn("foreign checkpoint", issues)
+            self.assertIn("unreadable reference", issues)
+
+    def test_compact_reuse_is_review_not_publication_readiness(self):
+        WorkflowV2Tests.setUp(self)
+        self.save(True)
+        self.worker()
+        self.verify()
+        WorkflowV2Tests.revised(self)
+        self.save()
+        WorkflowV2Tests.reuse(self)
+        self.save()
+        before = self.bytes_snapshot()
+        view = workflow.show(self.path, "example", compact=True)
+        self.assertTrue(view["code_review"]["covers_current_contract"])
+        self.assertEqual(view["code_review"]["reuse_decision"], "reuse")
+        self.assertEqual(view["coordinator"]["current_stage"], "deliver")
+        self.assertIn("not checked", view["publication_readiness"])
+        self.assertEqual(before, self.bytes_snapshot())
+        self.reserve("deliver", "b" * 40)
+        view = workflow.show(self.path, "example", compact=True)
+        self.assertEqual(view["latest_attempt"]["stage"], "deliver")
+        self.assertEqual(view["latest_assignment"]["stage"], "verify")
+        self.assertEqual(
+            view["latest_assignment"]["assignment"],
+            self.stage("verify")["attempts"][-1]["assignments"][-1]["assignment"],
+        )
+        self.assertEqual(view["request"]["requested_delivery"], "pr")
+        self.assertEqual(view["original_request"], str(self.brief))
+
+
+if __name__ == "__main__":
+    unittest.main()

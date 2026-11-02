@@ -106,8 +106,8 @@ example initial checkpoint (hypothetical paths, no native id known yet):
 
 ## deterministic helper
 
-`bin/checkpoint.py` has only `init`, `read` (strict validation plus read), and
-`update`. run `python3 /absolute/abra/bin/checkpoint.py --help` and each
+`bin/checkpoint.py` has `init`, `read` (strict validation plus read), complete
+`update`, and typed `progress` (documented below). run `python3 /absolute/abra/bin/checkpoint.py --help` and each
 subcommand's `--help` for arguments. it has no dashboard, patch flags, runtime,
 locking, liveness inference, automatic recovery, or tasks-axi mutation. agents
 still decide coherent plans/progress/blockers and reconcile ownership/evidence.
@@ -262,3 +262,43 @@ the brief/candidate with actual artifacts and task notes; do not invent success,
 exit status, or a timeout based on `updated_at`. preserve the old checkpoint until
 ownership and discrepancies are resolved, then the same owner may update it or a
 replacement may reference it from a new tracker.
+
+## typed progress convenience
+
+`init`, `read` and complete `update` remain supported with unchanged v1 fields.
+`progress` reduces repeated identity/timestamp json for ordinary updates:
+
+```sh
+python3 /absolute/abra/bin/checkpoint.py progress /absolute/data/example/agents/scout-01.json \
+  --assignment scout-01 --role scout --working-directory null \
+  --revision "$last_read_revision" --request -
+```
+
+stdin (or an already authorized absolute regular file) must contain exactly:
+
+```json
+{
+  "status": "active",
+  "steps": [{"id":"trace","title":"trace supplied sources","status":"completed"},{"id":"report","title":"write findings","status":"active"}],
+  "checkpoint": "source trace confirmed; report not yet delivered",
+  "next_action": "write the authorized findings report",
+  "blocker": null,
+  "artifacts": [],
+  "run_ids": ["observed-native-id"]
+}
+```
+
+supply the full coherent steps/progress/blocker/artifacts, not an arbitrary patch.
+`run_ids` means observed ids to append in order, retaining previous ids and ignoring
+already-recorded observations; duplicate ids within the request reject. identity,
+predecessor, job summary and step ids/titles are retained; mark abandoned steps
+skipped, do not remove/rename them. progress refuses completed/failed assignments;
+unusual reconciled edits require the full update path, not automatic resumption.
+
+bounded strict duplicate-free json, full validation, supplied immutable identity,
+last-read revision and the existing timestamp/atomic write path all still apply.
+request success asserts agent progress only, never stage approval or liveness.
+sole-writer ownership, allowed write boundaries and stop-on-helper-failure rules
+are unchanged. uncertain publication/output failure requires read and reconciliation,
+not a blind retry with a new token. this command neither dispatches nor updates a
+workflow/task, and does not migrate the checkpoint format.

@@ -585,5 +585,128 @@ class CheckpointTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
 
+class CheckpointProgressTests(unittest.TestCase):
+    setUp = CheckpointTests.setUp
+    initialize = CheckpointTests.initialize
+    cli = CheckpointTests.cli
+    assert_no_temporaries = CheckpointTests.assert_no_temporaries
+
+    def request(self):
+        return dict(
+            status="active",
+            steps=self.value["steps"],
+            checkpoint="confirmed source trace",
+            next_action="write report",
+            blocker=None,
+            artifacts=[],
+            run_ids=["native-1"],
+        )
+
+    def test_progress_equivalent_manual_identity_and_run_ids_preserved(self):
+        result = self.initialize()
+        request = self.request()
+        manual = dict(result["checkpoint"], **request)
+        self.assertEqual(
+            checkpoint.build_progress(result["checkpoint"], request), manual
+        )
+        changed = checkpoint.progress_checkpoint(
+            self.path, self.identity, request, result["revision"]
+        )
+        request["run_ids"] = ["native-1", "native-2"]
+        changed = checkpoint.progress_checkpoint(
+            self.path, self.identity, request, changed["revision"]
+        )
+        self.assertEqual(changed["checkpoint"]["run_ids"], ["native-1", "native-2"])
+        self.assertEqual(
+            {k: changed["checkpoint"][k] for k in checkpoint.IDENTITY}, self.identity
+        )
+        self.assertLess(
+            len(json.dumps(request)), len(json.dumps(changed["checkpoint"]))
+        )
+
+    def test_progress_strict_steps_identity_terminal_and_stale(self):
+        result = self.initialize()
+        before = self.path.read_bytes()
+        invalid = [
+            dict(self.request(), role="worker"),
+            dict(self.request(), run_ids=["a", "a"]),
+            dict(self.request(), steps=[dict(id="new", title="new", status="active")]),
+            dict(self.request(), status="blocked", blocker=None),
+        ]
+        for request in invalid:
+            with self.assertRaises(ValueError):
+                checkpoint.progress_checkpoint(
+                    self.path, self.identity, request, result["revision"]
+                )
+            self.assertEqual(before, self.path.read_bytes())
+        with self.assertRaisesRegex(ValueError, "stale"):
+            checkpoint.progress_checkpoint(
+                self.path, self.identity, self.request(), "0" * 64
+            )
+        terminal = checkpoint.progress_checkpoint(
+            self.path,
+            self.identity,
+            dict(self.request(), status="completed", next_action=None),
+            result["revision"],
+        )
+        with self.assertRaisesRegex(ValueError, "terminal checkpoint"):
+            checkpoint.progress_checkpoint(
+                self.path, self.identity, self.request(), terminal["revision"]
+            )
+        self.assert_no_temporaries()
+
+    def test_progress_before_and_after_publication_failures_are_reconciled(self):
+        result = self.initialize()
+        before = self.path.read_bytes()
+        with patch.object(
+            checkpoint.os, "replace", side_effect=OSError("failed")
+        ), self.assertRaises(OSError):
+            checkpoint.progress_checkpoint(
+                self.path, self.identity, self.request(), result["revision"]
+            )
+        self.assertEqual(before, self.path.read_bytes())
+        real_replace = checkpoint.os.replace
+
+        def after(*args, **kwargs):
+            real_replace(*args, **kwargs)
+            raise OSError("acknowledgement failed")
+
+        with patch.object(
+            checkpoint.os, "replace", side_effect=after
+        ), self.assertRaises(OSError):
+            checkpoint.progress_checkpoint(
+                self.path, self.identity, self.request(), result["revision"]
+            )
+        read = checkpoint.read_checkpoint(self.path, self.identity)
+        self.assertEqual(read["checkpoint"]["checkpoint"], "confirmed source trace")
+        self.assertNotEqual(read["revision"], result["revision"])
+        self.assert_no_temporaries()
+
+    def test_progress_cli_request_failures_and_round_trip(self):
+        initial = self.initialize()
+        raw = json.dumps(self.request()).encode()
+        for bad in [
+            raw.replace(
+                b'"status": "active"', b'"status": "active", "status": "active"'
+            ),
+            json.dumps(dict(self.request(), assignment="other")).encode(),
+            b" " * (checkpoint.MAX_BYTES + 1),
+        ]:
+            result = self.cli(
+                "progress", "--request", "-", "--revision", initial["revision"], raw=bad
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(
+                checkpoint.read_checkpoint(self.path, self.identity), initial
+            )
+        result = self.cli(
+            "progress", "--request", "-", "--revision", initial["revision"], raw=raw
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["checkpoint"]["run_ids"], ["native-1"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
