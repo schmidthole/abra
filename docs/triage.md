@@ -108,3 +108,13 @@ contract walkthrough:
 
 review result: the completion boundary permits a useful incomplete investigation
 without fabricating certainty, execution, or a code-delivery outcome.
+
+## report-only method changes
+
+v1 later recipe changes require explicit operator approval. a new opted-in v2 task
+may save initial operator preauthorization for at most one research/read-only
+investigate switch under [workflows](workflows.md): unchanged full question/scope/
+acceptance/access/authority/report identity, every old owner reconciled stopped and
+all active/blocked/uncertain intents resolved. no diagnostic execution or new access,
+implement/plan/publication/lightweight detour, or repair-budget reset. initial recipe
+autonomy is not switch authorization; ambiguity blocks instead of broadening scope.

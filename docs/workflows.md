@@ -4,7 +4,9 @@ one coordinator owns `data/<task-id>/workflow.json` in abra's root, outside proj
 worktrees. tasks-axi still owns the task lifecycle, holds and completion; link the
 manifest's absolute path in the existing task body. the helper never calls tasks-axi,
 launches agents, polls native state, or performs delivery. small direct answers need
-no workflow. for a clear initial delegated request, the coordinator selects the
+no workflow; newly opted-in eligible lightweight work follows [routing](routing.md)
+with durable task-local ownership/intent/outcome instead, not fabricated stages.
+for a clear initial full delegated request, the coordinator selects the
 smallest suitable fixed versioned recipe, records the choice and rationale, and
 proceeds without asking the operator to choose a workflow. explicit operator
 selections prevail; ask only when intent, scope, acceptance or authority is
@@ -14,6 +16,18 @@ before initialization. reference the actual operator request/authority separatel
 from the recipe decision; never invent approval. recipe selection does not grant
 publication, merge, production or other external-action authority. separate action
 authority and delivery ceilings still apply.
+
+## operational invariants
+
+- [initial-selection] for clear initial full work choose the smallest suitable fixed recipe and save rationale; explicit operator choices and stricter specialties win. ask only for material intent, scope, acceptance or authority ambiguity. selection grants no publication, merge, production or other external-action authority.
+
+- [method-switch] v1 later selections require operator approval. only new opted-in v2 report tasks may switch once between research and read-only investigate with initial saved operator preauthorization and unchanged full question, scope, acceptance, access, authority and report contract. reconcile every prior owner stopped and resolve every active, blocked or uncertain intent first. no probes, implement, plan, publication, lightweight detour or repair-budget reset.
+
+- [review-reuse] v1 request/delivery revision changes require fresh verification. v2 reuse requires the latest actual passed verifier for the exact candidate, unchanged saved substantive implementation identity/base/check assumptions, no intervening worker and an explicit current comparison-evidence decision. current delivery authority, clean head, target/base, duplicate-pr, remote-head and required-ci gates remain; an old local receipt is not pr completion.
+
+- [state-ownership] tasks-axi owns lifecycle and concise discoverable material handoff; coordinator alone owns manifest decisions/intents/next action; each agent alone owns checkpoint progress. immutable briefs/reports retain exact request/authority/evidence. no routine step mirroring, link-only handoffs or timestamp-wins conflict resolution; full relevant recovery and full-body-before-update remain mandatory.
+
+- [final-gates] focused iteration never replaces canonical worker candidate make format and make test plus required task checks, or fresh independent exact-candidate gates. unavailable checks block. verifiers never repair product code; changed candidate requires fresh review. initial verification plus at most two repair rounds, with no method/replacement/acceptance detour reset.
 
 ## fixed version 1 recipes
 
@@ -28,8 +42,10 @@ choose `implement` for clear code-change requests, `investigate` for unclear
 reported behavior needing identification or reproduction, `research` for information
 gathering, and `plan` for product direction/specification. use a direct answer for
 small questions; do not add stages or ask a workflow-choice question for a clear
-request. this autonomous choice applies to initial selection only: later recipe
-changes require explicit operator approval, not automatic branching.
+request. this autonomous choice applies to initial selection only: later recipe changes
+require explicit operator approval in v1, not automatic branching. only new opted-in
+v2 report tasks may use the once-only initially preauthorized same-contract read-only
+method switch below; never an implementation/plan/lightweight or budget escape.
 
 [planning](planning.md) defines its three portable briefs, plan-only package identity
 fields, feedback/repair budget and exact report delivery protocol. refine/ground/validate
@@ -45,6 +61,22 @@ the same task appends a saved brief revision and explicit operator decision. ret
 automatically branch or infer new authority.
 
 ## ownership and action protocol
+
+| record | authoritative content | update trigger |
+| --- | --- | --- |
+| tasks-axi | lifecycle, discoverable original request/authority/steering, resource/dependency/promise links, material blocker and handoff/outcome | material steering, ownership, next safe action, delivery/lifecycle |
+| coordinator manifest | selection/attempts/intents/outcomes/evidence-backed decisions and coordinator next action/blocker | before coordinator actions, after confirmed outcomes |
+| agent checkpoint | assignment/native ids/coarse steps/confirmed progress/agent next action/blocker/artifacts | portable contract triggers |
+| immutable briefs/reports | full request/authority/constraints/assignment and exact evidence | new immutable revision/report |
+
+stop copying routine agent steps/manifest transitions into task notes. maintain
+absolute links and enough summary to discover conflicts; no link-only handoffs.
+save material steering before action; unresolved intents retain a concise task
+warning. disagreement is reconciled, never timestamp-merged. [scoped startup](routing.md#scoped-startup)
+includes cross-repo dependencies/resources/aliases/promises and broadens on ambiguity
+or global recovery. full-body-before-update and complete ownership recovery apply
+regardless of scope or status. inspect [capabilities](capabilities.md) before dispatch.
+
 
 - the coordinator alone writes the manifest. the assigned agent alone writes its
   existing [checkpoint](agent-tracking.md); that ownership contract is unchanged.
@@ -160,8 +192,9 @@ implement advances worker -> verify -> deliver. a verifier must examine the late
 passed worker's exact candidate, with the current acceptance revision. no passed
 agent status substitutes for report, explicit verdict and coordinator decision.
 changing candidate requires a new worker attempt, then a fresh verify assignment;
-changing acceptance or delivery scope requires a new saved brief and operator
-decision and fresh verification even if code is unchanged. a changed report scope
+in v1, changing acceptance or delivery scope requires a new saved brief and operator
+decision and fresh verification even if code is unchanged. opt-in v2 reuse below
+requires explicit substantive comparison evidence, not inferred commit equality. a changed report scope
 reopens the report stage; the coordinator decides whether a new recipe selection
 or upstream work is needed. old approvals remain evidence, not current permission. a new worker deliberately invalidates prior approval. delivery must
 match the approved exact candidate/acceptance, and the coordinator still checks the
@@ -309,3 +342,232 @@ these tests do not establish native harness ownership/compliance, real pr/ci
 reconciliation, filesystem behavior under power loss, or unattended recovery.
 actual native trials still need disposable projects, explicit action authority,
 and a coordinator checking native state and artifacts at each interruption point.
+
+## opt-in manifest v2: review reuse and report-only method changes
+
+new workflows may explicitly initialize `version: 2`; recipe versions remain `1`.
+v1 remains strict and conservative, including renewed verification after a delivery
+revision. neither `update` nor a convenience command migrates between versions.
+old binaries reject v2. do not convert an in-flight task or backfill old identities.
+all existing fields, validators, single-writer/revision checks and atomic publication
+rules still apply. v2 adds these required fields (no unknown fields):
+
+- every brief: `implementation_identity` and `report_identity` (nullable).
+- every selection: `change_authorization` (nullable).
+- manifest: `implementation_reuses` (initially `[]`) and `method_authorization`
+  (nullable, fixed at initialization).
+
+for implement/code delivery, `implementation_identity` is required:
+
+```json
+{"base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","revision":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","contract":"/absolute/task/implementation-contract.md"}
+```
+
+`revision` is the sha256 of exact saved substantive contract bytes, asserted by the
+coordinator. save the original problem, acceptance, constraints, required local
+checks, environment/dependency/security assumptions and review assumptions in that
+contract; explain delivery-only exclusions. keep the exact bytes, not a mutable
+link. hashes and paths identify assertions, not semantic equivalence or authority.
+`report_identity` is null for implement and plan; plan retains exact package rules.
+report-only research/investigate may save
+`{"reference":"/absolute/task/read-only-contract.md","revision":"<sha256>"}`;
+its implementation identity is null.
+
+### explicit reuse, not synthetic verification
+
+append a reuse record only after a new operator-approved full brief/delivery
+revision, with a **new coordinator decision**:
+
+```json
+{"verify_attempt":"verify-2","acceptance_revision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","decision":"reuse-1"}
+```
+
+it must link the latest actual passed verifier in the current implement selection,
+with no intervening worker (even at the same candidate) or verifier. the original
+and new saved implementation identities must be exactly equal, including base and
+contract path/hash. the coordinator decision must explicitly compare saved contracts,
+checks and assumptions, and cite both full briefs, the substantive contract and the
+original verifier report as evidence. candidate equality alone is insufficient.
+a changed substantive identity requires fresh independent exact-candidate review.
+old reusable records remain history but cannot approve a later worker's output.
+
+reuse opens **deliver**, not completion: reserve a new deliver attempt bound to the
+current full acceptance/delivery revision; retain prior local receipts. a passed
+local deliver cannot complete a pr request. the helper never manufactures a passed
+verify, reads git, executes a check or grants action authority. before publication,
+the coordinator must independently establish current operator authority/specialty
+ceiling, clean worker tree and exact reviewed head, target repo/branch/base and
+assumption applicability; inspect existing prs before creation, verify remote/pr
+head after push, and inspect required ci at that exact head. record fresh evidence
+and decision on the new deliver attempt. pending/failed/unavailable required checks
+block delivery; absent checks are not ci passed. reconcile uncertain publication
+before retrying. these external checks are not performed by workflow helpers.
+
+### one preauthorized read-only method switch
+
+at initialization only, a report-only task may save:
+
+```json
+{"decision":"operator-read-only-preauth","acceptance_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+as `method_authorization`. its operator decision must cite the initial full brief
+and saved `report_identity.reference`. those saved bytes must explicitly authorize
+at most one research <-> **read-only** investigate method switch without changing
+the question, acceptance, scope, access, authority or report deliverable. no new
+diagnostic probes. initial recipe autonomy is not this permission. the helper
+validates linkage, not the natural-language authority in those bytes.
+
+append a new fixed recipe selection, with a new coordinator comparison decision
+citing that same full brief and report contract, and:
+
+```json
+{"authorization":"operator-read-only-preauth","prior_selection":"selection-01","reconciliation":"stopped-owners-1"}
+```
+
+as `change_authorization`. `reconciliation` must be a new explicit reconciliation
+decision. every prior attempt must be terminal; every prior assignment must have
+confirmed dispatch and a stopped/reconciled ownership decision. resolve active,
+blocked or uncertain dispatch/coordinator intents before switching. all history
+is retained. implement, plan, diagnostic execution, publication and a second
+coordinator switch are excluded. absent permission uses operator approval, not
+inferred eligibility. v1 always needs operator approval for later selections.
+
+this minimal v2 representation conservatively freezes the full report brief revision
+for tasks using a preauthorized switch; a later changed contract cannot retain that
+switch as eligible. ask for a separately authorized task instead of rewriting
+history. operator recipe selections remain possible otherwise, but cumulative
+implementation failures and planning validation/blocked budgets across v2 selections
+cannot be reset by a detour, acceptance change or replacement.
+
+## typed coordinator operations
+
+`init`, `read`, full-proposal `update` and full `show` remain supported. routine
+operations accept a small exact-key json object, bounded to 1 mib, duplicate-free
+at every depth, with no non-finite numbers. use the supplied task identity and the
+last observed revision:
+
+```sh
+python3 /absolute/abra/bin/workflow.py reserve /absolute/data/example/workflow.json \
+  --task-id example --revision "$last_read_revision" --request -
+```
+
+all typed commands use `--request -` (stdin preferred) or an already authorized
+absolute regular file. they copy validated current state, build a complete proposal,
+run the same full validator/transition rules, then use `write_workflow` with its
+existing identity, two revision checks, exclusive staging and atomic replacement.
+v1 stays v1; v2 stays v2. ids are deterministically the first unoccupied
+`<stage>-<n>` / `coordinator-<n>` across saved history. assignment ids/paths remain
+caller-supplied; collisions reject. output is the usual workflow/revision envelope.
+no arbitrary patch, force, approval inference, dispatch, git, tasks-axi or retry.
+
+### reserve / reserve-delivery
+
+`reserve` handles agent/coordinator review stages; `reserve-delivery` handles
+`deliver`/`report`. both require exactly:
+
+```json
+{
+  "stage": "worker",
+  "intent": "authorized local implementation; reconcile native ownership and actual artifacts before repeating",
+  "assignment": {
+    "assignment": "worker-01",
+    "predecessor": null,
+    "tracker": "/absolute/data/example/agents/worker-01.json",
+    "brief": "/absolute/data/example/worker-01.md",
+    "working_directory": "/absolute/worker-tree"
+  },
+  "candidate_commit": null,
+  "package": null,
+  "checkpoint": "full request and authority saved; no launch yet",
+  "next_action": "launch the reserved assignment"
+}
+```
+
+stage role, attempt id/order, active status, current acceptance, dispatch intent and
+empty outcome fields are mechanical; no role is inferred from a checkpoint.
+coordinator stages require `assignment: null`. supply the exact candidate for
+verify/implement deliver; plan uses null candidate and its complete package object
+(or null for initial refine). non-plan `package` is null. replacements require
+explicitly reconciled stopped predecessors, never takeover based on status.
+
+for delivery, the caller's `intent` must name the currently authorized target,
+candidate/package, delivery ceiling and actual lookup/reconciliation needed before
+retrying publication. reservation records an intention, not an observed action or
+permission. paused workflow state remains paused; full update handles unusual
+reconciled edits and explicit unblocking.
+
+### confirm-dispatch
+
+requires exactly `attempt`, `assignment`, `summary`, `evidence`, `checkpoint`,
+`next_action`. example:
+
+```json
+{"attempt":"worker-1","assignment":"worker-01","summary":"observed native launch receipt, not stage approval","evidence":["/absolute/data/example/launch-receipt.md"],"checkpoint":"launch confirmed","next_action":"wait for actual result"}
+```
+
+only an unresolved dispatch on an unfinished attempt may be confirmed. nonempty
+observed evidence and an explicit caller summary are persisted in a new coordinator
+decision; repeat confirmation rejects. no native calls or run-id fabrication.
+
+### decide / record-delivery
+
+`decide` requires exactly these fields; the helper derives the linked coordinator
+decision id and replayed current stage, never the verdict:
+
+```json
+{
+  "attempt": "verify-1",
+  "status": "passed",
+  "verdict": "pass",
+  "report": "/absolute/data/example/verify-report.md",
+  "candidate_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "result_package": null,
+  "outcome": "independent exact-candidate review and all required checks passed",
+  "evidence": ["/absolute/data/example/verify-report.md"],
+  "summary": "coordinator reviewed actual evidence and accepts this stage",
+  "checkpoint": "verification evidence reviewed",
+  "next_action": "reserve authorized delivery",
+  "blocker": null,
+  "workflow_status": "active"
+}
+```
+
+`status` is explicitly `passed` or `failed`. only verify uses `pass`/`fail` verdict;
+plan validate uses `ready`/`needs revision`/`blocked`; all other verdicts are null.
+non-plan result packages are null. plan keeps exact input/result/document/evidence
+constraints. candidate mutation, wrong stage/role, absent report/evidence, unresolved
+dispatch, terminal edits and exhausted repairs reject identically to full update.
+`workflow_status`/next action/blocker are explicit caller assertions; a checkpoint
+saying completed is never a stage pass. use full update for a blocked nonterminal
+attempt, not a manufactured terminal decision.
+
+`record-delivery` is the same exact schema **plus** `delivery_refs`, an array of
+new observed references to append (not already recorded). it handles only
+`deliver`/`report`. include actual receipt and fresh required-check evidence in
+`evidence`, not planned results. explicitly choose `workflow_status: "completed"`
+and `next_action: null` only when all requested delivery conditions hold. existing
+receipts remain history and must also be supported by the final evidence. failed
+or pending publication does not become success through code-review reuse.
+
+### recovery and read-only compact show
+
+an operation may publish before interruption/output failure. reread and reconcile
+native ownership and actual artifacts; do not blindly repeat `reserve`, confirmation
+or publication with a refreshed revision. stale tokens preserve bytes. helpers do
+not lock, guarantee exactly-once actions or prove stopped owners, truthful evidence,
+semantic equivalence, authority or power-loss durability.
+
+`workflow.py show PATH --task-id TASK --compact` observes the current selection,
+coordinator stage/status/checkpoint/next action/blocker, current/original request
+links, latest attempt's coordinator decision/verdict and latest assignment's separate
+agent status/progress (including the last agent during coordinator delivery), review
+coverage/reuse decision and all reference/checkpoint issues. full `show` is unchanged.
+no task writes or cached combined database. it does not inspect tasks-axi, native
+liveness, git/remote/pr/ci state, report truth or contract bytes; publication readiness
+is always explicitly unchecked. completed agents with failed coordinator verdicts
+remain visibly different. missing/malformed/foreign checkpoints and unresolved
+intents are observations requiring reconciliation, not authorization to repeat.
+use the full records/briefs and actual evidence for recovery even if compact looks
+complete. tasks-axi still owns lifecycle; the manifest owns coordinator decisions;
+agent checkpoints alone own detailed agent progress.

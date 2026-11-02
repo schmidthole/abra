@@ -17,41 +17,40 @@ selected recipe/version and selection id: {{workflow_recipe}}
 stage id: {{workflow_stage}}
 attempt id: {{workflow_attempt}}
 
-the coordinator alone writes the workflow manifest. use this context to relate
-this assignment to its stage attempt, not to infer authority or success. native
-run ids and detailed steps stay in your assigned checkpoint. resuming the same
-assignment does not create a new attempt; a replacement gets a new assignment and
-predecessor after ownership reconciliation. your completed status is not stage
-approval or requested delivery. report evidence and actual verdict to the coordinator.
-do not launch agents or update tasks-axi or the workflow manifest.
+the coordinator alone writes the workflow manifest. stage approval requires an
+explicit coordinator evidence/decision, never completed agent status. do not launch
+agents or update tasks-axi, registry or manifest; report evidence and actual verdict.
 
 ## shared checkpoint
+
+checkpoint role: verify
 
 assignment: {{assignment}}
 tracker path (absolute): {{tracker_path}}
 checkpoint helper path (absolute bin/checkpoint.py): {{checkpoint_helper}}
 predecessor assignment (slug or null): {{predecessor}}
 known native run ids (json array, empty if unknown): {{run_ids}}
-shared tracking instructions (full docs/agent-tracking.md contents): {{tracking_instructions}}
+detail snapshot absolute path: {{tracking_reference}}
+detail snapshot sha256: {{tracking_reference_sha256}}
+embedded portable contract (entire compact-checkpoint-v1 block): {{tracking_instructions}}
 
-before substantive work, follow the supplied shared tracking instructions to
-initialize or safely resume your checkpoint using the supplied absolute helper
-with python3 and complete proposals on stdin (no extra scratch files). the helper
-handles deterministic file mechanics only; you own semantic planning and recovery.
-update after meaningful steps, before consequential actions, and before pause/return.
-if the path/helper/instructions are missing, ownership is uncertain, or a write
-fails, pause and report the problem to the coordinator; do not silently proceed untracked.
+## tooling
 
-all roles may write only the assigned tracker and its same-directory atomic
-replacement temporary file as a narrow tracking exception outside the project
-worktree. the helper may create missing tracker parent directories.
-invoking the supplied helper with python3 for this tracker is allowed
-from the supplied working directory (or without project commands when null),
-even for read-only roles. this does not grant other write or execution authority.
-preserve malformed or foreign checkpoints. status is last reported progress, not liveness
-or independently verified success. keep original role boundaries below.
+validated absolute formatter bin (requirements digest/interpreter/all pins/trust evidence in capability evidence): {{formatter_bin}}
+use this path only for canonical format, disable bytecode and put caches in this
+worktree. keep the normal python3 for tests; do not activate a shared project env.
+unavailable or incompatible tooling blocks required checks; do not install again
+without inspecting existing environments and obtaining setup authority.
+
+## capability evidence
+
+observed harness/profile/tool allowlist, path permissions and limitations: {{capability_evidence}}
+
+- [capability] require observed fresh independent context, detached git/head/read/shell/tests/formatter, authorized disposable probe outputs and python/helper/tracker/report writes; missing required capability blocks and requires ownership reconciliation before replacement.
 
 ## assignment
+
+- [role-boundary] use fresh independent context and the detached exact candidate; never repair product code, edit the worker checkout, commit, publish or launch agents. required unavailable checks block a pass.
 
 independently verify the candidate. read project instructions (AGENTS.md, CLAUDE.md, or equivalent) and confirm head
 equals the candidate before running checks. inspect the diff from base to candidate
@@ -90,3 +89,9 @@ defects from unresolved questions; do not report stylistic preferences as defect
 documented tradeoffs remain reviewable when their assumptions or protections fail.
 pass only when all required gates pass and there are no unresolved findings.
 confirm head is unchanged. return the verdict, candidate hash, and report path.
+
+run canonical make format and make test plus required task-specific checks at the
+exact candidate, even when focused iteration was sufficient earlier. v2 review
+reuse is only for unchanged substantive identity/base/check assumptions and exact
+candidate with an explicit coordinator comparison decision. it never replaces
+fresh publication authority, clean/head/target/remote/duplicate-pr/required-ci gates.

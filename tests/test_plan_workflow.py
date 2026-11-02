@@ -739,16 +739,14 @@ class PlanWorkflowTests(unittest.TestCase):
 
 class PlanTemplateTests(unittest.TestCase):
     def test_portable_briefs_share_tracking_and_workflow_contract(self):
-        scout = (ROOT / "templates/scout.md").read_text()
-        shared = scout.split("## coordinator workflow context\n")[1].split(
-            "## assignment\n"
-        )[0]
+        from test_agent_tracking import render, review_contract
+
         for stage in ("refine", "ground", "validate"):
             text = (ROOT / "templates" / ("plan-" + stage + ".md")).read_text()
-            self.assertIn(shared, text)
+            review_contract(render("plan-" + stage), "plan-" + stage)
             self.assertIn("checkpoint role: scout", text)
             self.assertNotIn("{{candidate_commit}}", text)
-            fields = re.findall(r"\{\{([a-z_]+)\}\}", text)
+            fields = re.findall(r"\{\{([a-z_][a-z0-9_]*)\}\}", text)
             self.assertEqual(
                 set(fields),
                 {
@@ -770,6 +768,9 @@ class PlanTemplateTests(unittest.TestCase):
                     "predecessor",
                     "run_ids",
                     "tracking_instructions",
+                    "tracking_reference",
+                    "tracking_reference_sha256",
+                    "capability_evidence",
                 },
             )
             self.assertEqual(len(fields), len(set(fields)))
@@ -828,6 +829,145 @@ class PlanTemplateTests(unittest.TestCase):
             "docs/specialty.md",
         ):
             self.assertIn("plan", (ROOT / path).read_text())
+
+
+class PlanWorkflowV2Tests(unittest.TestCase):
+    save = PlanWorkflowTests.save
+    stage = PlanWorkflowTests.stage
+    last = PlanWorkflowTests.last
+    package = PlanWorkflowTests.package
+    reserve = PlanWorkflowTests.reserve
+    finish = PlanWorkflowTests.finish
+    grounded = PlanWorkflowTests.grounded
+
+    def setUp(self):
+        PlanWorkflowTests.setUp(self)
+        self.value.update(
+            version=2, implementation_reuses=[], method_authorization=None
+        )
+        self.value["briefs"][0].update(
+            implementation_identity=None, report_identity=None
+        )
+
+    def selection(self, *args):
+        return dict(PlanWorkflowTests.selection(self, *args), change_authorization=None)
+
+    def start(self, source_checks="applicable"):
+        PlanWorkflowTests.start(self, source_checks)
+
+    def test_typed_plan_operations_keep_roles_packages_and_verdict_rules(self):
+        self.start()
+        request = fixtures.TypedWorkflowTests.reservation(
+            self, "refine", assignment="refine-01"
+        )
+        result = workflow.operate_workflow(
+            self.path, "example", "reserve", request, self.revision
+        )
+        self.value, self.revision = result["workflow"], result["revision"]
+        self.assertEqual(self.last()["assignments"][0]["role"], "scout")
+        confirm = dict(
+            attempt=self.last()["id"],
+            assignment="refine-01",
+            summary="native launch observed",
+            evidence=[str(self.report)],
+            checkpoint="launch confirmed",
+            next_action="read result",
+        )
+        result = workflow.operate_workflow(
+            self.path, "example", "confirm-dispatch", confirm, self.revision
+        )
+        self.value, self.revision = result["workflow"], result["revision"]
+        package = self.package(review=False)
+        request = fixtures.TypedWorkflowTests.decision(self)
+        request.update(
+            candidate_commit=None,
+            report=str(self.report),
+            result_package=package,
+            evidence=[
+                str(self.report),
+                package["spec"]["reference"],
+                package["slices"]["reference"],
+            ],
+        )
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "verdict belongs only"):
+            workflow.operate_workflow(
+                self.path,
+                "example",
+                "decide",
+                dict(request, verdict="ready"),
+                self.revision,
+            )
+        self.assertEqual(before, self.path.read_bytes())
+        result = workflow.operate_workflow(
+            self.path, "example", "decide", request, self.revision
+        )
+        self.value, self.revision = result["workflow"], result["revision"]
+        self.assertEqual(self.value["current_stage"], "ground")
+        self.assertEqual(self.last()["result_package"], package)
+        self.assertIsNone(self.last()["candidate_commit"])
+
+    def test_blocked_and_exhausted_planning_cannot_detour_reset_budget(self):
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked):
+                if self.revision is not None:
+                    self.setUp()
+                self.start("unavailable" if blocked else "applicable")
+                self.grounded()
+                for number in range(1 if blocked else 3):
+                    self.reserve("validate")
+                    self.finish(
+                        status="failed",
+                        verdict="blocked" if blocked else "needs revision",
+                    )
+                    if not blocked and number < 2:
+                        self.reserve("ground", self.package())
+                        self.finish()
+                self.value["decisions"].append(
+                    dict(
+                        id="detour",
+                        kind="operator",
+                        summary="operator report method selection, not repair reset",
+                        evidence=[str(self.brief)],
+                    )
+                )
+                self.value["selections"].append(
+                    self.selection("research", "selection-02", "detour")
+                )
+                self.value.update(
+                    current_stage="scout",
+                    status="active",
+                    next_action="inspect authorized report method",
+                )
+                self.save()
+                self.value["decisions"].append(
+                    dict(
+                        id="return",
+                        kind="operator",
+                        summary="operator returns to plan, not repair reset",
+                        evidence=[str(self.brief)],
+                    )
+                )
+                self.value["selections"].append(
+                    self.selection("plan", "selection-03", "return")
+                )
+                self.value.update(
+                    current_stage=None,
+                    status="paused",
+                    next_action="operator intervention required",
+                )
+                self.save()
+                request = fixtures.TypedWorkflowTests.reservation(
+                    self, "refine", assignment="refine-extra"
+                )
+                before = self.path.read_bytes()
+                with self.assertRaisesRegex(
+                    ValueError, "operator intervention|repair rounds exhausted"
+                ):
+                    workflow.operate_workflow(
+                        self.path, "example", "reserve", request, self.revision
+                    )
+                self.assertEqual(before, self.path.read_bytes())
 
 
 if __name__ == "__main__":

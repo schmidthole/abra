@@ -1,6 +1,11 @@
 # product planning
 
-use the `plan` v1 recipe for product direction, not code delivery; apply the initial
+casual brainstorming/critique may use opted-in [lightweight routing](routing.md):
+save request/authority/outcome, label ideas and limits, never claim independently
+validated readiness. an explicit reviewed spec/slice package still requires every
+plan stage and exact package delivery; no retroactive validation passes.
+
+use the `plan` v1 recipe for certified product direction, not code delivery; apply the initial
 recipe selection rules in [workflows](workflows.md), honoring explicit operator
 choices and otherwise recording the coordinator's smallest suitable choice:
 `refine -> ground -> validate -> deliver`. it uses the existing coordinator workflow,
@@ -17,7 +22,7 @@ all three agent stages use the existing `scout` checkpoint role, with distinct s
 ids and fresh assignment trackers; validation requires fresh independent context.
 replacement predecessors must be from the same stage, despite scout role reuse.
 this does not change `verify`, the exact-code-candidate implementation role. fill
-these portable briefs, including the full shared checkpoint instructions and workflow
+these portable briefs, including the full embedded compact-checkpoint-v1 instructions and immutable detail reference and workflow
 context, even with specialty overrides:
 
 - [refinement](../templates/plan-refine.md): `spec.md` covers users/problem, outcomes,
@@ -140,7 +145,7 @@ a blocked unresolved validation may carry blocked. other plan stages have null v
 
 existing reconciliation, same-assignment resume, replacement ownership and immutable
 history rules apply. later recipe changes require explicit operator approval,
-not a coordinator escape from the repair limit or a grant of external-action
+not a coordinator escape from the repair limit (the v2 report-only method switch excludes plan) or a grant of external-action
 authority. preserve any unresolved dispatch or delivery intent; `show` never
 authorizes repeat action.
 

@@ -152,7 +152,7 @@ def unique_object(pairs):
     return result
 
 
-def decode(raw):
+def decode_request(raw):
     require(len(raw) <= MAX_BYTES, "checkpoint exceeds byte limit")
     try:
         value = json.loads(
@@ -162,7 +162,12 @@ def decode(raw):
         )
     except (UnicodeError, json.JSONDecodeError, RecursionError):
         raise ValueError("invalid utf-8 json") from None
-    return validate(value)
+    require(type(value) is dict, "request must be a json object")
+    return value
+
+
+def decode(raw):
+    return validate(decode_request(raw))
 
 
 def encode(value):
@@ -246,6 +251,66 @@ def write_checkpoint(path, expected, proposed, last_revision=None, initialize=Fa
     return {"checkpoint": value, "revision": revision(raw)}
 
 
+PROGRESS_FIELDS = {
+    "status",
+    "steps",
+    "checkpoint",
+    "next_action",
+    "blocker",
+    "artifacts",
+    "run_ids",
+}
+
+
+def build_progress(old, request):
+    validate(old)
+    require(
+        type(request) is dict and set(request) == PROGRESS_FIELDS,
+        "invalid progress request fields",
+    )
+    require(
+        old["status"] not in ("completed", "failed"),
+        "terminal checkpoint requires explicit reconciliation, not progress",
+    )
+    require(
+        type(request["run_ids"]) is list and all(text(r) for r in request["run_ids"]),
+        "invalid observed run ids",
+    )
+    require(
+        len(request["run_ids"]) == len(set(request["run_ids"])),
+        "duplicate observed run ids",
+    )
+    value = dict(old, **request)
+    value["run_ids"] = old["run_ids"] + [
+        r for r in request["run_ids"] if r not in old["run_ids"]
+    ]
+    validate(value)
+    previous = {s["id"]: s["title"] for s in old["steps"]}
+    following = {s["id"]: s["title"] for s in value["steps"]}
+    require(
+        all(following.get(k) == title for k, title in previous.items()),
+        "retain stable step ids and titles; mark abandoned steps skipped",
+    )
+    return value
+
+
+def progress_checkpoint(path, expected, request, last_revision):
+    current = read_checkpoint(path, expected)
+    require(current["revision"] == last_revision, "stale checkpoint revision")
+    return write_checkpoint(
+        path, expected, build_progress(current["checkpoint"], request), last_revision
+    )
+
+
+def request(source):
+    if source == "-":
+        raw = sys.stdin.buffer.read(MAX_BYTES + 1)
+    else:
+        with parent_directory(source) as (directory, name):
+            raw = read_bytes(directory, name)
+    return decode_request(raw)
+
+
 def proposal(source):
     if source == "-":
         raw = sys.stdin.buffer.read(MAX_BYTES + 1)
@@ -258,7 +323,7 @@ def proposal(source):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("init", "read", "update"):
+    for command in ("init", "read", "update", "progress"):
         sub = commands.add_parser(command)
         sub.add_argument("path", help="absolute assigned tracker path")
         sub.add_argument("--assignment", required=True)
@@ -273,13 +338,19 @@ def main():
             required=True,
             help="supplied absolute directory or literal null",
         )
-        if command != "read":
+        if command in ("init", "update"):
             sub.add_argument(
                 "--proposal",
                 required=True,
                 help="absolute complete json file path, or - for stdin",
             )
-        if command == "update":
+        if command == "progress":
+            sub.add_argument(
+                "--request",
+                required=True,
+                help="strict progress json on stdin (-) or absolute authorized file",
+            )
+        if command in ("update", "progress"):
             sub.add_argument(
                 "--revision",
                 required=True,
@@ -293,6 +364,11 @@ def main():
     try:
         if args.command == "read":
             result = read_checkpoint(args.path, expected)
+        elif args.command == "progress":
+            operation, path = "read-request", args.request
+            change = request(args.request)
+            operation, path = args.command, args.path
+            result = progress_checkpoint(args.path, expected, change, args.revision)
         else:
             operation, path = "read-proposal", args.proposal
             proposed = proposal(args.proposal)

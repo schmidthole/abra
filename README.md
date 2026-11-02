@@ -38,47 +38,60 @@ instructs the coordinator to use native subagents and fill the role templates;
 claude code loads it through `CLAUDE.md`, which adds claude-specific notes.
 templates are portable prompts, not a new spawning api or custom agent runtime.
 
-## roles
+## operating guide
 
-- [worker](templates/worker.md): implements a clear, bounded change in an isolated
-  worktree.
-- [scout](templates/scout.md): researches a bounded question without changing
-  project files.
-- [triage](templates/triage.md): investigates unclear reported behavior and
-  reproduction ([contract walkthroughs](docs/triage.md)).
-- [verify](templates/verify.md): independently reviews and tests an exact worker
-  commit in a detached worktree; it does not repair product code.
+[AGENTS.md](AGENTS.md) is the coordinator routing/safety index. [routing and startup](docs/routing.md)
+cover small answers, opt-in brainstorming, one-scout research and mechanical non-policy
+docs; substantive code/policy/security/probes/publication/uncertainty take full work
+or clarification. explicit operator recipes and stricter specialties win. relevant
+full task reads include cross-repo dependencies/resources/aliases/promises; ambiguous
+indexes/global recovery broaden inspection. always inspect full bodies before update.
 
-all four roles own a per-assignment json [checkpoint](docs/agent-tracking.md) at
-`data/<task-id>/agents/<assignment>.json`, outside project worktree cleanup. the
-coordinator supplies its absolute path, absolute `bin/checkpoint.py` helper path,
-and full shared instructions at dispatch, including specialty overrides. stable
-assignment ids survive native run restarts;
-replacement agents get new trackers referencing their predecessors. these are
-last-reported progress for recovery and later dashboards, not liveness, verified
-success, or a second task system. tasks-axi remains coordinator-owned.
+full initial work selects the smallest suitable fixed [recipe](docs/workflows.md)
+with rationale: implement, investigate, research or [plan](docs/planning.md). ask
+only for material intent/scope/acceptance/authority ambiguity, not workflow choice.
+later recipe changes require operator approval in v1; new opted-in v2 report tasks
+alone permit one initially preauthorized same-contract read-only method switch.
+selection grants no publication, merge, production or other external-action authority.
 
-## durable workflows
+- [worker](templates/worker.md): bounded implementation in an isolated worktree.
+- [scout](templates/scout.md): read-only research, not code delivery.
+- [triage](templates/triage.md): behavior investigation ([walkthroughs](docs/triage.md)).
+- [verify](templates/verify.md): fresh independent exact-candidate review; no repairs.
 
-for a clear initial delegated request, the coordinator selects the smallest suitable
-fixed versioned [workflow recipe](docs/workflows.md): implement
-(worker -> verify -> deliver), investigate (triage -> coordinator review -> report),
-research (scout -> report), or [plan](docs/planning.md)
-(refine -> ground -> validate -> deliver; report-only product direction).
-record the choice and rationale and proceed without a workflow-choice question.
-explicit operator selections prevail; ask only when intent, scope, acceptance or
-authority is materially ambiguous. later recipe changes require explicit operator
-approval. selection grants no publication, merge, production or other external-action
-authority; separate action authority and delivery ceilings still apply.
-one coordinator-owned `data/<task-id>/workflow.json` links stable stage attempts
-to existing assignment
-checkpoints and saved full briefs. `bin/workflow.py` provides strict init/read,
-revision-checked complete update and read-only show, not a runner or task system.
-tasks-axi owns lifecycle; the coordinator links the manifest in task notes and
-records operator steering, intent before dispatch/delivery and confirmed outcomes
-afterwards. unknown ownership blocks recovery; statuses never establish liveness
-or approval. stage success requires coordinator evidence and requested delivery.
-see the [recovery protocol and limitations](docs/workflows.md#interruption-recovery).
+all seven briefs (including plan's three scout roles) embed the complete versioned
+[portable checkpoint contract](docs/checkpoint-contract-v1.md), with supplied absolute
+helper/tracker/report/worktree paths and immutable detail reference/digest. specialty
+overrides keep the same boundaries. old saved briefs remain authoritative. inspect
+actual [profile capabilities](docs/capabilities.md) before dispatch; read-only verification
+still needs shell/git/tests/helper and tracker/report writes. unknown capability
+blocks; no portable introspection api or automatic replacement is assumed.
+
+## state ownership and recovery
+
+| record | authoritative content | update trigger |
+| --- | --- | --- |
+| tasks-axi | lifecycle and concise discoverable request/authority/steering, resource/dependency/promise links, material blocker, handoff/delivery outcome | material changes, not every agent step |
+| coordinator manifest | recipe/attempts/intents/outcomes/evidence-backed stage decisions/next action | before actions and after confirmed outcomes |
+| agent checkpoint | assignment/native ids/steps/progress/blocker/artifacts | portable contract triggers |
+| saved briefs/reports | full immutable request/authority and check evidence | new revision/report |
+
+`workflow.py show --compact` combines separate observations/decisions read-only; it
+never queries tasks-axi/native/git/pr/ci or authorizes recovery. [typed operations](docs/workflows.md)
+reserve/confirm/decide/deliver through existing validators, not a runner. full init/
+read/update remain. [checkpoint progress](docs/agent-tracking.md) retains agent ownership.
+unknown ownership blocks even with missing tracker/id. reconcile full relevant task,
+manifest, saved briefs/checkpoints and actual artifacts/native owners before repeating
+uncertain actions. statuses are not liveness, verified success or lifecycle completion.
+
+substantive implementation requires fresh independent review/tests/docs/format at
+exact candidate; v1 acceptance/delivery changes require fresh review. opt-in v2 may
+reuse unchanged substantive identity/base/check assumptions and exact candidate only
+with explicit comparison evidence. delivery is always current: clean/head/authority/
+target/duplicate-pr/remote-head/required-ci gates remain. required unavailable checks
+block; no checks is not ci passed. initial verification plus at most two repair
+rounds; fresh verification after fixes, no budget reset through a method switch.
+worker summaries are not independent approval; reports do not complete code requests.
 
 ## worktrees
 
@@ -120,26 +133,6 @@ purpose: `SPECIALTY.md` guides the model, `specialty.json` fixes the repo regist
 declared secrets, and delivery ceiling. lint it with `python3 bin/specialty.py check`.
 see [docs/specialty.md](docs/specialty.md).
 
-## pipeline
-
-clear implementation request → worker → independent review/tests/docs/lint →
-fixes and fresh verification if needed → authorized pr → ci → delivery. for a
-local-only request, stop at the verified commit.
-
-general research → scout report; unclear behavior → optional triage report.
-product direction → [plan](docs/planning.md), selected under the workflow rules above:
-spec, outcome-oriented work slices and independent readiness review; not tickets
-or implementation design.
-the coordinator reviews findings and decides on a bounded worker task, an
-information/access request, or a report-only conclusion. reports do not replace
-independent worker verification or complete a request for code delivery.
-
-this adopts no-mistakes' review/test/docs/lint/pr/ci goal using native subagents.
-it does not install its git proxy or enforce a server-side publishing gate:
-the coordinator follows the documented checks. independence means a fresh agent
-and separate checkout, not a guarantee that two instances of a model cannot share
-the same blind spot. a closed harness session is not an always-on service.
-
 ## first live checks
 
 1. register a disposable repo and record two tasks through `bin/tasks`.
@@ -153,26 +146,62 @@ the same blind spot. a closed harness session is not an always-on service.
 these are live harness acceptance checks, not claims already established by the
 script tests. use disposable projects and explicitly authorized github delivery.
 for checkpoint recovery, exercise interruption, same-assignment resume, replacement,
-and malformed/missing/stale cases from the [walkthroughs](docs/agent-tracking.md#recovery-walkthroughs)
+and malformed/missing/stale cases from the [walkthroughs](docs/reference/checkpoint-v1.md#recovery-walkthroughs)
 before relying on live agent compliance.
 
 ## development
 
-`make format` uses the black version hash-pinned with its dependencies in
-`requirements-dev.txt`. those pins need python 3.11+ to install and run; abra
-itself and `make test` stay python 3.9 compatible. install it into a separate venv:
+`make format` uses black and every dependency hash-pinned in `requirements-dev.txt`
+(python 3.11+); abra and normal `make test` remain python 3.9 compatible. **inspect
+existing formatter environments before installation**. reuse a trusted, complete
+separate formatter venv without activating it as a project environment. pass its
+absolute bin path and validation evidence in worker/verifier briefs.
+
+first establish provenance: who prepared it, hash-checked installation, trusted
+owner/permissions for environment, interpreter and their parent paths (including
+symlink targets), no credentials/project hooks or untrusted concurrent mutator.
+the read-only stdlib checker rejects unsafe environment permissions, missing tools,
+wrong shebang/interpreter/prefix, changed candidate digest and any missing/wrong pin;
+it is not an installer, environment manager or proof of package bytes/provenance.
+inspect external interpreter parents too; platform package-manager group-write
+permissions require an explicitly trusted admin group, not blind acceptance.
 
 ```sh
-python3.12 -m venv ~/.venvs/abra-black   # any python 3.11+
-~/.venvs/abra-black/bin/pip install --require-hashes -r requirements-dev.txt
+formatter_bin=/absolute/trusted/formatter/bin
+requirements_sha256='exact-digest-from-trusted-environment-preparation-or-prior-evidence'
+# compare candidate bytes to that saved digest; never refresh it to bypass a mismatch
+PYTHONDONTWRITEBYTECODE=1 python3 bin/check_formatter.py --bin "$formatter_bin" \
+  --requirements "$PWD/requirements-dev.txt" --requirements-sha256 "$requirements_sha256"
+PATH="$formatter_bin:$PATH" PYTHONDONTWRITEBYTECODE=1 BLACK_CACHE_DIR="$PWD/.cache/black" make format
+PYTHONDONTWRITEBYTECODE=1 make test
 ```
 
-with that venv's `bin` on `PATH`, run:
+save the reported exact requirements hash, resolved interpreter implementation/
+version/platform/architecture/prefix and all pins with the assignment evidence;
+compare them in each candidate checkout. candidate requirement changes, stale/
+partial/wrong-pin envs or unsupported interpreter block required format, not a pass.
+no test interpreter PATH change: `make test` uses normal python3. all bytecode,
+formatter/test/probe outputs and mutable project environments stay in the supplied
+worktree; reusable tooling is read-only during use. never run project installs in it.
+
+only if no compatible trusted environment exists and setup is separately authorized:
 
 ```sh
-make format
-make test
+python3.12 -m venv /absolute/new-exclusive/abra-black
+/absolute/new-exclusive/abra-black/bin/pip install --require-hashes -r requirements-dev.txt
 ```
+
+validate completely before handing off; never mutate a shared ready or partial
+installation, or let two preparers write one directory. different requirements/
+interpreter/platform require a separate authorized environment, not overwriting one
+in use. keep reusable tools outside worktree cleanup or retain their owning tree
+while readers exist. no automatic cache service or redundant verifier installation.
+
+iteration may use focused tests and formatting changed python. every candidate
+commit still requires canonical `make format`, `make test` and task checks; fresh
+independent verification reruns them at exact head. formatter changes fail review,
+not silent repair. documentation-only work needs no artificial test but retains
+required final gates. unavailable required checks block.
 
 tests use temporary git repositories to check alias resolution, collisions,
 dirty-checkout preservation, worker isolation, and exact-commit verification.
@@ -180,7 +209,7 @@ triage template tests check the portable input/report interface only; the scenar
 walkthroughs are static contract reviews, not evidence of live agent behavior.
 checkpoint tests guard the json example, shared inputs, and write/recovery
 instructions, plus
-exercise the standard-library [helper](docs/agent-tracking.md#deterministic-helper)
+exercise the standard-library [helper](docs/reference/checkpoint-v1.md#deterministic-helper)
 against disposable files and cli inputs; they do not establish live model compliance.
 
 workflow tests run disposable local simulated interruption trials under the
