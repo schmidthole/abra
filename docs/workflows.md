@@ -309,3 +309,100 @@ these tests do not establish native harness ownership/compliance, real pr/ci
 reconciliation, filesystem behavior under power loss, or unattended recovery.
 actual native trials still need disposable projects, explicit action authority,
 and a coordinator checking native state and artifacts at each interruption point.
+
+## opt-in manifest v2: review reuse and report-only method changes
+
+new workflows may explicitly initialize `version: 2`; recipe versions remain `1`.
+v1 remains strict and conservative, including renewed verification after a delivery
+revision. neither `update` nor a convenience command migrates between versions.
+old binaries reject v2. do not convert an in-flight task or backfill old identities.
+all existing fields, validators, single-writer/revision checks and atomic publication
+rules still apply. v2 adds these required fields (no unknown fields):
+
+- every brief: `implementation_identity` and `report_identity` (nullable).
+- every selection: `change_authorization` (nullable).
+- manifest: `implementation_reuses` (initially `[]`) and `method_authorization`
+  (nullable, fixed at initialization).
+
+for implement/code delivery, `implementation_identity` is required:
+
+```json
+{"base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","revision":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","contract":"/absolute/task/implementation-contract.md"}
+```
+
+`revision` is the sha256 of exact saved substantive contract bytes, asserted by the
+coordinator. save the original problem, acceptance, constraints, required local
+checks, environment/dependency/security assumptions and review assumptions in that
+contract; explain delivery-only exclusions. keep the exact bytes, not a mutable
+link. hashes and paths identify assertions, not semantic equivalence or authority.
+`report_identity` is null for implement and plan; plan retains exact package rules.
+report-only research/investigate may save
+`{"reference":"/absolute/task/read-only-contract.md","revision":"<sha256>"}`;
+its implementation identity is null.
+
+### explicit reuse, not synthetic verification
+
+append a reuse record only after a new operator-approved full brief/delivery
+revision, with a **new coordinator decision**:
+
+```json
+{"verify_attempt":"verify-2","acceptance_revision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","decision":"reuse-1"}
+```
+
+it must link the latest actual passed verifier in the current implement selection,
+with no intervening worker (even at the same candidate) or verifier. the original
+and new saved implementation identities must be exactly equal, including base and
+contract path/hash. the coordinator decision must explicitly compare saved contracts,
+checks and assumptions, and cite both full briefs, the substantive contract and the
+original verifier report as evidence. candidate equality alone is insufficient.
+a changed substantive identity requires fresh independent exact-candidate review.
+old reusable records remain history but cannot approve a later worker's output.
+
+reuse opens **deliver**, not completion: reserve a new deliver attempt bound to the
+current full acceptance/delivery revision; retain prior local receipts. a passed
+local deliver cannot complete a pr request. the helper never manufactures a passed
+verify, reads git, executes a check or grants action authority. before publication,
+the coordinator must independently establish current operator authority/specialty
+ceiling, clean worker tree and exact reviewed head, target repo/branch/base and
+assumption applicability; inspect existing prs before creation, verify remote/pr
+head after push, and inspect required ci at that exact head. record fresh evidence
+and decision on the new deliver attempt. pending/failed/unavailable required checks
+block delivery; absent checks are not ci passed. reconcile uncertain publication
+before retrying. these external checks are not performed by workflow helpers.
+
+### one preauthorized read-only method switch
+
+at initialization only, a report-only task may save:
+
+```json
+{"decision":"operator-read-only-preauth","acceptance_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+as `method_authorization`. its operator decision must cite the initial full brief
+and saved `report_identity.reference`. those saved bytes must explicitly authorize
+at most one research <-> **read-only** investigate method switch without changing
+the question, acceptance, scope, access, authority or report deliverable. no new
+diagnostic probes. initial recipe autonomy is not this permission. the helper
+validates linkage, not the natural-language authority in those bytes.
+
+append a new fixed recipe selection, with a new coordinator comparison decision
+citing that same full brief and report contract, and:
+
+```json
+{"authorization":"operator-read-only-preauth","prior_selection":"selection-01","reconciliation":"stopped-owners-1"}
+```
+
+as `change_authorization`. `reconciliation` must be a new explicit reconciliation
+decision. every prior attempt must be terminal; every prior assignment must have
+confirmed dispatch and a stopped/reconciled ownership decision. resolve active,
+blocked or uncertain dispatch/coordinator intents before switching. all history
+is retained. implement, plan, diagnostic execution, publication and a second
+coordinator switch are excluded. absent permission uses operator approval, not
+inferred eligibility. v1 always needs operator approval for later selections.
+
+this minimal v2 representation conservatively freezes the full report brief revision
+for tasks using a preauthorized switch; a later changed contract cannot retain that
+switch as eligible. ask for a separately authorized task instead of rewriting
+history. operator recipe selections remain possible otherwise, but cumulative
+implementation failures and planning validation/blocked budgets across v2 selections
+cannot be reset by a detour, acceptance change or replacement.

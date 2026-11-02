@@ -182,10 +182,9 @@ def grounding_identity(package):
     )
 
 
-def plan_progress(selection, acceptance):
+def plan_progress(selection, acceptance, validations=0, stopped=False):
     """replay report planning separately from implementation commit verification."""
     expected, current, approval, approval_acceptance = "refine", None, None, None
-    validations, stopped = 0, False
     refined_acceptance = None
     entries = ordered(selection)
     for index, (stage, attempt) in enumerate(entries):
@@ -299,13 +298,17 @@ def plan_progress(selection, acceptance):
     return expected
 
 
-def progress(selection, acceptance):
+def progress(selection, acceptance, context=None):
     """replay the fixed recipe only; assignments never determine success."""
     name = selection["recipe"]
     if name == "plan":
-        return plan_progress(selection, acceptance)
+        validations, stopped = prior_budget(context, selection, "plan")
+        return plan_progress(selection, acceptance, validations, stopped)
     stages = RECIPES[name]
-    expected, candidate, approval, failures = stages[0], None, None, 0
+    failures, _ = prior_budget(context, selection, "implement")
+    expected, candidate, approval = stages[0], None, None
+    verifier = None
+    delivery_revision = None
     report_revision = None
     entries = ordered(selection)
     for index, (stage, attempt) in enumerate(entries):
@@ -327,6 +330,14 @@ def progress(selection, acceptance):
             or restart
             or reverify
             or (
+                name == "implement"
+                and context is not None
+                and context["version"] == 2
+                and stage == "deliver"
+                and expected is None
+                and delivery_revision != attempt["acceptance_revision"]
+            )
+            or (
                 name != "implement"
                 and stage == "report"
                 and expected is None
@@ -336,7 +347,7 @@ def progress(selection, acceptance):
         )
         require(failures < 3, "two repair rounds exhausted")
         if stage == "worker":
-            approval = None
+            approval, verifier = None, None
         if stage in ("verify", "deliver"):
             require(
                 candidate is not None and attempt["candidate_commit"] == candidate,
@@ -344,7 +355,8 @@ def progress(selection, acceptance):
             )
         if stage == "deliver":
             require(
-                approval == attempt["acceptance_revision"],
+                approval == attempt["acceptance_revision"]
+                or reused(context, verifier, attempt["acceptance_revision"]),
                 "verification approval invalidated",
             )
         if attempt["status"] in ("active", "blocked"):
@@ -361,6 +373,9 @@ def progress(selection, acceptance):
             candidate = attempt["candidate_commit"]
         if stage == "verify":
             approval = attempt["acceptance_revision"]
+            verifier = attempt["id"]
+        if stage == "deliver":
+            delivery_revision = attempt["acceptance_revision"]
         if stage == "report":
             report_revision = attempt["acceptance_revision"]
         expected = stages[stages.index(stage) + 1] if stage != stages[-1] else None
@@ -370,17 +385,271 @@ def progress(selection, acceptance):
         and approval is not None
         and approval != acceptance
     ):
-        return "verify"
+        if not reused(context, verifier, acceptance):
+            return "verify"
+    if (
+        name == "implement"
+        and expected in ("deliver", None)
+        and context is not None
+        and context["version"] == 2
+        and delivery_revision != acceptance
+    ):
+        return "deliver"
     if name != "implement" and expected is None and report_revision != acceptance:
         return "report"
     return expected
 
 
-def validate(value):
-    fields(value, FIELDS, "workflow")
-    require(
-        type(value["version"]) is int and value["version"] == 1, "unsupported version"
+V2_FIELDS = {"implementation_reuses", "method_authorization"}
+
+
+def prior_budget(context, selection, recipe):
+    if context is None or context["version"] == 1:
+        return 0, False
+    count, stopped = 0, False
+    for prior in context["selections"]:
+        if prior is selection:
+            break
+        if prior["recipe"] == recipe:
+            for stage, attempt in ordered(prior):
+                if recipe == "plan" and stage == "validate":
+                    count += 1
+                    stopped |= attempt["verdict"] == "blocked"
+                elif (
+                    recipe == "implement"
+                    and stage == "verify"
+                    and attempt["status"] == "failed"
+                ):
+                    count += 1
+    return count, stopped
+
+
+def reused(context, verifier, acceptance):
+    return (
+        context is not None
+        and context["version"] == 2
+        and any(
+            r["verify_attempt"] == verifier and r["acceptance_revision"] == acceptance
+            for r in context["implementation_reuses"]
+        )
     )
+
+
+def validate_v2_contracts(value, decisions):
+    for brief in value["briefs"]:
+        implementation, report = (
+            brief["implementation_identity"],
+            brief["report_identity"],
+        )
+        if implementation is not None:
+            fields(
+                implementation,
+                ("base", "revision", "contract"),
+                "implementation identity",
+            )
+            require(
+                checkpoint.matches(COMMIT, implementation["base"])
+                and checkpoint.matches(HASH, implementation["revision"])
+                and path_string(implementation["contract"]),
+                "invalid implementation identity",
+            )
+        if report is not None:
+            fields(report, ("reference", "revision"), "report identity")
+            require(
+                path_string(report["reference"])
+                and checkpoint.matches(HASH, report["revision"]),
+                "invalid report identity",
+            )
+        require(
+            (implementation is not None) == (brief["requested_delivery"] != "report"),
+            "implementation identity requires code delivery",
+        )
+        require(
+            implementation is None or report is None, "incompatible contract identities"
+        )
+    authorization = value["method_authorization"]
+    if authorization is not None:
+        fields(
+            authorization, ("decision", "acceptance_revision"), "method authorization"
+        )
+        first = value["briefs"][0]
+        require(
+            authorization["acceptance_revision"] == first["acceptance_revision"]
+            and first["requested_delivery"] == "report"
+            and first["report_identity"] is not None,
+            "method authorization needs initial saved report contract",
+        )
+        decision_ref(authorization["decision"], decisions, ("operator",))
+        require(
+            first["reference"] in decisions[authorization["decision"]]["evidence"]
+            and first["report_identity"]["reference"]
+            in decisions[authorization["decision"]]["evidence"],
+            "method authorization needs saved operator and read-only contract evidence",
+        )
+    require(
+        type(value["implementation_reuses"]) is list, "invalid implementation reuses"
+    )
+    pairs, used_decisions = set(), set()
+    for reuse in value["implementation_reuses"]:
+        fields(
+            reuse,
+            ("verify_attempt", "acceptance_revision", "decision"),
+            "implementation reuse",
+        )
+        require(
+            checkpoint.matches(checkpoint.SLUG, reuse["verify_attempt"])
+            and checkpoint.matches(HASH, reuse["acceptance_revision"]),
+            "invalid reuse identity",
+        )
+        decision_ref(reuse["decision"], decisions, ("coordinator",))
+        pair = (reuse["verify_attempt"], reuse["acceptance_revision"])
+        require(
+            pair not in pairs and reuse["decision"] not in used_decisions,
+            "duplicate reuse",
+        )
+        pairs.add(pair)
+        used_decisions.add(reuse["decision"])
+
+
+def validate_v2_history(value, decisions):
+    briefs = {b["acceptance_revision"]: b for b in value["briefs"]}
+    verifiers = {
+        a["id"]: a
+        for s in value["selections"]
+        if s["recipe"] == "implement"
+        for stage, a in ordered(s)
+        if stage == "verify" and a["status"] == "passed"
+    }
+    for reuse in value["implementation_reuses"]:
+        require(
+            reuse["verify_attempt"] in verifiers
+            and reuse["acceptance_revision"] in briefs,
+            "reuse needs actual passed verifier and saved brief",
+        )
+        verifier = verifiers[reuse["verify_attempt"]]
+        old, new = (
+            briefs[verifier["acceptance_revision"]],
+            briefs[reuse["acceptance_revision"]],
+        )
+        require(
+            old["implementation_identity"] is not None
+            and old["implementation_identity"] == new["implementation_identity"]
+            and old["acceptance_revision"] != new["acceptance_revision"],
+            "substantive identity changed",
+        )
+        require(
+            briefs_order(value, old) < briefs_order(value, new),
+            "reuse must follow original review",
+        )
+        evidence = decisions[reuse["decision"]]["evidence"]
+        require(
+            all(
+                ref in evidence
+                for ref in (
+                    old["reference"],
+                    new["reference"],
+                    old["implementation_identity"]["contract"],
+                    verifier["report"],
+                )
+            ),
+            "reuse needs explicit saved contract comparison and verifier evidence",
+        )
+    switches = 0
+    for index, selection in enumerate(value["selections"]):
+        change = selection["change_authorization"]
+        if change is None:
+            continue
+        switches += 1
+        fields(
+            change,
+            ("authorization", "prior_selection", "reconciliation"),
+            "method change",
+        )
+        require(index > 0 and switches == 1, "only one preauthorized method switch")
+        prior = value["selections"][index - 1]
+        auth = value["method_authorization"]
+        require(
+            auth is not None
+            and change["authorization"] == auth["decision"]
+            and change["prior_selection"] == prior["id"],
+            "missing method preauthorization",
+        )
+        require(
+            {prior["recipe"], selection["recipe"]} == {"research", "investigate"},
+            "method switch is report-only research or read-only investigate",
+        )
+        require(
+            all(
+                b["acceptance_revision"] == auth["acceptance_revision"]
+                for b in value["briefs"]
+            ),
+            "method switch requires unchanged full report contract",
+        )
+        decision_ref(selection["decision"], decisions, ("coordinator",))
+        decision_ref(change["reconciliation"], decisions, ("reconciliation",))
+        require(
+            all(
+                ref in decisions[selection["decision"]]["evidence"]
+                for ref in (
+                    value["briefs"][0]["reference"],
+                    value["briefs"][0]["report_identity"]["reference"],
+                )
+            ),
+            "method switch needs unchanged contract comparison evidence",
+        )
+        for earlier in value["selections"][:index]:
+            for _, attempt in ordered(earlier):
+                require(
+                    attempt["status"] in ("passed", "failed")
+                    and all(
+                        l["dispatch"] == "confirmed" and l["reconciliation"] is not None
+                        for l in attempt["assignments"]
+                    ),
+                    "method switch needs stopped reconciled owners and resolved intents",
+                )
+
+
+def briefs_order(value, brief):
+    return value["briefs"].index(brief)
+
+
+def transition_v2(old, new):
+    require(
+        old["method_authorization"] == new["method_authorization"],
+        "method authorization is fixed at initialization",
+    )
+    prefix(old["implementation_reuses"], new["implementation_reuses"], "reuse")
+    new_decisions = {d["id"] for d in new["decisions"][len(old["decisions"]) :]}
+    for reuse in new["implementation_reuses"][len(old["implementation_reuses"]) :]:
+        entries = ordered(new["selections"][-1])
+        reviews = [
+            (i, a)
+            for i, (s, a) in enumerate(entries)
+            if s == "verify" and a["status"] == "passed"
+        ]
+        require(bool(reviews), "reuse needs latest real verifier")
+        position, verifier = reviews[-1]
+        require(
+            new["selections"][-1]["recipe"] == "implement"
+            and verifier["id"] == reuse["verify_attempt"]
+            and not any(s in ("worker", "verify") for s, _ in entries[position + 1 :])
+            and reuse["acceptance_revision"] == current_acceptance(new)
+            and reuse["decision"] in new_decisions,
+            "reuse needs current contract, new decision and no intervening worker or verifier",
+        )
+    for selection in new["selections"][len(old["selections"]) :]:
+        if selection["change_authorization"] is not None:
+            require(
+                selection["change_authorization"]["reconciliation"] in new_decisions,
+                "method switch needs fresh reconciliation",
+            )
+
+
+def validate(value):
+    require(type(value) is dict, "invalid workflow")
+    version = value.get("version")
+    require(type(version) is int and version in (1, 2), "unsupported version")
+    fields(value, FIELDS | V2_FIELDS if version == 2 else FIELDS, "workflow")
     require(checkpoint.matches(checkpoint.SLUG, value["task_id"]), "invalid task id")
     require(
         checkpoint.matches(
@@ -417,7 +686,8 @@ def validate(value):
     for brief in value["briefs"]:
         fields(
             brief,
-            ("reference", "acceptance_revision", "requested_delivery", "decision"),
+            ("reference", "acceptance_revision", "requested_delivery", "decision")
+            + (("implementation_identity", "report_identity") if version == 2 else ()),
             "brief",
         )
         require(
@@ -429,6 +699,8 @@ def validate(value):
             "invalid acceptance revision",
         )
         decision_ref(brief["decision"], decisions, ("operator",))
+    if version == 2:
+        validate_v2_contracts(value, decisions)
     acceptance = current_acceptance(value)
     revisions = [b["acceptance_revision"] for b in value["briefs"]]
     require(len(revisions) == len(set(revisions)), "brief revisions must be unique")
@@ -444,7 +716,8 @@ def validate(value):
     for selection_index, selection in enumerate(selections):
         fields(
             selection,
-            ("id", "recipe", "version", "rationale", "decision", "stages"),
+            ("id", "recipe", "version", "rationale", "decision", "stages")
+            + (("change_authorization",) if version == 2 else ()),
             "selection",
         )
         require(
@@ -464,7 +737,10 @@ def validate(value):
         require(checkpoint.text(selection["rationale"]), "selection rationale required")
         # initial routing is not authority to change scope or branch later.
         selection_kinds = (
-            ("operator", "coordinator") if selection_index == 0 else ("operator",)
+            ("operator", "coordinator")
+            if selection_index == 0
+            or (version == 2 and selection["change_authorization"] is not None)
+            else ("operator",)
         )
         decision_ref(selection["decision"], decisions, selection_kinds)
         require(type(selection["stages"]) is list, "invalid stages")
@@ -487,6 +763,27 @@ def validate(value):
                     ATTEMPT_FIELDS | PLAN_FIELDS if planning else ATTEMPT_FIELDS,
                     "attempt",
                 )
+                if version == 2:
+                    saved = next(
+                        (
+                            b
+                            for b in value["briefs"]
+                            if b["acceptance_revision"]
+                            == attempt["acceptance_revision"]
+                        ),
+                        None,
+                    )
+                    require(saved is not None, "unknown acceptance revision")
+                    require(
+                        (saved["implementation_identity"] is not None)
+                        == (selection["recipe"] == "implement"),
+                        "contract identity does not match recipe",
+                    )
+                    require(
+                        selection["recipe"] != "plan"
+                        or saved["report_identity"] is None,
+                        "plan uses exact package identities, not report method identity",
+                    )
                 if planning:
                     validate_package(attempt["package"])
                     validate_package(attempt["result_package"])
@@ -715,12 +1012,14 @@ def validate(value):
             [a["order"] for _, a in entries] == list(range(1, len(entries) + 1)),
             "attempt order must be contiguous",
         )
-        progress(selection, acceptance)
+        progress(selection, acceptance, value)
     if selections[-1]["recipe"] == "plan":
         require(
             current_delivery(value) == "report", "plan supports report delivery only"
         )
-    expected = progress(selections[-1], acceptance)
+    if version == 2:
+        validate_v2_history(value, decisions)
+    expected = progress(selections[-1], acceptance, value)
     require(
         value["current_stage"] == expected,
         "current stage does not match recipe progress",
@@ -787,6 +1086,11 @@ def validate(value):
                 ),
                 "plan delivery needs all three exact report references",
             )
+        if version == 2:
+            require(
+                last[1]["acceptance_revision"] == acceptance,
+                "completion requires current delivery revision",
+            )
         delivery = current_delivery(value)
         if delivery == "local-commit":
             require(
@@ -816,7 +1120,13 @@ def prefix(old, new, name):
 
 
 def transition(old, new):
+    require(
+        old["version"] == new["version"],
+        "workflow version is immutable; no live migration",
+    )
     require(old["task_id"] == new["task_id"], "task identity is immutable")
+    if old["version"] == 2:
+        transition_v2(old, new)
     new_decisions = {d["id"] for d in new["decisions"][len(old["decisions"]) :]}
     prefix(old["decisions"], new["decisions"], "decision")
     prefix(old["briefs"], new["briefs"], "brief")

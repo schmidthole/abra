@@ -1172,3 +1172,284 @@ class WorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowV2Tests(unittest.TestCase):
+    selection = WorkflowTests.selection
+    save = WorkflowTests.save
+    stage = WorkflowTests.stage
+    last = WorkflowTests.last
+    reserve = WorkflowTests.reserve
+    worker = WorkflowTests.worker
+    verify = WorkflowTests.verify
+    complete = WorkflowTests.complete
+    reconcile = WorkflowTests.reconcile
+    agent = WorkflowTests.agent
+
+    def setUp(self):
+        WorkflowTests.setUp(self)
+        self.value.update(
+            version=2, implementation_reuses=[], method_authorization=None
+        )
+        self.value["briefs"][0].update(
+            implementation_identity=dict(
+                base="c" * 40, revision="d" * 64, contract=str(self.brief)
+            ),
+            report_identity=None,
+        )
+        self.value["selections"][0]["change_authorization"] = None
+
+    def finish(self, *args, **kwargs):
+        original = workflow.progress
+        with patch.object(
+            workflow,
+            "progress",
+            side_effect=lambda s, a, context=None: original(s, a, self.value),
+        ):
+            WorkflowTests.finish(self, *args, **kwargs)
+
+    def revised(self):
+        brief = dict(
+            self.value["briefs"][0],
+            acceptance_revision="e" * 64,
+            reference=str(self.path.parent / "pr-request.md"),
+            requested_delivery="pr",
+            decision="pr",
+        )
+        Path(brief["reference"]).write_text(
+            "operator authorized pr delivery; substantive contract unchanged\n"
+        )
+        self.value["briefs"].append(brief)
+        self.value["decisions"].append(
+            dict(
+                id="pr",
+                kind="operator",
+                summary="pr delivery authorized",
+                evidence=[brief["reference"]],
+            )
+        )
+        self.value.update(
+            status="active",
+            next_action="review delivery revision",
+            current_stage="verify",
+        )
+
+    def reuse(self):
+        verify = self.stage("verify")["attempts"][-1]
+        self.value["implementation_reuses"].append(
+            dict(
+                verify_attempt=verify["id"],
+                acceptance_revision="e" * 64,
+                decision="reuse",
+            )
+        )
+        self.value["decisions"].append(
+            dict(
+                id="reuse",
+                kind="coordinator",
+                summary="compared saved contracts, base, checks and assumptions; exact candidate unchanged",
+                evidence=[
+                    self.value["briefs"][0]["reference"],
+                    self.value["briefs"][1]["reference"],
+                    str(self.report),
+                ],
+            )
+        )
+        self.value["current_stage"] = "deliver"
+
+    def test_delivery_revision_reuses_real_review_but_requires_fresh_delivery(self):
+        self.save(True)
+        self.worker()
+        self.verify()
+        self.reserve("deliver", "b" * 40)
+        self.finish()
+        self.complete()
+        historical = copy.deepcopy(self.value["selections"][0]["stages"])
+        self.revised()
+        self.save()
+        self.reuse()
+        self.save()
+        self.assertEqual(historical, self.value["selections"][0]["stages"])
+        self.value.update(status="completed", next_action=None)
+        with self.assertRaisesRegex(ValueError, "completion requires"):
+            self.save()
+        self.value.update(status="active", next_action="reserve current delivery")
+        self.reserve("deliver", "b" * 40)
+        self.finish()
+        self.complete()
+        self.assertEqual(len(self.stage("verify")["attempts"]), 1)
+        self.assertEqual(len(self.stage("deliver")["attempts"]), 2)
+        self.assertIn("b" * 40, self.value["delivery_refs"])
+        self.assertIn("https://example.test/pr/1", self.value["delivery_refs"])
+
+    def test_reuse_identity_and_evidence_failures_preserve_bytes(self):
+        self.save(True)
+        self.worker()
+        self.verify()
+        self.revised()
+        self.save()
+        self.reuse()
+        valid = copy.deepcopy(self.value)
+        before = self.path.read_bytes()
+        for field, bad in [
+            ("base", "f" * 40),
+            ("revision", "f" * 64),
+            ("contract", str(self.report)),
+        ]:
+            with self.subTest(field=field):
+                self.value = copy.deepcopy(valid)
+                self.value["briefs"][1]["implementation_identity"] = dict(
+                    self.value["briefs"][1]["implementation_identity"], **{field: bad}
+                )
+                with self.assertRaisesRegex(ValueError, "substantive identity changed"):
+                    self.save()
+                self.assertEqual(before, self.path.read_bytes())
+        self.value = copy.deepcopy(valid)
+        self.value["decisions"][-1]["evidence"] = [str(self.report)]
+        with self.assertRaisesRegex(ValueError, "comparison"):
+            self.save()
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_new_worker_or_verifier_prevents_reuse(self):
+        self.save(True)
+        self.worker()
+        self.verify()
+        self.revised()
+        self.save()
+        self.reserve("worker")
+        self.finish(commit="b" * 40)
+        self.reuse()
+        self.value["current_stage"] = "verify"
+        with self.assertRaisesRegex(ValueError, "intervening worker"):
+            self.save()
+
+    def report_workflow(self):
+        self.value["briefs"][0].update(
+            requested_delivery="report",
+            implementation_identity=None,
+            report_identity=dict(reference=str(self.brief), revision="d" * 64),
+        )
+        self.value["selections"] = [
+            dict(
+                self.selection("research", "selection-01", "select"),
+                change_authorization=None,
+            )
+        ]
+        self.value["current_stage"] = "scout"
+        self.value["method_authorization"] = dict(
+            decision="select", acceptance_revision="a" * 64
+        )
+
+    def switch(self, recipe="investigate"):
+        prior = self.value["selections"][-1]
+        self.value["decisions"].extend(
+            [
+                dict(
+                    id="stopped",
+                    kind="reconciliation",
+                    summary="all owners stopped and evidence reconciled",
+                    evidence=[str(self.report)],
+                ),
+                dict(
+                    id="switch",
+                    kind="coordinator",
+                    summary="same question, read-only authority and report contract; method only",
+                    evidence=[str(self.brief)],
+                ),
+            ]
+        )
+        self.value["selections"].append(
+            dict(
+                self.selection(recipe, "selection-02", "switch"),
+                change_authorization=dict(
+                    authorization="select",
+                    prior_selection=prior["id"],
+                    reconciliation="stopped",
+                ),
+            )
+        )
+        self.value.update(
+            current_stage=workflow.RECIPES[recipe][0],
+            status="active",
+            next_action="reserve read-only assignment",
+        )
+
+    def test_one_preauthorized_read_only_method_switch(self):
+        self.report_workflow()
+        self.save(True)
+        self.reserve("scout")
+        self.finish()
+        self.reconcile(self.last()["assignments"][0])
+        self.save()
+        self.switch()
+        self.save()
+        self.assertEqual(self.value["current_stage"], "triage")
+        old = copy.deepcopy(self.value)
+        self.value["decisions"].append(
+            dict(
+                id="switch-again",
+                kind="coordinator",
+                summary="switch back",
+                evidence=[str(self.brief)],
+            )
+        )
+        self.value["selections"].append(
+            dict(
+                self.selection("research", "selection-03", "switch-again"),
+                change_authorization=dict(
+                    authorization="select",
+                    prior_selection="selection-02",
+                    reconciliation="stopped",
+                ),
+            )
+        )
+        self.value["current_stage"] = "scout"
+        with self.assertRaisesRegex(ValueError, "only one"):
+            self.save()
+        self.value = old
+        self.value["method_authorization"] = None
+        with self.assertRaisesRegex(ValueError, "preauthorization"):
+            self.save()
+
+    def test_method_switch_rejects_unresolved_or_unreconciled_ownership(self):
+        for terminal, reconciled in [(False, False), (True, False)]:
+            with self.subTest(terminal=terminal):
+                self.setUp()
+                self.report_workflow()
+                self.save(True)
+                self.reserve("scout")
+                if terminal:
+                    self.finish()
+                self.switch()
+                before = self.path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "stopped reconciled owners"):
+                    self.save()
+                self.assertEqual(before, self.path.read_bytes())
+
+    def test_v2_strict_fields_no_migration_or_authorization_backfill(self):
+        self.save(True)
+        for mutation in ("version", "method", "unknown", "null-identity"):
+            with self.subTest(mutation=mutation):
+                value = copy.deepcopy(self.value)
+                if mutation == "version":
+                    value["version"] = 1
+                elif mutation == "method":
+                    value["method_authorization"] = {}
+                elif mutation == "unknown":
+                    value["briefs"][0]["implementation_identity"]["extra"] = True
+                else:
+                    value["briefs"][0]["implementation_identity"] = None
+                with self.assertRaises(ValueError):
+                    workflow.validate(value)
+        value = copy.deepcopy(self.value)
+        value["version"] = 1
+        for k in workflow.V2_FIELDS:
+            value.pop(k)
+        for b in value["briefs"]:
+            b.pop("implementation_identity")
+            b.pop("report_identity")
+        for s in value["selections"]:
+            s.pop("change_authorization")
+        workflow.validate(value)
+        with self.assertRaisesRegex(ValueError, "version is immutable"):
+            workflow.transition(self.value, value)
