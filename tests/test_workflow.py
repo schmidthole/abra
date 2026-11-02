@@ -232,6 +232,124 @@ class WorkflowTests(unittest.TestCase):
         )
         link["reconciliation"] = id
 
+    def test_coordinator_initial_selection_for_each_fixed_recipe(self):
+        for recipe in workflow.RECIPES:
+            with self.subTest(recipe=recipe):
+                self.path = self.root / recipe / "example/workflow.json"
+                self.value["briefs"][0]["requested_delivery"] = (
+                    "local-commit" if recipe == "implement" else "report"
+                )
+                self.value["decisions"] = [self.value["decisions"][0]]
+                self.value["decisions"].append(
+                    dict(
+                        id="route",
+                        kind="coordinator",
+                        summary="smallest suitable recipe for the saved clear request",
+                        evidence=[str(self.brief)],
+                    )
+                )
+                selection = self.selection(recipe, "selection-01", "route")
+                selection["rationale"] = "bounded request fits " + recipe + " v1"
+                self.value["selections"] = [selection]
+                self.value["current_stage"] = workflow.RECIPES[recipe][0]
+                self.save(True)
+                read = workflow.read_workflow(self.path, "example")["workflow"]
+                self.assertEqual(read["selections"][0], selection)
+                self.assertEqual(read["briefs"][0]["decision"], "select")
+                self.assertEqual(read["decisions"][0]["kind"], "operator")
+                self.value["checkpoint"] = "recorded initial choice and rationale"
+                self.save()
+
+    def test_initial_selection_does_not_grant_brief_authority(self):
+        self.value["decisions"].append(
+            dict(
+                id="route",
+                kind="coordinator",
+                summary="selected implement for a clear code-change request",
+                evidence=[str(self.brief)],
+            )
+        )
+        self.value["selections"][0]["decision"] = "route"
+        self.save(True)
+        prior = self.path.read_bytes()
+        self.value["briefs"].append(
+            dict(
+                reference=str(self.brief),
+                acceptance_revision="d" * 64,
+                requested_delivery="pr",
+                decision="route",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "inappropriate coordinator decision"):
+            self.save()
+        self.assertEqual(self.path.read_bytes(), prior)
+
+    def test_initial_selection_rejects_missing_reconciliation_and_empty_rationale(self):
+        for decision in ("missing", "reconcile"):
+            with self.subTest(decision=decision):
+                bad = copy.deepcopy(self.value)
+                bad["decisions"].append(
+                    dict(
+                        id="reconcile",
+                        kind="reconciliation",
+                        summary="ownership inspected, not a recipe choice",
+                        evidence=[str(self.report)],
+                    )
+                )
+                bad["selections"][0]["decision"] = decision
+                with self.assertRaises(ValueError):
+                    workflow.validate(bad)
+        self.value["selections"][0]["rationale"] = ""
+        with self.assertRaisesRegex(ValueError, "rationale required"):
+            self.save(True)
+        self.assertFalse(self.path.exists())
+
+    def test_later_recipe_selection_still_requires_operator(self):
+        self.save(True)
+        prior = self.path.read_bytes()
+        self.value["decisions"].append(
+            dict(
+                id="change",
+                kind="coordinator",
+                summary="attempted autonomous branching",
+                evidence=[str(self.brief)],
+            )
+        )
+        self.value["selections"].append(
+            self.selection("investigate", "selection-02", "change")
+        )
+        self.value["current_stage"] = "triage"
+        with self.assertRaisesRegex(ValueError, "inappropriate coordinator decision"):
+            self.save()
+        self.assertEqual(self.path.read_bytes(), prior)
+        self.value["decisions"][-1]["kind"] = "operator"
+        self.value["decisions"][-1]["summary"] = "operator explicitly changed recipe"
+        self.save()
+        self.assertEqual(len(self.value["selections"]), 2)
+
+    def test_coordinator_selection_preserves_verification_and_delivery_scope(self):
+        self.value["decisions"].append(
+            dict(
+                id="route",
+                kind="coordinator",
+                summary="selected smallest suitable implement recipe",
+                evidence=[str(self.brief)],
+            )
+        )
+        self.value["selections"][0]["decision"] = "route"
+        self.save(True)
+        self.worker()
+        prior = copy.deepcopy(self.value)
+        with self.assertRaises(ValueError):
+            self.reserve("deliver", "b" * 40)
+        self.value = prior
+        self.verify()
+        self.reserve("deliver", "b" * 40)
+        self.finish()
+        self.complete()
+        self.assertEqual(workflow.current_delivery(self.value), "local-commit")
+        self.assertEqual(self.value["delivery_refs"], ["b" * 40])
+
     def test_happy_implement_verify_deliver(self):
         self.save(True)
         self.worker()
@@ -823,7 +941,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_docs_example_and_all_nested_fields_are_strict(self):
         docs = (ROOT / "docs/workflows.md").read_text()
-        workflow.validate(json.loads(docs.split("```json\n", 1)[1].split("```", 1)[0]))
+        example = json.loads(docs.split("```json\n", 1)[1].split("```", 1)[0])
+        workflow.validate(example)
+        decisions = {d["id"]: d["kind"] for d in example["decisions"]}
+        self.assertEqual(decisions[example["briefs"][0]["decision"]], "operator")
+        self.assertEqual(decisions[example["selections"][0]["decision"]], "coordinator")
         self.save(True)
         self.reserve("worker")
         good = copy.deepcopy(self.value)
@@ -990,6 +1112,43 @@ class WorkflowTests(unittest.TestCase):
         source = HELPER.read_text()
         self.assertNotIn("import subprocess", source)
         self.assertNotIn("bin/tasks", source)
+
+    def test_initial_recipe_selection_instruction_contracts(self):
+        for path in (
+            "AGENTS.md",
+            "README.md",
+            "docs/workflows.md",
+            "docs/planning.md",
+            "docs/specialty.md",
+            "docs/modes/specialty.md",
+        ):
+            with self.subTest(path=path):
+                text = " ".join((ROOT / path).read_text().split())
+                for phrase in (
+                    "initial",
+                    "smallest suitable",
+                    "rationale",
+                    "explicit operator",
+                    "intent",
+                    "scope",
+                    "acceptance",
+                    "authority",
+                    "later recipe changes",
+                    "publication, merge, production or other external-action authority",
+                ):
+                    self.assertIn(phrase, text)
+                self.assertNotIn("operator-selected plan", text)
+                self.assertNotIn("get explicit operator recipe selection", text)
+        policy = " ".join((ROOT / "docs/workflows.md").read_text().split())
+        self.assertIn("without asking the operator to choose a workflow", policy)
+        self.assertIn("ask only when", policy)
+        self.assertIn("separate action authority and delivery ceilings", policy)
+        self.assertIn("brief decisions remain operator-only", policy)
+        self.assertIn("initial verification plus at most two repair rounds", policy)
+        self.assertIn("unknown ownership blocks work", policy)
+        self.assertNotIn(
+            "## autonomous workflow selection", (ROOT / "improvements.md").read_text()
+        )
 
     def test_portable_and_specialty_workflow_contracts(self):
         for role in ("worker", "verify", "scout", "triage"):

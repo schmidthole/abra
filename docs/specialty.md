@@ -76,7 +76,10 @@ when a pack is present:
   four roles even when an override omits them; overrides cannot weaken the tracking or original role boundaries.
 - overrides must also receive the [workflow context](workflows.md): absolute
   read-only workflow path, selected recipe/version and selection id, stage and
-  attempt ids. overrides cannot weaken operator selection, coordinator-only
+  attempt ids. overrides cannot weaken the initial recipe selection rules (record
+  the smallest suitable choice and rationale for clear requests, honor explicit
+  operator selections, ask only for material intent/scope/acceptance/authority
+  ambiguity), operator approval for later recipe changes, coordinator-only
   manifest ownership, intent-before-action, ownership reconciliation or exact
   candidate/acceptance verification. missing override fields are supplied by the
   coordinator, never silently omitted. no tracker ownership changes.
@@ -84,7 +87,9 @@ when a pack is present:
   override lookup and shared scout checkpoint/workflow contracts. preserve the
   [planning](planning.md) boundaries, package byte checks, fresh independent validation
   and report-only delivery even when a specialty permits code delivery.
-- delivery stops at the `delivery` ceiling.
+- recipe selection grants no publication, merge, production or other external-action
+  authority; separate action authority still applies and delivery stops at the
+  `delivery` ceiling.
 
 ## startup check
 

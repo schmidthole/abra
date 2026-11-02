@@ -1,6 +1,8 @@
 # product planning
 
-use the operator-selected `plan` v1 recipe for product direction, not code delivery:
+use the `plan` v1 recipe for product direction, not code delivery; apply the initial
+recipe selection rules in [workflows](workflows.md), honoring explicit operator
+choices and otherwise recording the coordinator's smallest suitable choice:
 `refine -> ground -> validate -> deliver`. it uses the existing coordinator workflow,
 tasks-axi and native subagents; there is no new runtime, database, scheduler or dag.
 see [workflow schema and recovery](workflows.md). no issue creation, scheduling,
@@ -86,8 +88,13 @@ a blocked unresolved validation may carry blocked. other plan stages have null v
 
 ## coordinator protocol and bounded feedback
 
-1. save full request/authority, get explicit operator recipe selection, initialize as
-   documented in workflows. report is the only requested delivery supported by plan.
+1. save full request/authority, record the initial recipe choice and rationale under
+   the workflow rules, and initialize as documented in workflows. for a clear initial
+   request proceed without a workflow-choice question; ask only when intent, scope,
+   acceptance or authority is materially ambiguous. report is the only requested
+   delivery supported by plan. selection grants no publication, merge, production or
+   other external-action authority; separate action authority and delivery ceilings
+   still apply.
 2. save immutable snapshots of current document bytes and evidence before replacements
    under `data/<task-id>/` (include snapshot refs in attempt/decision evidence). preserve
    earlier findings and supersession notes in review. hashes identify history but do
@@ -132,9 +139,10 @@ a blocked unresolved validation may carry blocked. other plan stages have null v
    than certify stale scope. new implementation needs separate approval and recipe.
 
 existing reconciliation, same-assignment resume, replacement ownership and immutable
-history rules apply. a new operator-selected recipe/selection is explicit authority,
-not a coordinator escape from the repair limit. preserve any unresolved dispatch or
-delivery intent; `show` never authorizes repeat action.
+history rules apply. later recipe changes require explicit operator approval,
+not a coordinator escape from the repair limit or a grant of external-action
+authority. preserve any unresolved dispatch or delivery intent; `show` never
+authorizes repeat action.
 
 ## enforcement and limits
 

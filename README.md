@@ -60,10 +60,16 @@ success, or a second task system. tasks-axi remains coordinator-owned.
 
 ## durable workflows
 
-the operator selects a fixed [workflow recipe](docs/workflows.md): implement
+for a clear initial delegated request, the coordinator selects the smallest suitable
+fixed versioned [workflow recipe](docs/workflows.md): implement
 (worker -> verify -> deliver), investigate (triage -> coordinator review -> report),
 research (scout -> report), or [plan](docs/planning.md)
 (refine -> ground -> validate -> deliver; report-only product direction).
+record the choice and rationale and proceed without a workflow-choice question.
+explicit operator selections prevail; ask only when intent, scope, acceptance or
+authority is materially ambiguous. later recipe changes require explicit operator
+approval. selection grants no publication, merge, production or other external-action
+authority; separate action authority and delivery ceilings still apply.
 one coordinator-owned `data/<task-id>/workflow.json` links stable stage attempts
 to existing assignment
 checkpoints and saved full briefs. `bin/workflow.py` provides strict init/read,
@@ -121,8 +127,9 @@ fixes and fresh verification if needed → authorized pr → ci → delivery. fo
 local-only request, stop at the verified commit.
 
 general research → scout report; unclear behavior → optional triage report.
-product direction → operator-selected [plan](docs/planning.md): spec, outcome-oriented
-work slices and independent readiness review; not tickets or implementation design.
+product direction → [plan](docs/planning.md), selected under the workflow rules above:
+spec, outcome-oriented work slices and independent readiness review; not tickets
+or implementation design.
 the coordinator reviews findings and decides on a bounded worker task, an
 information/access request, or a report-only conclusion. reports do not replace
 independent worker verification or complete a request for code delivery.
