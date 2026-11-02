@@ -45,6 +45,25 @@ class RepositoryContractsTests(unittest.TestCase):
             with self.subTest(path=name):
                 self.assertTrue((ROOT / name).exists())
 
+    def test_readme_local_heading_references_resolve(self):
+        readme = (ROOT / "README.md").read_text()
+        references = re.findall(r"\]\(([^)#]*)#([^)]*)\)", readme)
+        self.assertTrue(references)
+        for reference, fragment in references:
+            if "://" in reference:
+                continue
+            target = ROOT / (reference or "README.md")
+            with self.subTest(reference=reference, fragment=fragment):
+                self.assertTrue(target.is_file())
+                headings = re.findall(
+                    r"^#{1,6} (.+)$", target.read_text(), re.MULTILINE
+                )
+                anchors = {
+                    re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-")
+                    for heading in headings
+                }
+                self.assertIn(fragment, anchors)
+
     def test_documentation_file_references_resolve(self):
         documents = [
             *ROOT.glob("*.md"),

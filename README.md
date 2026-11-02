@@ -146,7 +146,7 @@ see [docs/specialty.md](docs/specialty.md).
 these are live harness acceptance checks, not claims already established by the
 script tests. use disposable projects and explicitly authorized github delivery.
 for checkpoint recovery, exercise interruption, same-assignment resume, replacement,
-and malformed/missing/stale cases from the [walkthroughs](docs/agent-tracking.md#recovery-walkthroughs)
+and malformed/missing/stale cases from the [walkthroughs](docs/reference/checkpoint-v1.md#recovery-walkthroughs)
 before relying on live agent compliance.
 
 ## development
@@ -209,7 +209,7 @@ triage template tests check the portable input/report interface only; the scenar
 walkthroughs are static contract reviews, not evidence of live agent behavior.
 checkpoint tests guard the json example, shared inputs, and write/recovery
 instructions, plus
-exercise the standard-library [helper](docs/agent-tracking.md#deterministic-helper)
+exercise the standard-library [helper](docs/reference/checkpoint-v1.md#deterministic-helper)
 against disposable files and cli inputs; they do not establish live model compliance.
 
 workflow tests run disposable local simulated interruption trials under the
