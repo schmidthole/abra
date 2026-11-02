@@ -2,12 +2,31 @@
 
 ## status, scope and evidence
 
-this is a proposal for later implementation, not active operating policy. it does
-not change routing, verification, authority, tracking or required checks today.
-the current rules in `AGENTS.md`, `CLAUDE.md` and the linked operating documents
-continue to apply until separately authorized changes are implemented and verified.
-no implementation, publication, merge, production action or live harness trial is
-authorized by this document. the current assignment changes this file only.
+implementation status: the original ten-gain handoff below is retained as historical
+scope, not active proposal-only guidance. the operator subsequently authorized
+implementation in abra-efficiency-implementation. active contracts are in AGENTS.md
+and linked docs; this document grants no publication/external-action authority.
+
+| gain | implemented seam / evidence |
+| --- | --- |
+| 1 | opt-in workflow v2 implementation identity/reuse; workflow regression tests |
+| 2 | embedded compact-checkpoint-v1; all seven templates and specialty; rendered negative contract tests |
+| 3 | typed workflow reserve/confirm/decide/delivery and checkpoint progress; strict persistence tests |
+| 4 | explicit field ownership; read-only show --compact; observation/failure tests |
+| 5 | active opt-in lightweight routing and scout variant; routing/interrupt/escalation contract fixtures |
+| 6 | observed capability preflight guidance and actual native worker evidence; fresh final verifier still required |
+| 7 | validated existing formatter reuse; read-only checker and incompatible/partial environment tests; detached reuse gate remains |
+| 8 | relevant startup including cross-repo resources/aliases/promises and global fallback; decision fixtures |
+| 9 | once-only initially preauthorized v2 same-report read-only method switch; legacy/budget/owner rejection tests |
+| 10 | normalized whole-rule/rendered negative checks; focused iteration and canonical final gates |
+
+worker checks are not independent approval. task-local core/policy reports record
+exact commits, commands, brief sizes, safety coverage and limits; fresh independent
+whole-scope exact-candidate verification remains the delivery gate. no live github,
+other-harness or model-compliance trial is claimed. original detailed proposal
+language below describes the saved handoff, not unavailable commands today; consult
+current helper --help and docs for actual interfaces. the original edited plan
+worktree remains untouched; only this copied document's EOF is normalized.
 
 this handoff preserves the numbering of the ten recommendations in the efficiency
 review. its source baseline is commit
@@ -769,4 +788,3 @@ legacy-read behavior and explicit migration authority. before d, settle compact
 contract/reference versioning. before h/i/j, approve their concrete allowed and
 excluded cases. these are deliberate future decision gates; the current task
 asks for a detailed plan, not authorization to make them active.
-

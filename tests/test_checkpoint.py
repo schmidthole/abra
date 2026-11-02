@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "bin/checkpoint.py"
-SPEC = (ROOT / "docs/agent-tracking.md").read_text()
+SPEC = (ROOT / "docs/reference/checkpoint-v1.md").read_text()
 spec = importlib.util.spec_from_file_location("checkpoint", HELPER)
 checkpoint = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checkpoint)

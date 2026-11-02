@@ -6,6 +6,7 @@ base commit: {{base_commit}}
 original user request: {{request}}
 acceptance criteria: {{acceptance}}
 constraints and project instructions: {{constraints}}
+report path: {{report_path}}
 
 ## coordinator workflow context
 
@@ -14,41 +15,40 @@ selected recipe/version and selection id: {{workflow_recipe}}
 stage id: {{workflow_stage}}
 attempt id: {{workflow_attempt}}
 
-the coordinator alone writes the workflow manifest. use this context to relate
-this assignment to its stage attempt, not to infer authority or success. native
-run ids and detailed steps stay in your assigned checkpoint. resuming the same
-assignment does not create a new attempt; a replacement gets a new assignment and
-predecessor after ownership reconciliation. your completed status is not stage
-approval or requested delivery. report evidence and actual verdict to the coordinator.
-do not launch agents or update tasks-axi or the workflow manifest.
+the coordinator alone writes the workflow manifest. stage approval requires an
+explicit coordinator evidence/decision, never completed agent status. do not launch
+agents or update tasks-axi, registry or manifest; report evidence and actual verdict.
 
 ## shared checkpoint
+
+checkpoint role: worker
 
 assignment: {{assignment}}
 tracker path (absolute): {{tracker_path}}
 checkpoint helper path (absolute bin/checkpoint.py): {{checkpoint_helper}}
 predecessor assignment (slug or null): {{predecessor}}
 known native run ids (json array, empty if unknown): {{run_ids}}
-shared tracking instructions (full docs/agent-tracking.md contents): {{tracking_instructions}}
+detail snapshot absolute path: {{tracking_reference}}
+detail snapshot sha256: {{tracking_reference_sha256}}
+embedded portable contract (entire compact-checkpoint-v1 block): {{tracking_instructions}}
 
-before substantive work, follow the supplied shared tracking instructions to
-initialize or safely resume your checkpoint using the supplied absolute helper
-with python3 and complete proposals on stdin (no extra scratch files). the helper
-handles deterministic file mechanics only; you own semantic planning and recovery.
-update after meaningful steps, before consequential actions, and before pause/return.
-if the path/helper/instructions are missing, ownership is uncertain, or a write
-fails, pause and report the problem to the coordinator; do not silently proceed untracked.
+## tooling
 
-all roles may write only the assigned tracker and its same-directory atomic
-replacement temporary file as a narrow tracking exception outside the project
-worktree. the helper may create missing tracker parent directories.
-invoking the supplied helper with python3 for this tracker is allowed
-from the supplied working directory (or without project commands when null),
-even for read-only roles. this does not grant other write or execution authority.
-preserve malformed or foreign checkpoints. status is last reported progress, not liveness
-or independently verified success. keep original role boundaries below.
+validated absolute formatter bin (requirements digest/interpreter/all pins/trust evidence in capability evidence): {{formatter_bin}}
+use this path only for canonical format, disable bytecode and put caches in this
+worktree. keep the normal python3 for tests; do not activate a shared project env.
+unavailable or incompatible tooling blocks required checks; do not install again
+without inspecting existing environments and obtaining setup authority.
+
+## capability evidence
+
+observed harness/profile/tool allowlist, path permissions and limitations: {{capability_evidence}}
+
+- [capability] require observed worktree read/write, shell/git/python/helper, canonical tests/formatter, task commit and tracker/report writes; missing required capability blocks and requires ownership reconciliation before replacement.
 
 ## assignment
+
+- [role-boundary] change only task-owned files in the supplied worktree; commit only task changes after required checks. do not edit coordinator records, publish, merge or launch agents.
 
 implement this bounded task. read the project's applicable instructions (AGENTS.md, CLAUDE.md, or equivalent). run all
 commands in the specified working directory and change project files only there. use the
@@ -68,6 +68,12 @@ validate the approved direction against the code. do not silently make new
 product, architecture, or scope decisions. if the direction has gaps or conflicts
 with the code, pause and return the evidence and required decision to the
 coordinator rather than choosing an unapproved direction.
+
+during iteration use focused tests and format changed python as needed. before
+committing a candidate run canonical make format and make test plus required
+task-specific checks; independent verification reruns them at the exact candidate.
+a new worker/candidate or substantive acceptance change requires fresh review;
+v2 delivery-only reuse is a coordinator comparison decision, not worker approval.
 
 commit only task-owned files after inspecting the diff. report the full commit
 hash, changed behavior, tests and formatter commands with outcomes, and any

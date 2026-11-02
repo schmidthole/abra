@@ -1114,42 +1114,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("import subprocess", source)
         self.assertNotIn("bin/tasks", source)
 
-    def test_initial_recipe_selection_instruction_contracts(self):
-        for path in (
-            "AGENTS.md",
-            "README.md",
-            "docs/workflows.md",
-            "docs/planning.md",
-            "docs/specialty.md",
-            "docs/modes/specialty.md",
-        ):
-            with self.subTest(path=path):
-                text = " ".join((ROOT / path).read_text().split())
-                for phrase in (
-                    "initial",
-                    "smallest suitable",
-                    "rationale",
-                    "explicit operator",
-                    "intent",
-                    "scope",
-                    "acceptance",
-                    "authority",
-                    "later recipe changes",
-                    "publication, merge, production or other external-action authority",
-                ):
-                    self.assertIn(phrase, text)
-                self.assertNotIn("operator-selected plan", text)
-                self.assertNotIn("get explicit operator recipe selection", text)
-        policy = " ".join((ROOT / "docs/workflows.md").read_text().split())
-        self.assertIn("without asking the operator to choose a workflow", policy)
-        self.assertIn("ask only when", policy)
-        self.assertIn("separate action authority and delivery ceilings", policy)
-        self.assertIn("brief decisions remain operator-only", policy)
-        self.assertIn("initial verification plus at most two repair rounds", policy)
-        self.assertIn("unknown ownership blocks work", policy)
-        self.assertNotIn(
-            "## autonomous workflow selection", (ROOT / "improvements.md").read_text()
-        )
+    def test_normative_selection_and_version_boundaries(self):
+        from test_agent_tracking import rules, normalize_rule_paragraphs
+
+        expected = json.loads(
+            (ROOT / "tests/fixtures/operating-contracts.json").read_text()
+        )["workflow_rules"]
+        text = normalize_rule_paragraphs((ROOT / "docs/workflows.md").read_text())
+
+        def review(text):
+            if rules(text) != expected:
+                raise ValueError("workflow normative contract changed")
+
+        review(text)
+        for key, value in expected.items():
+            paragraph = "- [" + key + "] " + value
+            self.assertIn(paragraph, text)
+            with self.assertRaises(ValueError):
+                review(text.replace(paragraph, ""))
+            with self.assertRaises(ValueError):
+                review(text.replace(paragraph, paragraph + " unless inconvenient"))
 
     def test_portable_and_specialty_workflow_contracts(self):
         for role in ("worker", "verify", "scout", "triage"):

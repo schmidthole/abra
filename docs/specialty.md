@@ -71,18 +71,23 @@ when a pack is present:
 - the registry is fixed to `specialty.json` repos. `worktree.py list`, `resolve`,
   `create`, and `cleanup` use them and ignore `data/repos.json`; `register` is refused.
 - briefs are looked up in the pack `templates/` first, then base `templates/`.
-  the coordinator must supply the full [shared checkpoint contract](agent-tracking.md)
-  and its inputs, including the absolute `bin/checkpoint.py` helper path, to all
-  four roles even when an override omits them; overrides cannot weaken the tracking or original role boundaries.
-- overrides must also receive the [workflow context](workflows.md): absolute
-  read-only workflow path, selected recipe/version and selection id, stage and
-  attempt ids. overrides cannot weaken the initial recipe selection rules (record
-  the smallest suitable choice and rationale for clear requests, honor explicit
-  operator selections, ask only for material intent/scope/acceptance/authority
-  ambiguity), operator approval for later recipe changes, coordinator-only
-  manifest ownership, intent-before-action, ownership reconciliation or exact
-  candidate/acceptance verification. missing override fields are supplied by the
-  coordinator, never silently omitted. no tracker ownership changes.
+  supply the entire embedded compact-checkpoint-v1 [shared checkpoint contract](agent-tracking.md),
+  all identity/path inputs and immutable detail snapshot path/digest even when an
+  override omits them; never weaken sole-writer/revision/stop/recovery or role boundaries.
+- full work overrides receive absolute read-only workflow path, recipe/selection,
+  stage/attempt context. eligible opted-in lightweight scout variants instead carry
+  saved task/request/authority/reservation/intent links from [routing](routing.md),
+  never fabricated manifest ids. a stricter specialty may require full work.
+- overrides retain coordinator-only manifest ownership, intent-before-action,
+  stopped ownership reconciliation and exact candidate/acceptance verification.
+  initial selection records smallest suitable rationale, honors explicit operator
+  choices and asks for material intent/scope/acceptance/authority ambiguity. later
+  recipe changes require operator approval in v1; only new opted-in v2 report tasks
+  permit one initially preauthorized same-contract read-only method switch, never
+  budget/blocked-intent escape. missing fields are supplied, not silently omitted.
+- capability evidence must inspect actual profile/tool configuration and required
+  helper/report writes plus role execution/independence; failure blocks and reconciles
+  before replacement. portable contracts cannot invent an introspection api.
 - plan briefs (`plan-refine.md`, `plan-ground.md`, `plan-validate.md`) follow the same
   override lookup and shared scout checkpoint/workflow contracts. preserve the
   [planning](planning.md) boundaries, package byte checks, fresh independent validation

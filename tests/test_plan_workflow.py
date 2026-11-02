@@ -739,16 +739,14 @@ class PlanWorkflowTests(unittest.TestCase):
 
 class PlanTemplateTests(unittest.TestCase):
     def test_portable_briefs_share_tracking_and_workflow_contract(self):
-        scout = (ROOT / "templates/scout.md").read_text()
-        shared = scout.split("## coordinator workflow context\n")[1].split(
-            "## assignment\n"
-        )[0]
+        from test_agent_tracking import render, review_contract
+
         for stage in ("refine", "ground", "validate"):
             text = (ROOT / "templates" / ("plan-" + stage + ".md")).read_text()
-            self.assertIn(shared, text)
+            review_contract(render("plan-" + stage), "plan-" + stage)
             self.assertIn("checkpoint role: scout", text)
             self.assertNotIn("{{candidate_commit}}", text)
-            fields = re.findall(r"\{\{([a-z_]+)\}\}", text)
+            fields = re.findall(r"\{\{([a-z_][a-z0-9_]*)\}\}", text)
             self.assertEqual(
                 set(fields),
                 {
@@ -770,6 +768,9 @@ class PlanTemplateTests(unittest.TestCase):
                     "predecessor",
                     "run_ids",
                     "tracking_instructions",
+                    "tracking_reference",
+                    "tracking_reference_sha256",
+                    "capability_evidence",
                 },
             )
             self.assertEqual(len(fields), len(set(fields)))
