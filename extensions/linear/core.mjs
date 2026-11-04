@@ -263,13 +263,16 @@ export class Connector {
             if (!repo) continue;
             requireValue(this.host.idle(), 'dedicated session is busy; admission deferred');
             const current = await this.api.issue(issue.id, signal);
+            if (this.mode !== 'running' || this.disposed) break;
             if (!this.eligible(current) || fingerprint(issue) !== fingerprint(current)) continue;
             const comments = await this.api.comments(issue.id, signal);
+            if (this.mode !== 'running' || this.disposed) break;
             this.state.active = issue.id;
             this.state.records.push({ id: issue.id, session: this.session, repo: repo.name, fingerprint: fingerprint(current), dispatch: 'reserved', taskId: `linear-${issue.id}`, bound: false, halted: null, terminal: null, comments: Object.fromEntries(comments.filter(c => c.user?.id !== this.config.personaId).map(c => [c.id, hash(c)])), publications: [] });
             this.used = true; this.persist();
             await this.publish('pickup', 'picked up; preparing the original acceptance, local instructions and ownership checks. approach and test checkpoints will follow. no completion/merge authority.', this.team(current).working, signal);
-            if (this.mode !== 'running' || this.active.halted || this.disposed) break;
+            // pause gates new admissions, not dispatch of already-reserved work.
+            if (this.active.halted || this.disposed) break;
             this.active.dispatch = 'intent'; this.persist();
             await this.host.send(coordinatorPrompt(current, repo, this.config));
             this.active.dispatch = 'sent'; this.persist();

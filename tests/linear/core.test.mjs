@@ -110,6 +110,42 @@ test('no overlapping graphql polls even with simultaneous operator polls', async
   assert.equal(maximum, 1);
 });
 
+for (const read of ['issue', 'comments']) {
+  test(`pause during pre-admission ${read} read prevents reservation, pickup and dispatch`, async t => {
+    const f = fixture(t), reading = Promise.withResolvers(), release = Promise.withResolvers();
+    const original = f.api[read].bind(f.api);
+    f.api[read] = async (...args) => { reading.resolve(); await release.promise; return original(...args); };
+    const enabling = f.connector.enable('session-1');
+    await reading.promise;
+    f.connector.pause(); release.resolve();
+    await enabling; await f.connector.poll();
+    assert.equal(f.connector.mode, 'paused'); assert.equal(f.connector.error, null);
+    assert.equal(f.connector.state.active, null); assert.deepEqual(f.connector.state.records, []);
+    assert.equal(f.connector.used, false); assert.equal(fs.existsSync(f.store.path), false);
+    assert.equal(f.api.calls.includes('comment'), false); assert.equal(f.api.calls.includes('status'), false);
+    assert.equal(f.api.thread.length, 0); assert.equal(f.api.issues[0].state.id, id(9));
+    assert.equal(f.sent.length, 0); assert.equal(f.cancellations.length, 0);
+  });
+}
+
+test('pause during already-admitted pickup still dispatches and polls active control', async t => {
+  const f = fixture(t), publishing = Promise.withResolvers(), release = Promise.withResolvers();
+  const comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => { publishing.resolve(); await release.promise; return comment(...args); };
+  const enabling = f.connector.enable('session-1');
+  await publishing.promise;
+  assert.equal(f.connector.active.dispatch, 'reserved'); assert.equal(f.connector.used, true);
+  f.connector.pause(); release.resolve();
+  await enabling;
+  assert.equal(f.connector.mode, 'paused'); assert.equal(f.connector.error, null);
+  assert.equal(f.connector.active.dispatch, 'sent'); assert.equal(f.sent.length, 1);
+  assert.equal(f.api.thread.length, 1); assert.equal(f.api.issues[0].state.id, id(4));
+  const reads = f.api.calls.filter(c => c === 'issue').length;
+  await f.connector.poll();
+  assert.equal(f.api.calls.filter(c => c === 'issue').length, reads + 1);
+  assert.equal(f.cancellations.length, 0); assert.equal(f.sent.length, 1);
+});
+
 test('pause prevents admissions but polls active control; stop cancels and retains ownership', async t => {
   const f = fixture(t); await f.connector.enable('session-1'); f.connector.pause();
   await f.connector.stop();
