@@ -12,7 +12,7 @@ const text = value => typeof value === 'string' && value.trim().length > 0;
 const keys = (value, allowed) => requireValue(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(k => allowed.includes(k)), 'unknown or invalid configuration fields');
 
 export function configuration(value) {
-  keys(value, ['version', 'tokenEnv', 'workspaceId', 'personaId', 'teams', 'repositories', 'authority', 'pollMs', 'controlMs', 'timeoutMs']);
+  keys(value, ['version', 'tokenEnv', 'workspaceId', 'personaId', 'teams', 'repositories', 'authority', 'pollMs', 'controlMs', 'timeoutMs', 'watch']);
   requireValue(value.version === 1 && /^[A-Z][A-Z0-9_]*$/.test(value.tokenEnv), 'version 1 and credential environment reference required');
   requireValue(uuid(value.workspaceId) && uuid(value.personaId), 'workspace and app persona ids required');
   requireValue(Array.isArray(value.teams) && value.teams.length > 0, 'team allowlist required');
@@ -30,6 +30,10 @@ export function configuration(value) {
     requireValue(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(repo.remote) && /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(repo.base) && !repo.base.includes('..'), 'explicit github remote and safe base ref required');
   }
   requireValue(new Set(value.repositories.map(r => r.name)).size === value.repositories.length && new Set(value.repositories.map(r => r.labelId)).size === value.repositories.length, 'duplicate repository name or routing label');
+  if (value.watch !== undefined) {
+    keys(value.watch, ['trustedManagedWork']);
+    requireValue(value.watch.trustedManagedWork === true, 'watch requires explicit trusted managed-work opt-in');
+  }
   const authority = value.authority ?? { mode: 'report' };
   keys(authority, ['mode', 'maxFiles', 'maxChangedLines']);
   requireValue(['report', 'pr'].includes(authority.mode), 'authority is report or bounded pr only');
@@ -193,8 +197,10 @@ export function coordinatorPrompt(issue, repo, config) {
     `call abra_linear_checkpoint to bind that manifest before dispatch. post concise redacted approach, meaningful progress, checks/tests and blockers at checkpoints. never publish raw reasoning, tool logs, credentials or private paths.\n` +
     `for substantive changes: worker commit then fresh independent execution-capable exact-candidate verification, canonical make format/make test and task checks; at most two repair rounds. honor local project instructions and bounded file/line ceilings.\n` +
     `authorized delivery only: report-only tasks need a real reviewable public report, whose entire redacted content must be visible in linear if no external URL. code tasks require configured pr authority, exact-candidate independent pass and actual authorized PR delivery with current clean head/base/remote/required CI evidence. no unavailable-check pass, no report substituted for code delivery. use existing workflow validated delivery receipts.\n` +
+    `for clarification use abra_linear_checkpoint kind waiting with the question and next action; retain this session, never imply delivered or safe to restart.\n` +
     `terminal abra_linear_checkpoint kind review requires completed workflow and accessible PR/report evidence. otherwise use kind blocked with explicit blocker and next action; preserve partial publication receipts. agent_end/settled/prose never proves success. no merge/deploy/close/completed transition.\n` +
     `on stop, undelegation, material edit or new human comment: halt new actions, reconcile/cancel native owners and tools, save steering before action; no blind redispatch or automatic brief revision. blocked does not release surviving owners.\n` +
+    (config.watch ? `trusted managed-work operating contract: no detached, untracked, nested, unsupported foreground or external background writers. synchronous bash is allowed but must finish without surviving background work before handoff. all native dispatch must be single-leaf Pi-managed async runs with captured run ids in each assigned checkpoint and confirmed workflow dispatch. embed this contract in every child brief. do not use native workflows, schedules, external runners or nested delegation. stop unsupported/unknown ownership; this is operator trust, not a sandbox or proof of arbitrary shell descendants. reconcile every workflow/publication intent before terminal reporting. blocked attempts need a saved reconciliation decision with outcome/evidence. empty assignments are permitted only for coordinator-only report work.\n` : '') +
     `original linear source (snapshot this verbatim):\n${JSON.stringify(issue)}`;
 }
 
@@ -408,7 +414,7 @@ export class Connector {
         requireValue(!active.bound && !active.halted, 'binding already confirmed or halted');
         active.bound = true; this.persist(); return 'existing tasks-axi/workflow ownership bound; record native dispatch in manifest';
       }
-      requireValue(active.bound && ['approach', 'progress', 'checks', 'blocked', 'review'].includes(input.kind), 'bind workflow first; structured checkpoint kind required');
+      requireValue(active.bound && ['approach', 'progress', 'checks', 'waiting', 'blocked', 'review'].includes(input.kind), 'bind workflow first; structured checkpoint kind required');
       requireValue(text(input.summary) && text(input.nextAction), 'summary and next action required');
       const current = await this.api.issue(active.id, signal);
       if (!this.eligible(current) || fingerprint(current) !== active.fingerprint) await this.halt('source/delegation changed before checkpoint; reconcile ownership and acceptance');
@@ -451,7 +457,9 @@ export class Connector {
       } else requireValue(!active.halted && !active.terminal, 'halted or terminal issue only accepts blocked reporting');
       signal?.throwIfAborted();
       await this.publish(input.key, body, stateId, signal);
+      if (input.kind === 'waiting') { active.waiting = true; this.persist(); }
       if (['review', 'blocked'].includes(input.kind)) {
+        active.waiting = false;
         active.terminal = input.kind; this.mode = 'paused'; this.persist();
       }
       return 'checkpoint publication confirmed; ownership retained until explicit reconciliation';
@@ -485,12 +493,17 @@ export class Connector {
     if (this.active) await this.halt('local stop requested; reconcile and cancel surviving native owners before release');
     await this.poll();
   }
-  release(evidence) {
+  release(evidence, verify) {
     return this.serial(async () => {
       requireValue(this.active?.terminal && text(evidence) && this.host.idle(), 'terminal checkpoint, idle coordinator and explicit stopped-owner evidence required');
       requireValue(this.active.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed')), 'unresolved partial publication; reconcile before release');
       const wf = await this.workflow(this.root, this.active.taskId);
       requireValue(['completed', 'blocked', 'paused'].includes(wf.status), 'workflow must be stopped/reconciled before release');
+      if (verify) {
+        requireValue(this.active.bound && this.active.dispatch === 'sent' && wf.task_id === this.active.taskId, 'unbound or uncertain coordinator dispatch');
+        this.active.managedProofs = await verify(wf);
+        requireValue(this.host.idle(), 'coordinator resumed during handoff');
+      }
       this.active.releaseEvidence = this.redacted(evidence); this.state.active = null; this.persist();
       this.mode = 'off'; clearTimeout(this.timer); this.store.release();
     });

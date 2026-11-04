@@ -2,12 +2,18 @@ import { join } from 'node:path';
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { configuration, readJson, Store, LinearClient, Connector, requireValue } from './core.mjs';
+import { ManagedOwners } from './managed.mjs';
 
 const marker = 'abra-linear-dedicated';
 const result = message => ({ content: [{ type: 'text', text: message }], details: {} });
 export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let connector;
   let dedicated = false;
+  let watch;
+  let settled = false;
+  const emitWatch = (ctx, request, state, extra = {}) => {
+    pi.appendEntry('abra-linear-watch', { version: 1, nonce: watch.nonce, request, session: ctx.sessionManager.getSessionId(), owner: connector.store.owner, state, issue: connector.active?.id ?? null, task: connector.active?.taskId ?? null, ...extra });
+  };
   const load = ctx => {
     requireValue(ctx.isProjectTrusted(), 'project trust required before reading connector configuration');
     return configuration(readJson(join(ctx.cwd, configDirectory, 'abra-linear.json')));
@@ -18,7 +24,10 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     const api = dependencies.api ?? new LinearClient(config, process.env[config.tokenEnv]);
     return new Connector({ root: ctx.cwd, config, store, api, ...dependencies, host: {
       idle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
-      send: async prompt => { pi.setSessionName(`abra linear coordinator`); pi.sendUserMessage(prompt); },
+      send: async prompt => {
+        if (watch) emitWatch(ctx, 'start', 'admitted');
+        pi.setSessionName(`abra linear coordinator`); pi.sendUserMessage(prompt);
+      },
       cancel: async reason => {
         ctx.abort();
         pi.sendUserMessage(`stop new actions: ${reason}. only reconcile/cancel existing native owners, preserve task/manifest evidence and report blocked. aborting pi alone does not prove subagents stopped.`, { deliverAs: 'steer' });
@@ -41,6 +50,43 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     handler: async (args, ctx) => {
       const [command, ...rest] = args.trim().split(/\s+/);
       try {
+        if (command === 'watch-start') {
+          const [nonce] = rest;
+          const config = load(ctx);
+          requireValue(ctx.mode === 'rpc' && config.watch?.trustedManagedWork === true && nonce === process.env.ABRA_LINEAR_WATCH_NONCE && /^[a-f0-9-]{36}$/.test(nonce), 'watch requires rpc launcher and acknowledged trusted managed-work configuration');
+          requireValue(!connector && !watch && ctx.isIdle() && !ctx.hasPendingMessages() && !ctx.sessionManager.getBranch().some(e => e.type === 'message' || e.customType === marker), 'watch requires a fresh unused persisted child session');
+          connector = build(ctx);
+          requireValue(!connector.active && !fs.existsSync(connector.store.lock), 'existing connector/native ownership must be reconciled');
+          dedicated = true;
+          watch = { nonce, owners: new ManagedOwners(pi, ctx, dependencies.nativeRequest), stopped: false, handed: false };
+          pi.appendEntry(marker, { watch: nonce });
+          await watch.owners.ready();
+          emitWatch(ctx, 'start', 'ready', { sessionFile: ctx.sessionManager.getSessionFile() });
+          await connector.enable(ctx.sessionManager.getSessionId());
+          requireValue(!connector.error, 'watch admission failed; inspect connector receipts');
+          return;
+        }
+        if (command === 'watch-check' || command === 'watch-stop') {
+          const [nonce, request] = rest;
+          requireValue(watch && nonce === watch.nonce && /^[a-f0-9-]{36}$/.test(request) && !watch.handed, 'foreign, repeated or invalid watch control');
+          if (command === 'watch-stop') {
+            watch.stopped = true;
+            await connector.stop();
+          }
+          const active = connector.active;
+          requireValue(active || watch.owners.runs.size === 0, 'managed owner without an admitted task; reconcile manually');
+          requireValue(!connector.error && !watch.owners.fault && !connector.status().pending.length, 'uncertain connector/native/publication state; reconcile manually');
+          if (active?.terminal && !active.waiting && settled && ctx.isIdle() && !ctx.hasPendingMessages()) {
+            const identity = { issue: active.id, task: active.taskId, outcome: active.terminal };
+            await connector.release('trusted managed-work handoff: settled coordinator, reconciled workflow and exact native terminal proofs', wf => watch.owners.verify(ctx.cwd, wf, dependencies.readCheckpoint));
+            watch.handed = true;
+            emitWatch(ctx, request, 'handoff', identity);
+          } else if (watch.stopped && !active && ctx.isIdle() && !ctx.hasPendingMessages()) {
+            await connector.dispose(); watch.handed = true;
+            emitWatch(ctx, request, 'stopped');
+          } else emitWatch(ctx, request, active?.waiting ? 'awaiting-input' : active ? 'working' : 'no-work', { runs: [...watch.owners.runs.keys()] });
+          return;
+        }
         if (command === 'start') {
           requireValue(ctx.isIdle() && !ctx.hasPendingMessages(), 'wait for current work and queued messages; never inject into a busy session');
           const config = load(ctx);
@@ -81,6 +127,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         if (ctx.hasUI) ctx.ui.notify(JSON.stringify(connector.status()), 'info');
       } catch (error) {
         const detail = error instanceof Error ? error.message.split('\n')[0].slice(0, 300) : 'unknown failure';
+        if (watch && connector) emitWatch(ctx, rest[1] ?? 'start', 'uncertain', { diagnostic: connector.redacted(detail) });
         if (ctx.hasUI) ctx.ui.notify(`linear command blocked/failed: ${connector?.redacted(detail) ?? detail}. no automatic retry or reset`, 'error');
       }
     },
@@ -91,7 +138,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     executionMode: 'sequential',
     parameters: {
       type: 'object', additionalProperties: false,
-      properties: Object.fromEntries(['kind', 'key', 'summary', 'approach', 'checks', 'blocker', 'nextAction', 'report'].map(k => [k, k === 'kind' ? { type: 'string', enum: ['bind', 'approach', 'progress', 'checks', 'blocked', 'review'] } : { type: 'string', maxLength: 16000 }])),
+      properties: Object.fromEntries(['kind', 'key', 'summary', 'approach', 'checks', 'blocker', 'nextAction', 'report'].map(k => [k, k === 'kind' ? { type: 'string', enum: ['bind', 'approach', 'progress', 'checks', 'waiting', 'blocked', 'review'] } : { type: 'string', maxLength: 16000 }])),
       required: ['kind', 'key', 'summary', 'nextAction'],
     },
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -109,8 +156,12 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   pi.on('session_before_switch', prevent);
   pi.on('session_before_fork', prevent);
   pi.on('session_before_tree', prevent);
+  pi.on('agent_start', () => { settled = false; });
+  pi.on('tool_execution_start', event => watch?.owners.observeTool(event));
+  pi.on('tool_execution_end', event => watch?.owners.observeTool(event));
   pi.on('agent_settled', async () => {
-    if (!connector?.active || connector.disposed || connector.active.terminal || connector.active.dispatch !== 'sent') return;
+    settled = true;
+    if (!connector?.active || connector.disposed || connector.active.terminal || connector.active.waiting || connector.active.dispatch !== 'sent') return;
     // settle proves neither delivery nor stopped subagents; publish a truthful fallback.
     await connector.serial(async () => {
       connector.pause();
@@ -121,5 +172,5 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       connector.active.terminal = 'blocked'; connector.persist();
     });
   });
-  pi.on('session_shutdown', async () => { await connector?.dispose(); });
+  pi.on('session_shutdown', async () => { watch?.owners.dispose(); await connector?.dispose(); });
 }

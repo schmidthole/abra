@@ -1,11 +1,156 @@
 # local polling-only linear connector
 
-this is a project-local pi extension, not a service, webhook receiver, tunnel,
-relay, daemon, custom agent runtime or replacement backlog. **one ticket per
-explicit `/abra-linear start`**: while waiting, the dedicated local session polls
-for eligible work. after terminal reporting it admits nothing else. release all
-owners, then use another explicit start for the next ticket. nothing runs when pi
-exits or the machine sleeps; no unattended lifetime is promised.
+this is a project-local pi extension plus optional **foreground** watch launcher,
+not a service, webhook receiver, tunnel, relay, daemon, custom agent runtime or
+replacement backlog. the extension is the sole linear poller/admission/reporter.
+manual `/abra-linear start` admits one ticket; `bin/linear-watch` opens a fresh
+persisted pi rpc process for each subsequent ticket only after a confirmed safe
+handoff. loading either does not auto-enable it. polling ends when its pi process
+exits and pauses when the machine sleeps; native async owners may survive a crash
+or interruption. no unattended lifetime or automatic recovery is promised.
+
+**watch is an explicit trusted operating contract, not isolation:** the operator
+and all coordinator/child briefs prohibit detached, untracked, nested, unsupported
+foreground and external background writers. ordinary synchronous bash is allowed
+but must complete with no surviving background work before handoff. the host checks
+recorded Pi-managed async proofs and workflow/publication intents; it does **not**
+detect arbitrary hidden shell descendants or enforce a sandbox. opt in only when
+you trust the agents, tools, extensions and operator to honor this boundary. unknown
+tracked ownership still halts; an empty managed assignment set is permitted for
+coordinator-only reports, not evidence that external writers cannot exist.
+
+## create the linear app/agent identity
+
+these are operator instructions for a later authorized setup, **not actions run by
+this build**. public [agents](https://linear.app/developers/agents),
+[oauth](https://linear.app/developers/oauth-2-0-authentication) and
+[actor authorization](https://linear.app/developers/oauth-actor-authorization)
+pages were read on 2026-11-04; live provisioning, scope sufficiency and polling-only
+app behavior remain untested. recheck those pages if Linear changes its platform.
+
+1. a workspace admin opens Settings → API → OAuth applications → create a new
+   application ([public creation link](https://linear.app/settings/api/applications/new)).
+   choose a recognizable name/icon such as abra; these become the installed agent's
+   identity. keep its client id and secret in your existing secret manager, not in
+   this repository, prompts, tickets or shell history. Linear recommends a separate
+   workspace to own/manage the OAuth application because admins can access it.
+2. for authorization-code installation, register the exact redirect callback URI
+   your existing trusted OAuth client can receive. use a one-time/local callback
+   client if suitable; the connector implements **no OAuth callback server**. OAuth
+   setup may need this redirect, but ongoing polling needs no public domain,
+   webhook endpoint, tunnel or relay. do not invent Linear-axi OAuth commands.
+3. have a workspace admin authorize the application using `actor=app` (not default
+   `actor=user`, and not deprecated `actor=application`). request only:
+
+   | scope | use |
+   | --- | --- |
+   | `read` | issues, delegation, comments, teams/states/labels and identity; always present in OAuth |
+   | `issues:create` | documented creation **and update** issue access; needed for status updates |
+   | `comments:create` | create ordinary pickup/checkpoint/report comments |
+   | `app:assignable` | make the app available as issue delegate |
+
+   `app:mentionable` is optional and unnecessary here: mentions do not trigger this
+   poller. `write` is broader than the targeted scopes above; do not add it merely
+   for comment creation. no customer/initiative scope is needed. `admin` cannot be
+   combined with app actor mode and is not needed for connector mutations. restrict
+   the installed app's team access as well as the local allowlists. validate the
+   granted scopes against current platform behavior before admitting real work;
+   an access error is a blocker, not permission to silently broaden scope.
+4. construct the authorization URL using your OAuth client (percent-encode values):
+
+   ```text
+   https://linear.app/oauth/authorize?client_id=CLIENT_ID&redirect_uri=REGISTERED_REDIRECT_URI&response_type=code&actor=app&scope=read,issues:create,comments:create,app:assignable&state=SECURE_RANDOM_STATE
+   ```
+
+   generate a cryptographically random state and verify the returned state before
+   using the code. prefer PKCE `S256`: also send `code_challenge` and
+   `code_challenge_method=S256`; retain its verifier only in the OAuth client.
+   admin approval installs the app in the selected workspace. app assignment now
+   sets the issue's **delegate**, not human assignee; humans retain accountability.
+   select abra in Linear's delegation/assignment UI and verify `delegate.id`, not
+   `assignee.id`. apps cannot be project members or project leads.
+5. your trusted OAuth client exchanges the returned code at
+   `POST https://api.linear.app/oauth/token` with URL-encoded form data:
+   `grant_type=authorization_code`, `code`, the identical `redirect_uri`, `client_id`
+   and `client_secret`; with PKCE include `code_verifier` (the secret is optional
+   for that flow). save `access_token`, `refresh_token`, expiry and granted scope
+   securely. never put actual tokens into the redacted example or command line.
+   authorization-code access tokens currently last about 24 hours. the operator's
+   client owns refresh: same token endpoint, `grant_type=refresh_token`,
+   `refresh_token` and client authentication (or `client_id` for PKCE). retain the
+   rotated refresh token and follow the documented 30-minute refresh replay grace
+   period; that OAuth-specific rule does **not** permit replaying uncertain issue
+   mutations. the connector has no token-refresh code and captures its environment
+   credential when built; stop/reconcile and start with fresh credentials rather
+   than assuming a running process sees environment changes.
+6. alternatively, for your own OAuth app, Linear documents an optional **client
+   credentials tokens** toggle. an authorized secret client can request
+   `grant_type=client_credentials` plus the same comma-separated scopes at the token
+   endpoint using client id/secret authentication. this yields an app actor token
+   (currently 30-day expiry, no refresh token), initially with access to all public
+   teams in that workspace; restrict access on the app details page. acquire a
+   token per run as Linear recommends, not a permanently copied API key. changing
+   scopes can revoke existing tokens. this is an operator alternative, not automatic
+   connector acquisition/installation, and must pass the same identity checks.
+7. revoke access through the app's workspace settings or the documented
+   `POST https://api.linear.app/oauth/revoke`, form field `token` and optional
+   `token_type_hint=access_token` or `refresh_token`. never combine that field with
+   legacy token fields. removing app team access can also interrupt active work.
+   rotate an exposed client secret in Settings → API; rotation alone does not revoke
+   previously granted workspace access/refresh tokens (client-credentials tokens
+   are invalidated). reconcile all active native/publication owners after auth loss.
+
+**platform distinction:** Linear's agents getting-started guide recommends enabling
+webhooks/Agent session events and responding with native agent activities (including
+a fast acknowledgment). this polling-only connector deliberately does not implement
+that native session protocol: it uses public GraphQL issue delegation plus ordinary
+comments and configured issue states, not native agent-session activity/status.
+leave webhook subscriptions off for this connector; if the current app creation/UI
+requires an endpoint or webhook-native agent behavior, stop and validate that
+prerequisite with the operator/Linear. do not configure a fake endpoint or claim
+that webhook-free installation/native session UX was live-tested.
+
+### obtain ids without guessing
+
+with the **installed app's access token**, use an authorized GraphQL client against
+`https://api.linear.app/graphql`, `Authorization: Bearer <access token>`. the following
+are read-only examples for future operator use, not queries performed in this build:
+
+```graphql
+query AbraSetupIdentity {
+  viewer { id name }
+  organization { id name }
+}
+query AbraSetupTeams($after: String) {
+  teams(first: 100, after: $after) {
+    nodes { id name key }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+query AbraSetupLabels($after: String) {
+  issueLabels(first: 100, after: $after) {
+    nodes { id name team { id } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+query AbraSetupStates($team: ID!, $after: String) {
+  workflowStates(first: 100, after: $after, filter: {team: {id: {eq: $team}}}) {
+    nodes { id name type team { id } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+```
+
+store `viewer.id` beside the token: it is the workspace-specific **app user id**,
+not the OAuth client id, application id, installing admin or a human assignee.
+copy it to `personaId`, and `organization.id` to `workspaceId`. paginate each
+connection until `hasNextPage` is false using its `endCursor` as `after`; supply
+the selected team uuid to the state query. create/select a repository routing
+label in Linear and record its uuid and intended team. create/select three distinct
+nonterminal workflow states per team: working must have type `started`; in review
+and blocked may be `backlog`, `unstarted` or `started`. names alone are not mappings.
+if blocked does not exist, an authorized team admin must create/select one; never
+reuse completed/canceled or guess. local startup validates all configured mappings.
 
 ## setup and authority
 
@@ -22,13 +167,10 @@ started against linear, or tested with live credentials as part of this delivery
 2. register each real repository through the existing worktree registry; check
    its path/origin/base and project instructions. map it explicitly below. never
    use a ticket-supplied path or guess an unknown project.
-3. prepare a workspace-installed oauth app with its own agent app-user persona
-   and delegation capability (`app:assignable`); authorize only the scopes needed
-   to read scoped issues/comments/states and write ordinary comments/issue status.
-   follow linear's current public oauth documentation for provisioning/refresh.
-   the connector does not install an app, refresh tokens, or store credentials.
-   no webhook or native agent-session subscription is required. a personal key
-   for a different viewer is intentionally rejected, not a fallback identity.
+3. create/install an app-user oauth identity using the onboarding section below.
+   the connector does not install an app, acquire/refresh/revoke tokens, or store
+   credentials. it uses no webhook or native agent-session subscription. a personal
+   key for a different viewer is intentionally rejected, not a fallback identity.
 4. copy `docs/linear.example.json` to `.pi/abra-linear.json` and replace **all**
    example values. that local configuration is gitignored. `tokenEnv` is an
    environment variable **name**, never a token or shell command. populate that
@@ -106,6 +248,153 @@ operations and releases only its process lock, never the active correlation. pi'
 session tree remains the conversation store; tasks-axi remains lifecycle authority,
 workflow manifests coordinator decisions, and native agents execution/ownership.
 
+## foreground watch: opt in, run, stop
+
+requires a POSIX host (macos/linux; Windows watch is rejected), node 24+,
+the documented Pi RPC/`entry_appended`/settled lifecycle APIs and
+compatible installed `pi-subagents` public event-bus RPC with process-terminal proof
+version 1 / lifecycle version 3, bounded native status/fleet projections and
+public async lifecycle files (inspected package: 0.84.0). no package installation
+is performed by this repository. an absent/incompatible native adapter blocks watch,
+even for a coordinator-only task. ordinary one-ticket manual mode needs no watch
+adapter. use an already trusted project with working Pi model configuration; watch
+never auto-confirms project trust, native permission dialogs or publication prompts.
+
+`docs/linear.example.json` includes this explicit acknowledgment:
+
+```json
+{ "watch": { "trustedManagedWork": true } }
+```
+
+copying/enabling it accepts the operating contract at the top of this guide. omit
+`watch` entirely for manual-only operation. also acknowledge the contract on **each**
+launcher invocation; configuration alone never starts anything. configuration is
+operator-owned, never populated from ticket text. the exact current CLI is:
+
+```sh
+# in the trusted abra checkout, with the configured token environment populated
+bin/linear-watch --help
+bin/linear-watch --trusted-managed-work
+# optional: select the installed pi executable, not a session-resume command
+bin/linear-watch --trusted-managed-work --pi /absolute/path/to/pi
+```
+
+no `--no-session`, resume, inherited ticket prompts or automatic dialog responses
+are sent: each child is `pi --mode rpc` with its normal persisted session resources.
+watch consumes events before sending `get_state` or the extension start command.
+its per-child nonce is sent only to that child and binds ready/admission/handoff
+entries to its native session, connector owner, immutable issue/task and outstanding
+request. successful RPC handling, `agent_end`, `agent_settled`, prose and zero exit
+are never sufficient handoffs. this is trusted local extension IPC, not a security
+boundary against malicious same-process extensions or arbitrary file writers.
+
+watch repeatedly asks the **extension**, not Linear, for a structured outcome:
+
+- `no-work`: keep this same child polling; do not spawn new processes for empty scans.
+- `working`: retain the owning child/session; no second ticket admission.
+- `awaiting-input`: preserve the clarification session, including an explicit
+  `waiting` checkpoint. RPC dialogs are diagnosed but **never auto-answered**;
+  the thin launcher has no interactive dialog client. resolve task clarification
+  through Linear comments (which halt for saved-steering reconciliation) or
+  interrupt and reopen the saved Pi session manually. do not start a replacement
+  watch while that task has unresolved owners.
+- `handoff` with `review` or `blocked`: require confirmed Linear terminal comment
+  and status receipts, bound/sent coordinator dispatch, settled coordinator and
+  no pending messages, a validated non-active workflow, all dispatch/publication
+  attempts reconciled, and exact native terminal evidence for every recorded run.
+- `uncertain`: halt; no blind command retry, stale-lock cleanup or fresh child.
+
+### supported managed handoff boundary
+
+only top-level **single-leaf Pi-managed async** assignments are supported for
+automatic handoff. the extension captures public `subagent:async-started` identities
+before using any native proof, rejects unknown/active/omitted native status/fleet
+projection entries, and checks for ownership changes at handoff. these projections
+are supplemental tracked-native checks, not an OS-wide writer inventory. it reads `status.json` only beneath the live native
+start's captured canonical artifact directory, never a model-supplied proof path;
+it requests targeted native status by the captured run id and checks the public
+`details.lifecycleStatus.processTerminal` projection. it requires the exact runner
+instance's observed close and any canonical lease release/free observation. this is
+separate from task success, which still needs the existing workflow/delivery gates.
+
+every existing workflow assignment must have confirmed dispatch, a stopped/returned
+validated checkpoint and recorded `run_ids`; those ids must exactly cover the
+captured starts without unknown, duplicated or unassigned runs. every attempt must
+be non-active. blocked attempts (including aborted dispatch/publication intents)
+need a saved `reconciliation` decision with evidence plus an outcome/evidence on the
+attempt, using the existing workflow schema; a model's `stopped: true` is not proof.
+actual tracked Pi runner close evidence is still required for blocked/paused runs.
+coordinator-only reports may have no assignments under the explicit trusted contract.
+
+foreground native children, native workflow/parallel/chain roots, nested delegation,
+external-cli/external-job writers, schedules, revived runs, custom runner launchers,
+missing/foreign/stale/malformed native evidence and unresolved intents halt automatic
+handoff. supported ordinary synchronous shell work is **not** blanket-blocked;
+agent/operator compliance with no surviving untracked shell writers is assumed,
+not mechanically proven. revisit this adapter if adding a supported run type or
+stronger containment; do not silently replace native proofs with PID tests, timestamps,
+result files, exit codes, tracker/model status or arbitrary path assertions.
+
+on a safe handoff the actual extension lock owner saves release/proof receipts and
+releases its correlation and lock. watch independently checks the durable connector
+record and absent lock against the outcome, rechecks current Pi session/pending
+state, closes stdin for orderly shutdown and waits for clean child close before
+starting another child. a blocked task stays blocked in tasks-axi; advancing does
+not complete or silently resume it. deduplication still prevents re-picking it.
+
+the single tracked Pi child has its own POSIX process group so terminal ctrl-c
+reaches watch first. it remains piped, referenced and awaited/reaped; this is signal
+isolation, not daemonization or permission for agents to detach writers.
+
+press **ctrl-c** (or send SIGTERM) to stop watch admission and request the extension's
+stop/cancellation/reconciliation path, then close the child's stdin. requests and
+shutdown have 60-second deadlines; a stuck child receives SIGTERM and diagnostics
+say ownership may survive (there is no claim all subagents were killed). active or
+unknown owners cause an unsuccessful halt, not a restart or fabricated blocked
+handoff. terminal input is not forwarded to the model. diagnostics are concise JSON
+on stderr, without raw model/tool stderr, ticket contents or tokens. retain the
+saved Pi sessions, connector journal, task manifest/checkpoints and native artifacts
+for recovery; child termination alone is **not** owner reconciliation. no cross-machine
+or separate-clone lock is provided. after a failure, use the manual recovery section,
+not another launcher invocation that deletes evidence.
+
+### first authorized installation / smoke-check checklist
+
+these checks are for a later explicitly authorized operator run; none was live-run
+in this build:
+
+1. run `node --version`, `pi --help`, `bin/linear-watch --help`, `make format` and
+   `make test`. inspect/trust the checkout and its global/project extensions; verify
+   Pi RPC/native APIs match the above prerequisites. do not install/enable globally
+   merely to test. loading the project entrypoint must leave `/abra-linear status`
+   off; never use `/start` as a read-only credential check.
+2. create/install the app through your OAuth client, verify identity and paginated
+   ids read-only, and restrict app teams. review every field in the example config;
+   check repository registry/path/origin/base and explicitly choose authority and
+   three distinct nonterminal states. all example UUIDs/paths must be replaced.
+3. inject only the **access token** as the environment variable named by `tokenEnv`
+   using your existing secret mechanism; do not expose client secret/refresh token
+   to the coordinator. configure Pi/model and report-only harness permissions
+   separately. run `pi` in this trusted checkout to inspect available connector
+   commands/trust without starting polling, then quit before starting watch.
+4. choose a disposable, non-sensitive report-only issue in the allowlisted team,
+   apply exactly one mapped repository label, and delegate it to the app (keep a
+   human assignee). explicitly authorize the live test before manual `/abra-linear
+   start` or the watch command. start validates viewer/workspace/states **before**
+   discovery/mutations; it can immediately pick up any eligible current delegation.
+5. observe a pickup comment/working state, saved real task/manifest/native ids,
+   meaningful approach/checkpoint comments, visible public report + in review **or**
+   explicit blocked reason/next action. clarification must retain its session.
+   under watch, observe exact stopped native proofs and durable release before a
+   fresh process picks up a second test issue. no completion status/merge/deploy.
+6. interrupt during waiting and, with separate authorization, active work; inspect
+   remaining owners/receipts before manual recovery. verify revoked access or an
+   uncertain publication halts instead of replaying. never manufacture stale locks,
+   mutate production tasks or kill unknown owners as a casual smoke test.
+7. stop, reconcile all test owners and remove/revoke test credentials through the
+   operator's normal secret lifecycle. record what was actually tested; local
+   fake-boundary tests do not certify live app install, native proofs or PR/CI.
+
 ## pickup, checkpoints and delivery
 
 discovery refetches current issue/delegation and ingests existing human comments
@@ -128,7 +417,7 @@ blocked**. the task id is `linear-<issue-uuid>`. create its real tasks-axi task 
 
 | field | contract |
 | --- | --- |
-| `kind` | `bind`, `approach`, `progress`, `checks`, `blocked`, `review` |
+| `kind` | `bind`, `approach`, `progress`, `checks`, `waiting`, `blocked`, `review` |
 | `key` | stable unique lowercase checkpoint slug; retries keep the same key/body |
 | `summary` | concise public confirmed facts, never raw reasoning/tool logs |
 | `approach`, `checks` | meaningful approach and checks/tests including failures/unrun checks |
@@ -151,7 +440,8 @@ for actual PR target/head/required CI and authorization; this connector does not
 independently poll github or grant authority from a URL. a local commit is not an
 accessible PR. a report is not code delivery. no success is inferred from
 `agent_end`, `agent_settled` or prose. settling without a terminal checkpoint posts
-a truthful blocked comment/state instead.
+a truthful blocked comment/state instead, except an explicit `waiting` checkpoint
+retains clarification in its current session without a terminal handoff.
 
 for a report, supply a confirmed HTTPS report URL, or a concise public report file
 **inside the task artifact directory** that is itself in `delivery_refs`. local
@@ -169,8 +459,10 @@ work and request cancellation/reconciliation. ordinary comments are the reliable
 polling-only baseline; no internal/native agent-session APIs are used. own persona
 comments never feed back as work. new human steering is durably fingerprinted
 before notification; uncertain notification is not blindly resent. clarification
-or acceptance changes stop as blocked pending saved steering/owner reconciliation,
-not automatic brief revision/resumption. completed issues are never reopened.
+uses `kind: waiting` with the question and next action, retaining the session.
+a subsequent human reply or acceptance change halts new actions pending saved
+steering/owner reconciliation, not automatic brief revision/resumption. completed
+issues are never reopened.
 
 ## retries, interruption and recovery
 
@@ -265,6 +557,15 @@ redaction and lost comment/status/dispatch responses. they do not establish live
 linear oauth scopes/schema compatibility, pi model/native agent compliance, webhook-
 free app provisioning, real PR delivery/CI, or actual end-to-end recovery. those
 remain separately authorized live checks, not claims of this local build.
+
+watch tests additionally use harmless local JSONL rpc subprocesses (never real pi,
+model or linear processes) to exercise multiple fresh-child handoffs, no-work
+waiting, clarification/dialog retention, blocked safety, wrong/duplicate/out-of-order
+outcomes, startup/prompt/timeout/crash/malformed failures, interruption, locks and
+uncertain publications. native adapter tests use fake event-bus replies and local
+lifecycle files for exact run/runner/lease checks and unsupported owner failures.
+these are protocol evidence, not a live native capability handshake or proof of
+agent compliance. a future live installation/smoke check requires separate authority.
 
 public references: [graphql](https://linear.app/developers/graphql),
 [oauth](https://linear.app/developers/oauth-2-0-authentication),

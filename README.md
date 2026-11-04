@@ -95,12 +95,16 @@ worker summaries are not independent approval; reports do not complete code requ
 
 ## local linear polling (pi)
 
-optional [project-local linear extension](docs/linear-polling.md): outbound polling only,
-disabled until configured and explicitly started. one dedicated task session per
-start, meaningful linear checkpoint comments, delivered PR/report to in review or
-blocked; no webhook, daemon, automatic close or publication authority from tickets.
-node 24+ is required for this connector and its canonical tests. no live installation
-or linear trial is claimed by the automated tests.
+optional [project-local linear extension and setup guide](docs/linear-polling.md):
+create/configure a Linear app-user, copy the [redacted config](docs/linear.example.json),
+then explicitly start outbound polling. manual mode admits one ticket per start;
+`bin/linear-watch --trusted-managed-work` keeps a foreground Pi RPC child and opens
+a fresh one only after confirmed safe handoff. watch requires the documented trusted
+no-detached/external-writers contract, managed native terminal proofs and reconciled
+workflow/publication intents; it is not a sandbox. meaningful checkpoint comments,
+actual PR/report to in review or blocked; no webhook, daemon, automatic close or
+ticket-granted publication authority. node 24+ is required. no live app installation,
+model/native-agent or Linear trial is claimed by the fake/local automated tests.
 
 ## worktrees
 

@@ -22,6 +22,7 @@
     }
   ],
   "authority": { "mode": "report" },
+  "watch": { "trustedManagedWork": true },
   "pollMs": 30000,
   "controlMs": 10000,
   "timeoutMs": 15000

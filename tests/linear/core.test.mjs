@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -254,8 +256,9 @@ test('real workflow boundary rejects invalid manifest rather than accepting mode
 });
 
 function fakePi() {
-  const handlers = {}, commands = {}, tools = {}, sent = [];
-  return { handlers, commands, tools, sent, on: (event, fn) => handlers[event] = fn, registerCommand: (name, cmd) => commands[name] = cmd, registerTool: tool => tools[tool.name] = tool, sendUserMessage: (...args) => sent.push(args), setSessionName: () => {} };
+  const handlers = {}, commands = {}, tools = {}, sent = [], entries = [], emitter = new EventEmitter();
+  const events = { on: (name, fn) => { emitter.on(name, fn); return () => emitter.off(name, fn); }, emit: (...args) => emitter.emit(...args) };
+  return { handlers, commands, tools, sent, events, entries, appendEntry: (customType, data) => entries.push({ customType, data }), on: (event, fn) => handlers[event] = fn, registerCommand: (name, cmd) => commands[name] = cmd, registerTool: tool => tools[tool.name] = tool, sendUserMessage: (...args) => sent.push(args), setSessionName: () => {} };
 }
 function context(path, entries = []) {
   const notifications = [];
@@ -345,4 +348,59 @@ test('leftover temporary blocks fresh metadata initialization without deleting e
   const path = temporary(t), store = new Store(path, config()); store.load();
   const leftover = `${store.path}.previous-owner.tmp`; fs.writeFileSync(leftover, 'possibly published before interruption');
   assert.throws(() => store.load(), /leftover connector temporary/); assert.ok(fs.existsSync(leftover));
+});
+
+async function watchFixture(t) {
+  const path = temporary(t), cfg = config(), api = new FakeApi(), pi = fakePi(), nonce = randomUUID();
+  cfg.watch = { trustedManagedWork: true }; fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
+  const old = process.env.ABRA_LINEAR_WATCH_NONCE; process.env.ABRA_LINEAR_WATCH_NONCE = nonce;
+  t.after(() => { if (old === undefined) delete process.env.ABRA_LINEAR_WATCH_NONCE; else process.env.ABRA_LINEAR_WATCH_NONCE = old; });
+  const wf = { task_id: `linear-${id(8)}`, status: 'active', briefs: [{ requested_delivery: 'report' }], delivery_refs: [], selections: [], decisions: [] };
+  install(pi, '.pi', { api, workflow: async () => wf, nativeRequest: async method => {
+    if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: 'pi-session' } };
+    return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
+  } });
+  const ctx = context(path); ctx.mode = 'rpc';
+  resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
+  const command = args => pi.commands['abra-linear'].handler(args, ctx);
+  await command(`watch-start ${nonce}`);
+  return { path, cfg, api, pi, nonce, wf, ctx, command };
+}
+
+test('extension watch binds nonce/session/task, confirmed Linear delivery and settled workflow before release', async t => {
+  const f = await watchFixture(t);
+  assert.deepEqual(f.pi.entries.filter(e => e.customType === 'abra-linear-watch').map(e => e.data.state), ['ready', 'admitted']);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
+  f.wf.status = 'completed'; f.wf.delivery_refs = ['https://example.test/public-report'];
+  await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), report: f.wf.delivery_refs[0] }, null, null, f.ctx);
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
+  await f.pi.handlers.agent_settled();
+  f.ctx.hasPendingMessages = () => true;
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
+  f.ctx.hasPendingMessages = () => false;
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  const handoff = f.pi.entries.at(-1).data; assert.equal(handoff.state, 'handoff'); assert.equal(handoff.outcome, 'review'); assert.equal(handoff.task, f.wf.task_id);
+  const saved = new Store(f.path, f.cfg).load(); assert.equal(saved.active, null); assert.deepEqual(saved.records[0].managedProofs, []);
+  assert.ok(!fs.existsSync(join(f.path, 'data/linear/owner.lock')));
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'uncertain');
+});
+
+test('waiting checkpoint retains clarification session without false blocked fallback or handoff', async t => {
+  const f = await watchFixture(t);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
+  await f.pi.tools.abra_linear_checkpoint.execute('wait', checkpoint('waiting'), null, null, f.ctx);
+  await f.pi.handlers.agent_settled();
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  assert.equal(f.pi.entries.at(-1).data.state, 'awaiting-input'); assert.equal(f.api.issues[0].state.id, id(4));
+  assert.ok(new Store(f.path, f.cfg).load().active);
+});
+
+test('watch never releases terminal blocked while recorded workflow intent or publication is uncertain', async t => {
+  const f = await watchFixture(t);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
+  await f.pi.tools.abra_linear_checkpoint.execute('blocked', checkpoint('blocked'), null, null, f.ctx);
+  await f.pi.handlers.agent_settled();
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  assert.equal(f.pi.entries.at(-1).data.state, 'uncertain'); assert.ok(new Store(f.path, f.cfg).load().active);
+  assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
 });
