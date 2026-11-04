@@ -93,6 +93,15 @@ block; no checks is not ci passed. initial verification plus at most two repair
 rounds; fresh verification after fixes, no budget reset through a method switch.
 worker summaries are not independent approval; reports do not complete code requests.
 
+## local linear polling (pi)
+
+optional [project-local linear extension](docs/linear-polling.md): outbound polling only,
+disabled until configured and explicitly started. one dedicated task session per
+start, meaningful linear checkpoint comments, delivered PR/report to in review or
+blocked; no webhook, daemon, automatic close or publication authority from tickets.
+node 24+ is required for this connector and its canonical tests. no live installation
+or linear trial is claimed by the automated tests.
+
 ## worktrees
 
 ```sh

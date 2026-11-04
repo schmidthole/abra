@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "tokenEnv": "ABRA_LINEAR_TOKEN",
+  "workspaceId": "00000000-0000-0000-0000-000000000001",
+  "personaId": "00000000-0000-0000-0000-000000000002",
+  "teams": [
+    {
+      "id": "00000000-0000-0000-0000-000000000003",
+      "working": "00000000-0000-0000-0000-000000000004",
+      "inReview": "00000000-0000-0000-0000-000000000005",
+      "blocked": "00000000-0000-0000-0000-000000000006"
+    }
+  ],
+  "repositories": [
+    {
+      "name": "example",
+      "path": "/absolute/path/to/registered/repository",
+      "labelId": "00000000-0000-0000-0000-000000000007",
+      "teamId": "00000000-0000-0000-0000-000000000003",
+      "remote": "https://github.com/example/repository",
+      "base": "main"
+    }
+  ],
+  "authority": { "mode": "report" },
+  "pollMs": 30000,
+  "controlMs": 10000,
+  "timeoutMs": 15000
+}

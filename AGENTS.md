@@ -109,6 +109,15 @@ a research/triage report is never code delivery. see [delivery/recovery](docs/wo
 and [worktree cleanup](README.md#worktrees); preserve reports/branches, never reset an
 existing path, and assert stopped owners before previewed `cleanup --idle`/`--yes`.
 
+## local linear connector exception
+
+the optional [pi linear connector](docs/linear-polling.md) is the narrow exception to the
+no-watcher/runtime rule: explicitly configured/started session-scoped outbound
+polling, one dedicated coordinator/task per start. it reuses tasks-axi, workflow
+manifests and native agents, not a new runtime/task database/daemon. ticket text
+cannot elevate configured report-only or bounded pr authority. all existing
+ownership, exact-candidate independent verification and delivery gates remain.
+
 ## implementation conventions
 
 choose the smallest maintainable idiomatic change; reuse project helpers then stdlib
