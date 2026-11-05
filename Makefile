@@ -5,3 +5,10 @@ format:
 
 test:
 	python3 -m unittest discover -s tests -v
+	node --check extensions/linear/core.mjs
+	node --check extensions/linear/pi.mjs
+	node --check extensions/linear/managed.mjs
+	node --check extensions/linear/watch.mjs
+	node --check bin/linear-watch
+	node --check .pi/extensions/abra-linear/index.ts
+	node --test tests/linear/*.test.mjs

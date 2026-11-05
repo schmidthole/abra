@@ -93,6 +93,19 @@ block; no checks is not ci passed. initial verification plus at most two repair
 rounds; fresh verification after fixes, no budget reset through a method switch.
 worker summaries are not independent approval; reports do not complete code requests.
 
+## local linear polling (pi)
+
+optional [project-local linear extension and setup guide](docs/linear-polling.md):
+create/configure a Linear app-user, copy the [redacted config](docs/linear.example.json),
+then explicitly start outbound polling. manual mode admits one ticket per start;
+`bin/linear-watch --trusted-managed-work` keeps a foreground Pi RPC child and opens
+a fresh one only after confirmed safe handoff. watch requires the documented trusted
+no-detached/external-writers contract, managed native terminal proofs and reconciled
+workflow/publication intents; it is not a sandbox. meaningful checkpoint comments,
+actual PR/report to in review or blocked; no webhook, daemon, automatic close or
+ticket-granted publication authority. node 24+ is required. no live app installation,
+model/native-agent or Linear trial is claimed by the fake/local automated tests.
+
 ## worktrees
 
 ```sh
