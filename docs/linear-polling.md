@@ -141,9 +141,38 @@ old recovery contracts before an operator-approved reconciliation/config migrati
 
 ## checkpoints and delivery
 
-the coordinator records `linear-<issue-uuid>` in tasks-axi and snapshots original
-source under `data/<task-id>/`. `abra_linear_checkpoint` first binds that task with
-`kind: "bind"` and `task: "linear-<issue-uuid>"`, before dispatch. all calls need
+the coordinator records `linear-<issue-uuid>` with the configured repo in tasks-axi
+and saves the verbatim original issue JSON as `data/<task-id>/source.json`. its
+title/description remain authoritative original intent/acceptance, not a rewritten
+summary. retain these exact standalone lines in the task body:
+
+```text
+original source and acceptance: data/<task-id>/source.json
+requested delivery: pr
+```
+
+use `report` instead of `pr` only for genuinely requested report work. this is the
+trusted coordinator's assertion of original intent, **not** a natural-language
+classifier or a choice based on available authority/output. before native dispatch,
+call `abra_linear_checkpoint` with `kind: "bind"`, `task: "linear-<issue-uuid>"`,
+and matching `requestedDelivery: "report"` or `"pr"`. the connector observes
+`bin/tasks show <task-id> --full --backend markdown --file <root>/data/backlog.md`,
+checks task id/repo and both body references, and matches the snapshot's issue and
+source fingerprint. it pins the source content hash/reference and requested
+delivery in the existing journal, with no second task manifest. missing/foreign
+records or unsupported tasks-axi full-detail formatting block binding. old bound
+journals without this assertion reject unchanged for manual reconciliation.
+
+code intent still binds as `pr` under report-only authority, then must report
+`blocked` without dispatch; approach/progress/review cannot substitute report work.
+review reobserves the task references and unchanged snapshot, and its delivery kind
+must match the original binding under either authority mode. routine task continuity
+may change without rewriting these lines/source. changed acceptance/delivery needs
+explicit operator reconciliation with preserved evidence, never a terminal class
+change or automatic rebinding. blocked reporting remains available when authority,
+source artifacts or publication are unavailable.
+
+all calls need
 stable lowercase `key`, public `summary` and `nextAction`; optional `approach` and
 `checks` explain meaningful approach/tests, including failed/unrun checks. kinds
 `approach`, `progress`, `checks`, `waiting`, `blocked`, `review` publish comments;

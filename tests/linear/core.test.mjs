@@ -50,7 +50,19 @@ function fixture(t, extra = {}) {
   return { connector, path, cfg, api, store, sent, cancellations, steering, host };
 }
 const checkpoint = (kind, key = kind) => ({ kind, key, summary: 'concise public summary', approach: 'bounded investigation', checks: 'focused tests passed', nextAction: 'independent review', blocker: 'publication authority unavailable', task: `linear-${id(8)}` });
-async function bind(f) { await f.connector.checkpoint(checkpoint('bind')); }
+function saveTask(f, requestedDelivery = 'report', overrides = {}) {
+  const task = `linear-${id(8)}`, source = `data/${task}/source.json`;
+  const body = `original source and acceptance: ${source}\nrequested delivery: ${requestedDelivery}\ncurrent next action: inspect original acceptance`;
+  const detail = { id: task, repo: 'abra', body, ...overrides };
+  fs.mkdirSync(join(f.path, 'data', task), { recursive: true });
+  fs.writeFileSync(join(f.path, source), JSON.stringify(f.api.issues[0]));
+  fs.writeFileSync(join(f.path, 'data/backlog.md'), `## In flight\n- [ ] ${detail.id} - original request (repo: ${detail.repo})\n${detail.body.split('\n').map(line => `  ${line}`).join('\n')}\n`);
+  // fake tasks-axi boundary with the observed 0.2.5 full-detail scalar format.
+  const output = `task:\n${Object.entries(detail).map(([name, value]) => `  ${name}: ${JSON.stringify(value)}`).join('\n')}\n`;
+  fs.mkdirSync(join(f.path, 'bin'), { recursive: true });
+  fs.writeFileSync(join(f.path, 'bin/tasks'), `#!${process.execPath}\nimport assert from 'node:assert/strict';\nassert.deepEqual(process.argv.slice(2), ${JSON.stringify(['show', task, '--full', '--backend', 'markdown', '--file', join(f.path, 'data/backlog.md')])});\nprocess.stdout.write(${JSON.stringify(output)});\n`, { mode: 0o700 });
+}
+async function bind(f, requestedDelivery = 'report') { saveTask(f, requestedDelivery); await f.connector.checkpoint({ ...checkpoint('bind'), requestedDelivery }); }
 
 test('configuration defaults off/report and rejects credentials, unsafe status and unbounded authority', () => {
   const cfg = config(); assert.equal(cfg.authority.mode, 'report');
@@ -207,7 +219,8 @@ test('public report content is visible in linear; private path alone never count
 test('code delivery cannot use report-only authority or inaccessible local commit', async t => {
   const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
   await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'local-commit', reference: 'abc' } }), /local commit/);
-  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'pr', reference: 'https://github.com/example/abra/pull/1' } }), /no configured code publication authority/);
+  const g = fixture(t); await g.connector.enable('session-2'); await bind(g, 'pr');
+  await assert.rejects(g.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'pr', reference: 'https://github.com/example/abra/pull/1' } }), /no configured code publication authority/);
 });
 
 test('terminal partial failure requires same immutable key and no execution rerun', async t => {
@@ -345,7 +358,7 @@ test('pr evidence gates exact clean candidate, independent detached review, repo
   const delivery = { kind: 'pr', reference: 'https://github.com/example/abra/pull/1', candidate, baseCommit, workerDirectory: directory, verifierDirectory, verificationReport, verifiedCommit: candidate, checks: { intent: 'pass', tests: 'pass', docs: 'not-applicable', format: 'pass' }, prHead: candidate, prBase: 'main', ci: 'passed', externalEvidence: 'coordinator checked authorized pr target/head and required ci through gh-axi' };
   const repo = { ...f.cfg.repositories[0], path: directory }; await f.connector.codeDelivery(delivery, repo);
   f.cfg.repositories[0].path = directory;
-  await f.connector.enable('session-1'); await bind(f);
+  await f.connector.enable('session-1'); await bind(f, 'pr');
   await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { ...delivery, reference: 'https://github.com/foreign/repo/pull/1' } }), /configured repository/);
   await f.connector.checkpoint({ ...checkpoint('review'), delivery });
   assert.equal(f.connector.active.terminal, 'review');
@@ -395,13 +408,15 @@ async function watchFixture(t) {
   resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
   const command = args => pi.commands['abra-linear'].handler(args, ctx);
   await command(`watch-start ${nonce}`);
-  return { path, cfg, api, pi, nonce, ctx, command };
+  const f = { path, cfg, api, pi, nonce, ctx, command };
+  saveTask(f);
+  return f;
 }
 
 test('extension watch binds nonce/session/task, confirmed linear delivery and settled coordinator before release', async t => {
   const f = await watchFixture(t);
   assert.deepEqual(f.pi.entries.filter(e => e.customType === 'abra-linear-watch').map(e => e.data.state), ['ready', 'admitted']);
-  await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } }, null, null, f.ctx);
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
   await f.pi.handlers.agent_settled();
@@ -417,7 +432,7 @@ test('extension watch binds nonce/session/task, confirmed linear delivery and se
 
 test('waiting checkpoint retains clarification session without false blocked fallback or handoff', async t => {
   const f = await watchFixture(t);
-  await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('wait', checkpoint('waiting'), null, null, f.ctx);
   await f.pi.handlers.agent_settled();
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
@@ -427,7 +442,7 @@ test('waiting checkpoint retains clarification session without false blocked fal
 
 test('watch never releases terminal blocked while native launch intent is unresolved', async t => {
   const f = await watchFixture(t);
-  await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('blocked', checkpoint('blocked'), null, null, f.ctx);
   await f.pi.handlers.agent_settled();
   f.pi.handlers.tool_execution_start({ toolName: 'subagent', toolCallId: 'unresolved', args: { agent: 'worker', async: true } });
@@ -467,4 +482,103 @@ test('review receipt is durable and immutable across uncertain status publicatio
   await f.connector.reconcile({ key: 'review', state: 'not-applied', evidence: 'operator inspected and confirmed original request finished without applying status' });
   await f.connector.checkpoint({ ...checkpoint('review'), delivery });
   assert.equal(f.connector.active.terminal, 'review'); assert.equal(f.api.thread.length, 2);
+});
+
+test('taskBinding rejects absent backlog/helper, missing or foreign task and unsupported full detail', async t => {
+  const f = fixture(t); await f.connector.enable('session-1');
+  const input = { ...checkpoint('bind'), requestedDelivery: 'report' };
+  await assert.rejects(f.connector.checkpoint(input));
+  assert.equal(f.connector.active.bound, false);
+  saveTask(f);
+  await assert.rejects(f.connector.checkpoint(checkpoint('bind')), /original requested delivery/);
+  for (const overrides of [{ id: 'foreign-task' }, { repo: 'foreign-repo' }, { body: 'no original source or requested delivery' }, { body: `original source and acceptance: data/foreign/source.json\nrequested delivery: report` }, { body: `original source and acceptance: data/linear-${id(8)}/source.json\nrequested delivery: pr` }, { body: `original source and acceptance: data/linear-${id(8)}/source.json\nrequested delivery: report\nrequested delivery: pr` }]) {
+    saveTask(f, 'report', overrides);
+    await assert.rejects(f.connector.checkpoint(input), /foreign|source\/acceptance|requested delivery/);
+    assert.equal(f.connector.active.bound, false);
+  }
+  saveTask(f);
+  fs.writeFileSync(join(f.path, 'bin/tasks'), '#!/bin/sh\nexit 1\n');
+  await assert.rejects(f.connector.checkpoint(input));
+  fs.writeFileSync(join(f.path, 'bin/tasks'), '#!/bin/sh\nprintf "unsupported detail\\n"\n');
+  await assert.rejects(f.connector.checkpoint(input), /unsupported tasks-axi/);
+  fs.unlinkSync(join(f.path, 'bin/tasks'));
+  await assert.rejects(f.connector.checkpoint(input));
+  assert.equal(f.connector.active.bound, false); assert.equal(f.api.issues[0].state.id, id(4));
+});
+
+test('taskBinding rejects missing, foreign, edited and symlink original source snapshots', async t => {
+  const f = fixture(t); await f.connector.enable('session-1');
+  const input = { ...checkpoint('bind'), requestedDelivery: 'report' }, source = join(f.path, 'data', input.task, 'source.json');
+  for (const snapshot of [{ ...issue(), id: id(10) }, { ...issue(), description: 'substituted acceptance' }]) {
+    saveTask(f); fs.writeFileSync(source, JSON.stringify(snapshot));
+    await assert.rejects(f.connector.checkpoint(input), /original source\/acceptance/);
+    assert.equal(f.connector.active.bound, false);
+  }
+  saveTask(f); fs.unlinkSync(source);
+  await assert.rejects(f.connector.checkpoint(input));
+  fs.symlinkSync(join(f.path, 'data/backlog.md'), source);
+  await assert.rejects(f.connector.checkpoint(input), /unsafe/);
+  assert.equal(f.connector.active.bound, false);
+});
+
+for (const mode of ['report', 'pr']) {
+  test(`bound code intent cannot become terminal report under ${mode} authority; blocked remains available`, async t => {
+    const f = fixture(t); f.cfg.authority = mode === 'pr' ? { mode, maxFiles: 8, maxChangedLines: 400 } : { mode };
+    f.api.issues[0].title = 'implement the login fix and deliver a pull request';
+    f.api.issues[0].description = 'product code, independent review and actual pr required; report is not delivery';
+    await f.connector.enable('session-1'); await bind(f, 'pr');
+    const original = clone(f.connector.active.binding);
+    await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/analysis-only' } }), /publication authority|bound requested delivery/);
+    await assert.rejects(f.connector.checkpoint({ ...checkpoint('bind'), requestedDelivery: 'report' }), /already confirmed/);
+    assert.equal(f.connector.active.terminal, null); assert.equal(f.api.issues[0].state.id, id(4));
+    assert.equal(f.connector.active.delivery, undefined);
+    assert.deepEqual(f.store.load().records[0].binding, original);
+    if (mode === 'report') await assert.rejects(f.connector.checkpoint(checkpoint('approach')), /publication authority/);
+    await f.connector.checkpoint(checkpoint('blocked'));
+    assert.equal(f.connector.active.terminal, 'blocked'); assert.equal(f.api.issues[0].state.id, id(6));
+    await f.connector.release('coordinator-only blocked work; inspected owners and receipts', async () => []);
+    assert.equal(f.store.load().active, null);
+  });
+}
+
+test('bound report review rechecks task/source assertion without pinning routine task continuity', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  const original = clone(f.connector.active.binding), input = { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/genuine-report' } };
+  const source = join(f.path, original.source), raw = fs.readFileSync(source, 'utf8');
+  saveTask(f, 'pr');
+  await assert.rejects(f.connector.checkpoint(input), /requested delivery differs/);
+  saveTask(f); fs.writeFileSync(source, JSON.stringify({ ...issue(), description: 'changed acceptance' }));
+  await assert.rejects(f.connector.checkpoint(input), /changed original source/);
+  fs.writeFileSync(source, raw + '\n');
+  await assert.rejects(f.connector.checkpoint(input), /bound original source\/acceptance changed/);
+  fs.writeFileSync(source, raw);
+  saveTask(f, 'report', { body: `original source and acceptance: ${original.source}\nrequested delivery: report\nprogress: investigation completed, public findings prepared` });
+  fs.writeFileSync(source, raw);
+  await f.connector.checkpoint(input);
+  assert.equal(f.connector.active.terminal, 'review'); assert.equal(f.api.issues[0].state.id, id(5));
+  assert.deepEqual(f.store.load().records[0].binding, original);
+  assert.deepEqual(f.store.load().records[0].delivery, input.delivery);
+});
+
+test('old unqualified bound journal and mismatched review receipt reject without changing evidence', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f, 'pr');
+  const state = f.store.load();
+  delete state.records[0].binding;
+  fs.writeFileSync(f.store.path, JSON.stringify(state)); const old = fs.readFileSync(f.store.path, 'utf8');
+  assert.throws(() => f.store.load(), /incompatible task binding/);
+  assert.equal(fs.readFileSync(f.store.path, 'utf8'), old);
+  state.records[0].binding = clone(f.connector.active.binding);
+  state.records[0].terminal = 'review'; state.records[0].delivery = { kind: 'report', reference: 'https://example.test/substitute' };
+  fs.writeFileSync(f.store.path, JSON.stringify(state)); const mismatched = fs.readFileSync(f.store.path, 'utf8');
+  assert.throws(() => f.store.load(), /bound requested delivery/);
+  assert.equal(fs.readFileSync(f.store.path, 'utf8'), mismatched);
+});
+
+test('bound task disappearance blocks report review but not truthful blocked reporting', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  fs.unlinkSync(join(f.path, 'data/backlog.md'));
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } }));
+  assert.equal(f.connector.active.terminal, null); assert.equal(f.api.issues[0].state.id, id(4));
+  await f.connector.checkpoint({ ...checkpoint('blocked'), blocker: 'original task/source unavailable; preserve and reconcile before any review' });
+  assert.equal(f.connector.active.terminal, 'blocked'); assert.equal(f.api.issues[0].state.id, id(6));
 });

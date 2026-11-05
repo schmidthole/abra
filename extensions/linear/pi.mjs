@@ -134,12 +134,13 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   });
   pi.registerTool({
     name: 'abra_linear_checkpoint', label: 'linear checkpoint',
-    description: 'bind the recorded tasks-axi task, then report redacted approach/progress/checks or evidence-backed review/blocked. stable key is immutable; review requires structured delivery evidence; reports never substitute for code delivery. no raw logs/reasoning. summaries <=16000 characters; public report <=12000 bytes.',
+    description: 'bind the real tasks-axi task and immutable source.json with original requestedDelivery (report or pr) before dispatch, then report redacted approach/progress/checks or evidence-backed review/blocked. stable key is immutable; review requires structured delivery evidence; reports never substitute for code delivery. no raw logs/reasoning. summaries <=16000 characters; public report <=12000 bytes.',
     executionMode: 'sequential',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
         ...Object.fromEntries(['kind', 'key', 'summary', 'approach', 'checks', 'blocker', 'nextAction', 'task'].map(k => [k, k === 'kind' ? { type: 'string', enum: ['bind', 'approach', 'progress', 'checks', 'waiting', 'blocked', 'review'] } : { type: 'string', maxLength: 16000 }])),
+        requestedDelivery: { type: 'string', enum: ['report', 'pr'], description: 'bind only: original requested delivery, independent of authority; code intent requires pr, never report' },
         delivery: {
           type: 'object', additionalProperties: false,
           properties: {

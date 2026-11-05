@@ -40,7 +40,7 @@ process.stdin.on('data', chunk => {
       if (!['no-work', 'dialog', 'missing-outcome', 'signal-sequence'].includes(scenario) && !(scenario === 'multiple' && serial > 2)) {
         admitted = true;
         state.active = issue;
-        state.records.push({ id: issue, session, taskId: task, repo: config.repositories[0].name, fingerprint: 'a'.repeat(64), dispatch: 'sent', bound: true, halted: null, terminal: null, comments: {}, publications: [{ key: 'terminal', body: 'reviewable public output\u2028safe lf record', stateId: config.teams[0].inReview, comment: 'comment-id', state: 'confirmed' }] });
+        state.records.push({ id: issue, session, taskId: task, repo: config.repositories[0].name, fingerprint: 'a'.repeat(64), dispatch: 'sent', bound: true, binding: { requestedDelivery: 'report', source: `data/${task}/source.json`, sourceHash: 'b'.repeat(64) }, halted: null, terminal: null, comments: {}, publications: [{ key: 'terminal', body: 'reviewable public output\u2028safe lf record', stateId: config.teams[0].inReview, comment: 'comment-id', state: 'confirmed' }] });
         store.save(state);
         if (scenario !== 'out-of-order') event('start', 'admitted');
       }
