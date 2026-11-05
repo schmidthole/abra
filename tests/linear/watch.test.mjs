@@ -62,7 +62,7 @@ test('rpc dialog is never automatically approved and retains its child', async t
   assert.equal(f.spawned(), 1); assert.ok(f.diagnostics.some(d => d.state === 'awaiting-input'));
 });
 
-for (const scenario of ['crash', 'malformed', 'failed-prompt', 'timeout', 'duplicate-ready', 'duplicate-handoff', 'out-of-order', 'wrong-session', 'wrong-task', 'wrong-nonce', 'wrong-request', 'missing-outcome', 'uncertain', 'auth-loss', 'unknown-owner', 'uncertain-publication', 'lock-retained', 'unreleased', 'pending']) {
+for (const scenario of ['crash', 'malformed', 'failed-prompt', 'timeout', 'duplicate-ready', 'duplicate-handoff', 'out-of-order', 'wrong-session', 'wrong-task', 'wrong-nonce', 'wrong-request', 'missing-outcome', 'uncertain', 'auth-loss', 'unknown-owner', 'uncertain-publication', 'lock-retained', 'unreleased', 'pending', 'missing-delivery', 'unbound', 'dispatch-intent']) {
   test(`watch halts without restart on ${scenario}`, async t => {
     const f = fixture(t, scenario);
     await assert.rejects(runWatch(f.options));

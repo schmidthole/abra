@@ -56,8 +56,11 @@ process.stdin.on('data', chunk => {
       else if (!admitted) event(request, 'no-work');
       else {
         const outcome = scenario === 'blocked' ? 'blocked' : 'review';
-        const record = state.records.at(-1); record.terminal = outcome; record.releaseEvidence = 'verified fixture boundary'; record.managedProofs = [];
+        const record = state.records.at(-1); record.terminal = outcome; record.delivery = { kind: 'report', reference: 'https://example.test/public-report' }; record.releaseEvidence = 'verified fixture boundary'; record.managedProofs = [];
         state.active = null;
+        if (scenario === 'missing-delivery') delete record.delivery;
+        if (scenario === 'unbound') record.bound = false;
+        if (scenario === 'dispatch-intent') record.dispatch = 'intent';
         if (scenario === 'uncertain-publication') record.publications[0].state = 'intent';
         if (scenario === 'unreleased') state.active = issue;
         store.save(state);

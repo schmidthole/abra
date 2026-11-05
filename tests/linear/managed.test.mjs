@@ -20,9 +20,7 @@ function fixture(t) {
   const request = async (method, params) => method === 'ping' ? { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: 'session-1' } } : params?.id ? { details: { runId: 'run-1', lifecycleStatus: { processTerminal: nativeProof } } } : projection;
   const owners = new ManagedOwners(pi, ctx, request); t.after(() => owners.dispose());
   const start = { id: 'run-1', lifecycleArtifactVersion: 3, mode: 'single', sessionId: 'session-file', asyncDir: path };
-  const wf = { status: 'completed', decisions: [], selections: [{ stages: [{ attempts: [{ status: 'passed', assignments: [{ assignment: 'worker-1', dispatch: 'confirmed' }] }] }] }] };
-  const checkpoint = { status: 'completed', run_ids: ['run-1'] };
-  return { pi, ctx, path, status, save, owners, start, wf, checkpoint, projection, setProof: p => { nativeProof = p; }, verify: () => owners.verify(root, wf, async () => checkpoint) };
+  return { pi, ctx, path, status, save, owners, start, projection, setProof: p => { nativeProof = p; }, verify: () => owners.verify() };
 }
 
 test('managed rpc subscribes before sending and validates exact version/request', async () => {
@@ -32,16 +30,14 @@ test('managed rpc subscribes before sending and validates exact version/request'
   await assert.rejects(nativeRequest(pi, 'ping', {}, 10), /timeout/);
 });
 
-test('managed handoff checks captured live starts, exact public native proof and all assignment ids', async t => {
+test('managed handoff checks every captured live start against exact public native proof', async t => {
   const f = fixture(t); await f.owners.ready(); f.pi.events.emit('subagent:async-started', f.start);
   assert.deepEqual(await f.verify(), [proof()]);
-  f.checkpoint.run_ids.push('unknown-run'); await assert.rejects(f.verify(), /unknown/);
 });
 
-test('empty managed assignments are valid only under the caller acknowledged trust contract', async t => {
-  const f = fixture(t); f.wf.selections[0].stages[0].attempts[0].assignments = [];
+test('coordinator-only managed reports need no assignment graph or native run', async t => {
+  const f = fixture(t);
   assert.deepEqual(await f.verify(), []);
-  f.pi.events.emit('subagent:async-started', f.start); await assert.rejects(f.verify(), /missing from workflow/);
 });
 
 for (const [name, mutate] of [
@@ -57,21 +53,14 @@ for (const [name, mutate] of [
   ['nonterminal runner', f => { f.status.state = 'running'; f.save(); }],
   ['missing status', f => fs.unlinkSync(join(f.path, 'status.json'))],
   ['malformed status', f => fs.writeFileSync(join(f.path, 'status.json'), '{broken')],
-  ['pending workflow', f => { f.wf.status = 'active'; }],
-  ['publication intent', f => { f.wf.selections[0].stages[0].attempts[0].status = 'active'; }],
-  ['dispatch intent', f => { f.wf.selections[0].stages[0].attempts[0].assignments[0].dispatch = 'intent'; }],
-  ['missing recorded ids', f => { f.checkpoint.run_ids = []; }],
-  ['active checkpoint', f => { f.checkpoint.status = 'active'; }],
 ]) test(`managed handoff refuses ${name}`, async t => {
   const f = fixture(t); f.pi.events.emit('subagent:async-started', f.start); mutate(f); await assert.rejects(f.verify());
 });
 
-test('blocked workflow intents require explicit recorded reconciliation, not model booleans', async t => {
-  const f = fixture(t); f.pi.events.emit('subagent:async-started', f.start);
-  f.wf.status = 'blocked'; const attempt = f.wf.selections[0].stages[0].attempts[0]; attempt.status = 'blocked'; attempt.stopped = true;
-  await assert.rejects(f.verify(), /reconciliation/);
-  attempt.outcome = 'owners stopped; publication receipt reconciled'; attempt.evidence = ['report']; attempt.decision = 'reconcile-1'; f.wf.decisions.push({ id: 'reconcile-1', kind: 'reconciliation', evidence: ['report'] });
-  assert.equal((await f.verify()).length, 1);
+test('unresolved native launch calls block handoff without a replacement manifest', async t => {
+  const f = fixture(t);
+  f.owners.observeTool({ toolName: 'subagent', toolCallId: 'pending', args: { agent: 'worker', async: true } });
+  await assert.rejects(f.verify(), /ownership changed/);
 });
 
 test('unsupported, duplicated or foreign native launch events cannot be ignored', async t => {
@@ -92,4 +81,20 @@ test('native projections detect known unknown/active/omitted owners without clai
   for (const mutate of [p => p.fleet.totalActive = 1, p => p.fleet.omitted = 1, p => p.asyncSnapshot.runs.push({ id: 'foreign' }), p => p.asyncSnapshot.omitted.children = 1, p => p.asyncSnapshot.omitted.byteLimitExceeded = true]) {
     const f = fixture(t); mutate(f.projection); await assert.rejects(f.owners.ready(), /ownership projection/);
   }
+});
+
+test('every captured start is checked even without model-supplied run ids', async t => {
+  const f = fixture(t); f.pi.events.emit('subagent:async-started', f.start);
+  f.pi.events.emit('subagent:async-started', { ...f.start, id: 'run-2' });
+  await assert.rejects(f.verify(), /foreign/);
+});
+
+test('a native start during final ownership recheck prevents handoff', async t => {
+  const f = fixture(t), request = f.owners.request;
+  f.owners.request = async (method, params) => {
+    const value = await request(method, params);
+    if (method === 'status' && !params?.id) f.pi.events.emit('subagent:async-started', f.start);
+    return value;
+  };
+  await assert.rejects(f.verify(), /ownership changed/);
 });

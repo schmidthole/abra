@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import { join, resolve } from 'node:path';
-import { configuration, Store, LinearClient, ApiError, Connector, coordinatorPrompt, validatedWorkflow } from '../../extensions/linear/core.mjs';
+import { configuration, Store, LinearClient, ApiError, Connector, coordinatorPrompt } from '../../extensions/linear/core.mjs';
 import { install } from '../../extensions/linear/pi.mjs';
 
 const root = resolve('.');
@@ -44,13 +44,12 @@ function fixture(t, extra = {}) {
   const path = temporary(t), cfg = config(), api = new FakeApi(), sent = [], cancellations = [], steering = [];
   const store = new Store(path, cfg);
   const taskId = `linear-${id(8)}`;
-  const wf = { task_id: taskId, status: 'active', briefs: [{ requested_delivery: 'report' }], delivery_refs: [] };
   const host = { idle: () => true, send: async p => sent.push(p), cancel: async r => cancellations.push(r), steer: async p => steering.push(p) };
-  const connector = new Connector({ root: path, config: cfg, store, api, host, workflow: async () => wf, random: () => 0, ...extra });
+  const connector = new Connector({ root: path, config: cfg, store, api, host, random: () => 0, ...extra });
   resources.set(t, [...resources.get(t) ?? [], connector]);
-  return { connector, path, cfg, api, store, sent, cancellations, steering, wf, host };
+  return { connector, path, cfg, api, store, sent, cancellations, steering, host };
 }
-const checkpoint = (kind, key = kind) => ({ kind, key, summary: 'concise public summary', approach: 'bounded investigation', checks: 'focused tests passed', nextAction: 'independent review', blocker: 'publication authority unavailable' });
+const checkpoint = (kind, key = kind) => ({ kind, key, summary: 'concise public summary', approach: 'bounded investigation', checks: 'focused tests passed', nextAction: 'independent review', blocker: 'publication authority unavailable', task: `linear-${id(8)}` });
 async function bind(f) { await f.connector.checkpoint(checkpoint('bind')); }
 
 test('configuration defaults off/report and rejects credentials, unsafe status and unbounded authority', () => {
@@ -87,7 +86,7 @@ test('exclusive lock refuses second host; stale lock is never auto-stolen', asyn
 
 test('reload off: correlation survives, resume wrong session fails and correct session never redispatches', async t => {
   const f = fixture(t); await f.connector.enable('session-1'); await f.connector.dispose();
-  const recovered = new Connector({ root: f.path, config: f.cfg, store: new Store(f.path, f.cfg), api: f.api, host: f.host, workflow: async () => f.wf });
+  const recovered = new Connector({ root: f.path, config: f.cfg, store: new Store(f.path, f.cfg), api: f.api, host: f.host });
   resources.set(t, [...resources.get(t), recovered]);
   assert.equal(recovered.mode, 'off');
   await assert.rejects(recovered.enable('session-2', true), /recorded owning/);
@@ -182,35 +181,33 @@ test('status lost response reconciles while preserving confirmed comment', async
   assert.equal(f.connector.active.publications[0].state, 'confirmed'); assert.equal(f.api.calls.filter(c => c === 'status').length, 1); assert.equal(f.api.thread.length, 1);
 });
 
-test('structured checkpoints bind workflow and require actual terminal delivery not prose', async t => {
+test('structured checkpoints bind tasks-axi and require actual terminal delivery not prose', async t => {
   const f = fixture(t); await f.connector.enable('session-1');
-  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /bind workflow/); await bind(f);
-  await f.connector.checkpoint(checkpoint('approach'));
-  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /validated actual/);
+  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /bind task/);
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('bind'), task: 'foreign' }), /task id/);
+  await bind(f); await f.connector.checkpoint(checkpoint('approach'));
+  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /invalid configuration/);
   assert.equal(f.api.issues[0].state.id, id(4));
   await f.connector.checkpoint(checkpoint('blocked')); assert.equal(f.api.issues[0].state.id, id(6)); assert.ok(f.connector.active);
-  await assert.rejects(f.connector.release('pi is idle'), /workflow must/);
+  await f.connector.release('operator confirmed all native owners stopped and task continuity saved');
+  assert.equal(f.connector.active, undefined);
 });
 
 test('public report content is visible in linear; private path alone never counts', async t => {
   const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
-  f.wf.status = 'completed';
-  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /report must/);
   const report = join(f.path, 'data', f.connector.active.taskId, 'public.md'); fs.mkdirSync(join(report, '..'), { recursive: true }); fs.writeFileSync(report, 'full public findings with test evidence');
-  f.wf.delivery_refs = [report];
-  await f.connector.checkpoint({ ...checkpoint('review'), report });
+  await f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'report', reference: report } });
   assert.equal(f.api.issues[0].state.id, id(5)); assert.match(f.api.thread.at(-1).body, /full public findings with test evidence/);
   assert.ok(!f.api.thread.at(-1).body.includes(report));
-  f.wf.status = 'completed'; await f.connector.release('confirmed native run abc stopped; manifest delivery receipts inspected'); assert.equal(f.connector.active, undefined);
+  assert.deepEqual(f.connector.active.delivery, { kind: 'report', reference: report });
+  await f.connector.release('confirmed native owners stopped; delivery receipts inspected'); assert.equal(f.connector.active, undefined);
   await assert.rejects(f.connector.enable('session-1'), /session already used/);
 });
 
 test('code delivery cannot use report-only authority or inaccessible local commit', async t => {
-  const f = fixture(t); await f.connector.enable('session-1'); await bind(f); f.wf.status = 'completed';
-  f.wf.briefs[0].requested_delivery = 'local-commit';
-  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /not accessible code delivery/);
-  f.wf.briefs[0].requested_delivery = 'pr'; f.wf.delivery_refs = ['https://github.com/example/abra/pull/1'];
-  await assert.rejects(f.connector.checkpoint(checkpoint('review')), /no configured code publication authority/);
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'local-commit', reference: 'abc' } }), /local commit/);
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'pr', reference: 'https://github.com/example/abra/pull/1' } }), /no configured code publication authority/);
 });
 
 test('terminal partial failure requires same immutable key and no execution rerun', async t => {
@@ -285,12 +282,6 @@ test('prompt preserves policy, exact-candidate review, authority and terminal di
   for (const required of ['original intent', 'AGENTS.md', 'bin/tasks', 'native owners', 'dispatch intent', 'exact-candidate', 'make format', 'make test', 'report is not code delivery', 'no merge/deploy', 'raw reasoning', 'in linear', 'kind blocked']) assert.ok(prompt.includes(required), required);
 });
 
-test('real workflow boundary rejects invalid manifest rather than accepting model prose', async t => {
-  const path = temporary(t), taskId = `linear-${id(8)}`; fs.mkdirSync(join(path, 'bin')); fs.copyFileSync(join(root, 'bin/workflow.py'), join(path, 'bin/workflow.py')); fs.copyFileSync(join(root, 'bin/checkpoint.py'), join(path, 'bin/checkpoint.py')); fs.copyFileSync(join(root, 'bin/durable_files.py'), join(path, 'bin/durable_files.py'));
-  fs.mkdirSync(join(path, 'data', taskId), { recursive: true }); fs.writeFileSync(join(path, 'data', taskId, 'workflow.json'), JSON.stringify({ status: 'completed', task_id: taskId }));
-  await assert.rejects(validatedWorkflow(path, taskId));
-});
-
 function fakePi() {
   const handlers = {}, commands = {}, tools = {}, sent = [], entries = [], emitter = new EventEmitter();
   const events = { on: (name, fn) => { emitter.on(name, fn); return () => emitter.off(name, fn); }, emit: (...args) => emitter.emit(...args) };
@@ -328,8 +319,8 @@ test('explicit not-sent reconciliation recovers admission only after proven no d
 });
 
 test('checkpoint rechecks source and refuses in-review after delegation changes', async t => {
-  const f = fixture(t); await f.connector.enable('session-1'); await bind(f); f.wf.status = 'completed'; f.wf.delivery_refs = ['https://example.test/report']; f.api.issues[0].delegate = null;
-  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), report: f.wf.delivery_refs[0] }), /unchanged delegation/);
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f); f.api.issues[0].delegate = null;
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } }), /unchanged delegation/);
   assert.equal(f.api.issues[0].state.id, id(4)); assert.equal(f.cancellations.length, 1);
 });
 
@@ -341,30 +332,35 @@ test('shutdown aborts an in-flight poll before releasing the host lock', async t
   assert.equal(aborted, true); assert.equal(f.store.held, false);
 });
 
-test('pr evidence gates exact clean candidate, independent worktree, remote and bounded diff', async t => {
+test('pr evidence gates exact clean candidate, independent detached review, repository, base and bounded diff', async t => {
   const { execFileSync } = await import('node:child_process');
   const f = fixture(t); const directory = join(f.path, 'candidate'); fs.mkdirSync(directory);
   const git = args => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8' }).trim();
   git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'local test']); git(['config', 'user.email', 'test@example.invalid']); git(['remote', 'add', 'origin', 'https://github.com/example/abra.git']);
-  fs.writeFileSync(join(directory, 'file.md'), 'base\n'); git(['add', '.']); git(['commit', '-qm', 'base']); git(['checkout', '-qb', 'candidate']); fs.appendFileSync(join(directory, 'file.md'), 'changed\n'); git(['commit', '-qam', 'candidate']);
-  const candidate = git(['rev-parse', 'HEAD']);
+  fs.writeFileSync(join(directory, 'file.md'), 'base\n'); git(['add', '.']); git(['commit', '-qm', 'base']); const baseCommit = git(['rev-parse', 'HEAD']);
+  git(['checkout', '-qb', 'candidate']); fs.appendFileSync(join(directory, 'file.md'), 'changed\n'); git(['commit', '-qam', 'candidate']);
+  const candidate = git(['rev-parse', 'HEAD']), verifierDirectory = join(f.path, 'detached-verifier'), verificationReport = join(f.path, 'review.md');
+  git(['worktree', 'add', '--detach', verifierDirectory, candidate]); fs.writeFileSync(verificationReport, 'independent review: pass with command evidence');
   f.cfg.authority = { mode: 'pr', maxFiles: 1, maxChangedLines: 2 };
-  const wf = { selections: [{ recipe: 'implement', stages: [{ id: 'worker', attempts: [{ status: 'passed', candidate_commit: candidate, assignments: [{ working_directory: directory }] }] }, { id: 'verify', attempts: [{ status: 'passed', verdict: 'pass', candidate_commit: candidate, assignments: [{ working_directory: join(f.path, 'detached-verifier') }] }] }] }] };
-  const repo = { ...f.cfg.repositories[0], path: directory }; await f.connector.codeDelivery(wf, repo);
-  f.cfg.authority.maxChangedLines = 0; await assert.rejects(f.connector.codeDelivery(wf, repo), /changed-line/); f.cfg.authority.maxChangedLines = 2;
-  wf.selections[0].stages[1].attempts[0].candidate_commit = 'a'.repeat(40); await assert.rejects(f.connector.codeDelivery(wf, repo), /exact candidate/); wf.selections[0].stages[1].attempts[0].candidate_commit = candidate;
-  fs.appendFileSync(join(directory, 'file.md'), 'dirty\n'); await assert.rejects(f.connector.codeDelivery(wf, repo), /dirty/);
-});
+  const delivery = { kind: 'pr', reference: 'https://github.com/example/abra/pull/1', candidate, baseCommit, workerDirectory: directory, verifierDirectory, verificationReport, verifiedCommit: candidate, checks: { intent: 'pass', tests: 'pass', docs: 'not-applicable', format: 'pass' }, prHead: candidate, prBase: 'main', ci: 'passed', externalEvidence: 'coordinator checked authorized pr target/head and required ci through gh-axi' };
+  const repo = { ...f.cfg.repositories[0], path: directory }; await f.connector.codeDelivery(delivery, repo);
+  f.cfg.repositories[0].path = directory;
+  await f.connector.enable('session-1'); await bind(f);
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { ...delivery, reference: 'https://github.com/foreign/repo/pull/1' } }), /configured repository/);
+  await f.connector.checkpoint({ ...checkpoint('review'), delivery });
+  assert.equal(f.connector.active.terminal, 'review');
+  assert.deepEqual(f.store.load().records[0].delivery, delivery);
 
-test('real existing workflow helper validates completed research delivery and its report', async t => {
-  const path = temporary(t), taskId = `linear-${id(8)}`, directory = join(path, 'data', taskId); fs.mkdirSync(directory, { recursive: true }); fs.mkdirSync(join(path, 'bin'));
-  for (const file of ['workflow.py', 'checkpoint.py', 'durable_files.py']) fs.copyFileSync(join(root, 'bin', file), join(path, 'bin', file));
-  const report = join(directory, 'report.md'), brief = join(directory, 'brief.md'); fs.writeFileSync(report, 'real reviewable research output'); fs.writeFileSync(brief, 'original intent and acceptance');
-  const stages = ['scout', 'report'].map((name, index) => ({ id: name, attempts: [{ id: `${name}-1`, order: index + 1, status: 'passed', intent: 'saved authorized action', assignments: name === 'scout' ? [{ assignment: 'scout-1', role: 'scout', predecessor: null, tracker: join(directory, 'agents/scout-1.json'), brief, working_directory: path, dispatch: 'confirmed', reconciliation: null }] : [], acceptance_revision: 'a'.repeat(64), candidate_commit: null, verdict: null, report, outcome: 'coordinator inspected actual artifact', evidence: [report], decision: `${name}-decision` }] }));
-  const wf = { version: 1, task_id: taskId, updated_at: '2026-06-01T12:00:00Z', briefs: [{ reference: brief, acceptance_revision: 'a'.repeat(64), requested_delivery: 'report', decision: 'select' }], selections: [{ id: 'selection-1', recipe: 'research', version: 1, rationale: 'report only', decision: 'select', stages }], decisions: ['select', 'scout-decision', 'report-decision'].map((name, index) => ({ id: name, kind: index ? 'coordinator' : 'operator', summary: 'actual saved decision', evidence: [report] })), status: 'completed', current_stage: null, checkpoint: 'delivered report with evidence', next_action: null, blocker: null, delivery_refs: [report] };
-  const manifest = join(directory, 'workflow.json');
-  fs.writeFileSync(manifest, JSON.stringify(wf));
-  const validated = await validatedWorkflow(path, taskId); assert.equal(validated.status, 'completed'); assert.equal(validated.delivery_refs[0], report);
+  for (const [field, value, pattern] of [['verifiedCommit', 'a'.repeat(40), /exact candidate/], ['baseCommit', candidate, /base changed/], ['ci', 'pending', /required ci/], ['prHead', baseCommit, /pr head/], ['prBase', 'other', /pr head/], ['externalEvidence', '', /external evidence/], ['verifierDirectory', directory, /independent verifier/]]) {
+    await assert.rejects(f.connector.codeDelivery({ ...delivery, [field]: value }, repo), pattern);
+  }
+  await assert.rejects(f.connector.codeDelivery({ ...delivery, checks: { ...delivery.checks, tests: 'blocked' } }, repo), /checks must pass/);
+  f.cfg.authority.maxChangedLines = 0; await assert.rejects(f.connector.codeDelivery(delivery, repo), /changed-line/); f.cfg.authority.maxChangedLines = 2;
+  await assert.rejects(f.connector.codeDelivery(delivery, { ...repo, remote: 'https://github.com/foreign/repo' }), /repository differs/);
+  fs.appendFileSync(join(verifierDirectory, 'file.md'), 'dirty\n'); await assert.rejects(f.connector.codeDelivery(delivery, repo), /dirty/);
+  fs.writeFileSync(join(verifierDirectory, 'file.md'), 'base\nchanged\n');
+  fs.appendFileSync(join(directory, 'file.md'), 'dirty\n'); await assert.rejects(f.connector.codeDelivery(delivery, repo), /dirty/);
+  git(['worktree', 'remove', verifierDirectory]);
 });
 
 test('request deadline cancels hanging graphql, with no retry side effects', async () => {
@@ -391,8 +387,7 @@ async function watchFixture(t) {
   cfg.watch = { trustedManagedWork: true }; fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
   const old = process.env.ABRA_LINEAR_WATCH_NONCE; process.env.ABRA_LINEAR_WATCH_NONCE = nonce;
   t.after(() => { if (old === undefined) delete process.env.ABRA_LINEAR_WATCH_NONCE; else process.env.ABRA_LINEAR_WATCH_NONCE = old; });
-  const wf = { task_id: `linear-${id(8)}`, status: 'active', briefs: [{ requested_delivery: 'report' }], delivery_refs: [], selections: [], decisions: [] };
-  install(pi, '.pi', { api, workflow: async () => wf, nativeRequest: async method => {
+  install(pi, '.pi', { api, nativeRequest: async method => {
     if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: 'pi-session' } };
     return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
   } });
@@ -400,22 +395,21 @@ async function watchFixture(t) {
   resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
   const command = args => pi.commands['abra-linear'].handler(args, ctx);
   await command(`watch-start ${nonce}`);
-  return { path, cfg, api, pi, nonce, wf, ctx, command };
+  return { path, cfg, api, pi, nonce, ctx, command };
 }
 
-test('extension watch binds nonce/session/task, confirmed Linear delivery and settled workflow before release', async t => {
+test('extension watch binds nonce/session/task, confirmed linear delivery and settled coordinator before release', async t => {
   const f = await watchFixture(t);
   assert.deepEqual(f.pi.entries.filter(e => e.customType === 'abra-linear-watch').map(e => e.data.state), ['ready', 'admitted']);
   await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
-  f.wf.status = 'completed'; f.wf.delivery_refs = ['https://example.test/public-report'];
-  await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), report: f.wf.delivery_refs[0] }, null, null, f.ctx);
+  await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } }, null, null, f.ctx);
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
   await f.pi.handlers.agent_settled();
   f.ctx.hasPendingMessages = () => true;
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
   f.ctx.hasPendingMessages = () => false;
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
-  const handoff = f.pi.entries.at(-1).data; assert.equal(handoff.state, 'handoff'); assert.equal(handoff.outcome, 'review'); assert.equal(handoff.task, f.wf.task_id);
+  const handoff = f.pi.entries.at(-1).data; assert.equal(handoff.state, 'handoff'); assert.equal(handoff.outcome, 'review'); assert.equal(handoff.task, `linear-${id(8)}`);
   const saved = new Store(f.path, f.cfg).load(); assert.equal(saved.active, null); assert.deepEqual(saved.records[0].managedProofs, []);
   assert.ok(!fs.existsSync(join(f.path, 'data/linear/owner.lock')));
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'uncertain');
@@ -431,12 +425,46 @@ test('waiting checkpoint retains clarification session without false blocked fal
   assert.ok(new Store(f.path, f.cfg).load().active);
 });
 
-test('watch never releases terminal blocked while recorded workflow intent or publication is uncertain', async t => {
+test('watch never releases terminal blocked while native launch intent is unresolved', async t => {
   const f = await watchFixture(t);
   await f.pi.tools.abra_linear_checkpoint.execute('bind', checkpoint('bind'), null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('blocked', checkpoint('blocked'), null, null, f.ctx);
   await f.pi.handlers.agent_settled();
+  f.pi.handlers.tool_execution_start({ toolName: 'subagent', toolCallId: 'unresolved', args: { agent: 'worker', async: true } });
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
   assert.equal(f.pi.entries.at(-1).data.state, 'uncertain'); assert.ok(new Store(f.path, f.cfg).load().active);
   assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
+});
+
+test('old workflow-backed journal is rejected without migration or deletion', t => {
+  const path = temporary(t), store = new Store(path, config()); store.load();
+  const old = JSON.stringify({ version: 1, identity: store.identity, records: [], active: null });
+  fs.writeFileSync(store.path, old);
+  assert.throws(() => store.load(), /incompatible/);
+  assert.equal(fs.readFileSync(store.path, 'utf8'), old);
+});
+
+test('report review refuses missing, empty, oversized, outside and symlink artifacts and credential URLs', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  const directory = join(f.path, 'data', f.connector.active.taskId); fs.mkdirSync(directory, { recursive: true });
+  const empty = join(directory, 'empty.md'), large = join(directory, 'large.md'), link = join(directory, 'link.md');
+  fs.writeFileSync(empty, ''); fs.writeFileSync(large, 'x'.repeat(12001)); fs.symlinkSync(large, link);
+  for (const reference of [empty, large, link, join(directory, 'missing.md'), join(f.path, 'outside.md'), 'https://user:password@example.test/report']) {
+    await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'report', reference } }));
+    assert.equal(f.connector.active.terminal, null);
+    assert.equal(f.api.issues[0].state.id, id(4));
+  }
+});
+
+test('review receipt is durable and immutable across uncertain status publication', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f); f.api.failState = 'before';
+  const delivery = { kind: 'report', reference: 'https://example.test/public-report' };
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery }));
+  assert.deepEqual(new Store(f.path, f.cfg).load().records[0].delivery, delivery);
+  await assert.rejects(f.connector.release('all owners stopped'), /terminal checkpoint/);
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { ...delivery, reference: 'https://example.test/different-report' } }), /delivery receipt already bound/);
+  f.api.failState = null;
+  await f.connector.reconcile({ key: 'review', state: 'not-applied', evidence: 'operator inspected and confirmed original request finished without applying status' });
+  await f.connector.checkpoint({ ...checkpoint('review'), delivery });
+  assert.equal(f.connector.active.terminal, 'review'); assert.equal(f.api.thread.length, 2);
 });

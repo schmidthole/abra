@@ -78,7 +78,7 @@ export class RpcChild {
 function released(root, config, outcome) {
   const store = new Store(root, config), state = store.load();
   const record = state.records.find(r => r.id === outcome.issue);
-  requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed')), 'handoff disagrees with durable connector/lock/publication receipts');
+  requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.bound === true && record.dispatch === 'sent' && (record.terminal !== 'review' || record.delivery) && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed')), 'handoff disagrees with durable connector/lock/publication receipts');
 }
 
 export async function runWatch({ root = process.cwd(), configDirectory = '.pi', pi = 'pi', acknowledge = false, signal, intervalMs = 1000, timeoutMs = 60000, spawnChild = (command, args, options) => spawn(command, args, options), diagnose = event => process.stderr.write(JSON.stringify(event) + '\n') } = {}) {
@@ -141,7 +141,7 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
           if (command === 'watch-stop') { stopped = true; stopDeadline = Date.now() + timeoutMs; }
           await rpc.command('prompt', { message: `/abra-linear ${command} ${nonce} ${request}` });
           requireValue(reported === request, 'command accepted without explicit connector outcome');
-          if (stopped && !outcome && Date.now() >= stopDeadline) throw new Error('interrupted with tracked owners; reconcile saved session/workflow/native runs before restart');
+          if (stopped && !outcome && Date.now() >= stopDeadline) throw new Error('interrupted with tracked owners; reconcile saved session/task/native runs before restart');
           if (!outcome) await Promise.race([new Promise(resolve => setTimeout(resolve, intervalMs)), rpc.failure]);
         }
         phase = 'handoff-session-and-receipts';
@@ -151,7 +151,7 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
         phase = 'child-shutdown';
         await rpc.close();
       } catch (error) {
-        diagnose({ state: 'halted', phase, session: initial?.sessionId ?? null, issue: admitted?.issue ?? null, note: 'no restart; preserve connector/session/workflow/checkpoints; surviving native owners are not disproved by child shutdown' });
+        diagnose({ state: 'halted', phase, session: initial?.sessionId ?? null, issue: admitted?.issue ?? null, note: 'no restart; preserve connector/session/task/native artifacts; surviving native owners are not disproved by child shutdown' });
         try { await rpc.close(); } catch { /* preserve original failure; shutdown is not owner proof. */ }
         throw error;
       }
