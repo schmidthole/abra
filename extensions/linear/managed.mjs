@@ -1,11 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { requireValue, safePath, readJson } from './core.mjs';
 
-const exec = promisify(execFile);
 const terminal = new Set(['complete', 'failed', 'partial', 'paused', 'stopped', 'rejected']);
 const nonempty = value => typeof value === 'string' && value.length > 0;
 
@@ -30,14 +27,6 @@ export function validateProcessTerminal(proof, runId) {
   requireValue(runner.kind === 'runner' && runner.processInstanceId === proof.runnerProcessInstanceId && Number.isFinite(runner.closeObservedAt) && runner.closeObservedAt >= 0 && runner.closeObservedAt <= proof.observedAt && (runner.exitCode === null || Number.isInteger(runner.exitCode)) && (runner.signal === null || typeof runner.signal === 'string'), 'runner close not observed');
   if (proof.canonicalSession) requireValue(nonempty(proof.canonicalSession.canonicalSessionId) && proof.canonicalSession.freeAtObservation === true && ['released', 'not-held'].includes(proof.canonicalSession.leaseDisposition), 'canonical session lease unresolved');
   return proof;
-}
-
-export async function assignmentCheckpoint(root, link) {
-  safePath(link.tracker);
-  const args = [join(root, 'bin/checkpoint.py'), 'read', link.tracker, '--assignment', link.assignment, '--role', link.role, '--working-directory', link.working_directory ?? 'null'];
-  if (link.predecessor) args.push('--predecessor', link.predecessor);
-  const result = await exec('python3', args, { cwd: root, timeout: 15000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
-  return JSON.parse(result.stdout).checkpoint;
 }
 
 export class ManagedOwners {
@@ -76,24 +65,9 @@ export class ManagedOwners {
     const details = event.result?.details;
     if (event.isError || !details?.asyncId || !this.runs.has(details.asyncId)) this.fault = 'unsupported, failed or unobserved native launch; reconcile manually';
   }
-  async verify(root, wf, readCheckpoint = assignmentCheckpoint) {
+  async verify() {
     requireValue(!this.fault, this.fault);
-    requireValue(['completed', 'blocked', 'paused'].includes(wf.status), 'workflow still active');
-    const recorded = new Set();
-    for (const selection of wf.selections) for (const stage of selection.stages) for (const attempt of stage.attempts) {
-      requireValue(attempt.status !== 'active', 'unresolved workflow/publication intent');
-      if (attempt.status === 'blocked') requireValue(attempt.outcome && attempt.evidence?.length && wf.decisions.some(d => d.id === attempt.decision && d.kind === 'reconciliation' && d.evidence?.length), 'blocked intent needs saved reconciliation decision/outcome');
-      for (const link of attempt.assignments) {
-        requireValue(link.dispatch === 'confirmed', 'unresolved dispatch intent');
-        const checkpoint = await readCheckpoint(root, link);
-        requireValue(['completed', 'blocked', 'failed', 'paused'].includes(checkpoint.status) && checkpoint.run_ids.length > 0, 'missing stopped assignment/run evidence');
-        for (const runId of checkpoint.run_ids) {
-          requireValue(this.runs.has(runId) && !recorded.has(runId), 'unknown, foreign or multiply assigned managed run');
-          recorded.add(runId);
-        }
-      }
-    }
-    requireValue(recorded.size === this.runs.size, 'managed starts missing from workflow assignments');
+    const runIds = [...this.runs.keys()];
     const proofs = [];
     for (const [runId, start] of this.runs) {
       const data = await this.request('status', { id: runId });
@@ -106,7 +80,7 @@ export class ManagedOwners {
       proofs.push(proof);
     }
     await this.quiet();
-    requireValue(!this.fault && recorded.size === this.runs.size && this.calls.size === 0, 'managed ownership changed during handoff');
+    requireValue(!this.fault && runIds.length === this.runs.size && this.calls.size === 0, 'managed ownership changed during handoff');
     return proofs;
   }
   dispose() { this.unsubscribe(); }

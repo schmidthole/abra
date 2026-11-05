@@ -30,7 +30,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       },
       cancel: async reason => {
         ctx.abort();
-        pi.sendUserMessage(`stop new actions: ${reason}. only reconcile/cancel existing native owners, preserve task/manifest evidence and report blocked. aborting pi alone does not prove subagents stopped.`, { deliverAs: 'steer' });
+        pi.sendUserMessage(`stop new actions: ${reason}. only reconcile/cancel existing native owners, preserve task/native evidence and report blocked. aborting pi alone does not prove subagents stopped.`, { deliverAs: 'steer' });
       },
       steer: async message => { pi.sendUserMessage(message, { deliverAs: 'steer' }); },
       notify: message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); },
@@ -78,7 +78,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
           requireValue(!connector.error && !watch.owners.fault && !connector.status().pending.length, 'uncertain connector/native/publication state; reconcile manually');
           if (active?.terminal && !active.waiting && settled && ctx.isIdle() && !ctx.hasPendingMessages()) {
             const identity = { issue: active.id, task: active.taskId, outcome: active.terminal };
-            await connector.release('trusted managed-work handoff: settled coordinator, reconciled workflow and exact native terminal proofs', wf => watch.owners.verify(ctx.cwd, wf, dependencies.readCheckpoint));
+            await connector.release('trusted managed-work handoff: settled coordinator, confirmed reporting receipts and exact native terminal proofs', () => watch.owners.verify());
             watch.handed = true;
             emitWatch(ctx, request, 'handoff', identity);
           } else if (watch.stopped && !active && ctx.isIdle() && !ctx.hasPendingMessages()) {
@@ -106,7 +106,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
           return;
         }
         if (command === 'resume') {
-          requireValue(dedicated && (!connector || connector.mode === 'off') && ctx.hasUI, 'resume the original dedicated pi session first; inspect task/manifest/native ownership');
+          requireValue(dedicated && (!connector || connector.mode === 'off') && ctx.hasUI, 'resume the original dedicated pi session first; inspect task/native ownership');
           requireValue(await ctx.ui.confirm('resume control polling only?', 'confirm you inspected saved dispatch and surviving native owners. this does not redispatch or replay uncertain mutations. admission stays paused.'), 'resume not confirmed');
           await connector?.dispose();
           connector = build(ctx);
@@ -134,11 +134,22 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   });
   pi.registerTool({
     name: 'abra_linear_checkpoint', label: 'linear checkpoint',
-    description: 'bind the existing task workflow, then report redacted approach/progress/checks or evidence-backed review/blocked. stable key is immutable; report is a workflow delivery reference. no raw logs/reasoning. summaries <=16000 characters; public report <=12000 bytes.',
+    description: 'bind the real tasks-axi task and immutable source.json with original requestedDelivery (report or pr) before dispatch, then report redacted approach/progress/checks or evidence-backed review/blocked. stable key is immutable; review requires structured delivery evidence; reports never substitute for code delivery. no raw logs/reasoning. summaries <=16000 characters; public report <=12000 bytes.',
     executionMode: 'sequential',
     parameters: {
       type: 'object', additionalProperties: false,
-      properties: Object.fromEntries(['kind', 'key', 'summary', 'approach', 'checks', 'blocker', 'nextAction', 'report'].map(k => [k, k === 'kind' ? { type: 'string', enum: ['bind', 'approach', 'progress', 'checks', 'waiting', 'blocked', 'review'] } : { type: 'string', maxLength: 16000 }])),
+      properties: {
+        ...Object.fromEntries(['kind', 'key', 'summary', 'approach', 'checks', 'blocker', 'nextAction', 'task'].map(k => [k, k === 'kind' ? { type: 'string', enum: ['bind', 'approach', 'progress', 'checks', 'waiting', 'blocked', 'review'] } : { type: 'string', maxLength: 16000 }])),
+        requestedDelivery: { type: 'string', enum: ['report', 'pr'], description: 'bind only: original requested delivery, independent of authority; code intent requires pr, never report' },
+        delivery: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            ...Object.fromEntries(['kind', 'reference', 'candidate', 'baseCommit', 'workerDirectory', 'verifierDirectory', 'verificationReport', 'verifiedCommit', 'prHead', 'prBase', 'ci', 'externalEvidence'].map(k => [k, { type: 'string', maxLength: 16000 }])),
+            checks: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['intent', 'tests', 'docs', 'format'].map(k => [k, { type: 'string', enum: ['pass', 'fail', 'blocked', 'not-applicable'] }])), required: ['intent', 'tests', 'docs', 'format'] },
+          },
+          required: ['kind', 'reference'],
+        },
+      },
       required: ['kind', 'key', 'summary', 'nextAction'],
     },
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -168,7 +179,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       const issue = await connector.api.issue(connector.active.id, connector.controller.signal);
       const team = connector.team(issue);
       if (!team || ['completed', 'canceled'].includes(issue.state.type)) return;
-      await connector.publish('settled-without-terminal', 'blocked: coordinator settled without an evidence-backed terminal checkpoint. next action: inspect task, manifest, checks, delivery receipts and surviving native owners; no verified success inferred.', team.blocked, connector.controller.signal);
+      await connector.publish('settled-without-terminal', 'blocked: coordinator settled without an evidence-backed terminal checkpoint. next action: inspect task, checks, delivery receipts and surviving native owners; no verified success inferred.', team.blocked, connector.controller.signal);
       connector.active.terminal = 'blocked'; connector.persist();
     });
   });

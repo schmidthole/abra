@@ -9,9 +9,6 @@ import re
 import subprocess
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import specialty  # noqa: e402
-
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -33,9 +30,6 @@ def slug(value):
 
 
 def read_registry(root):
-    pack = specialty.load(root)
-    if pack is not None:
-        return pack["repos"]
     path = root / "data/repos.json"
     return json.loads(path.read_text()) if path.exists() else {}
 
@@ -52,11 +46,6 @@ def resolve(registry, name):
 
 
 def register(root, name, path, base, aliases, description):
-    if specialty.locate(root) is not None:
-        raise ValueError(
-            "register is disabled while a specialty is active; "
-            "repos come from specialty.json"
-        )
     slug(name)
     for alias in aliases:
         slug(alias)
