@@ -3,6 +3,7 @@ import { join, resolve, isAbsolute, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { diagnosticText } from './diagnostics.mjs';
 
 const exec = promisify(execFile);
 export const requireValue = (ok, message) => { if (!ok) throw new Error(message); };
@@ -129,6 +130,7 @@ export class Store {
 export class ApiError extends Error {
   constructor(message, { auth = false, retryMs = 0 } = {}) { super(message); this.auth = auth; this.retryMs = retryMs; }
 }
+export const connectorDiagnostic = error => error instanceof ApiError ? (error.auth ? 'connector-auth-failed' : 'connector-request-failed') : error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name) ? 'connector-request-failed' : 'connector-operation-failed';
 export class LinearClient {
   constructor(config, token, fetcher = fetch) {
     requireValue(text(token) || typeof token?.get === 'function', 'credential environment variable is empty');
@@ -235,7 +237,7 @@ export class Connector {
   constructor({ root, config, store, api, host, random = Math.random, clock = Date.now }) {
     Object.assign(this, { root, config, store, api, host, random, clock });
     this.state = store.load(); this.mode = 'off'; this.busy = Promise.resolve(); this.timer = null;
-    this.lastPoll = null; this.nextPoll = null; this.error = null; this.failures = 0; this.disposed = false; this.used = false;
+    this.lastPoll = null; this.nextPoll = null; this.error = null; this.diagnostic = null; this.failures = 0; this.disposed = false; this.used = false;
   }
   get active() { return this.state.records.find(r => r.id === this.state.active); }
   serial(action) {
@@ -299,10 +301,11 @@ export class Connector {
             break;
           }
         }
-        this.lastPoll = this.clock(); this.error = null; this.failures = 0; this.retryMs = 0;
+        this.lastPoll = this.clock(); this.error = null; this.diagnostic = null; this.failures = 0; this.retryMs = 0;
       } catch (error) {
         if (this.disposed) return;
-        this.error = error instanceof ApiError ? error.message : 'connector operation failed; inspect local ownership and pending receipts';
+        this.diagnostic = connectorDiagnostic(error);
+        this.error = diagnosticText(this.diagnostic);
         this.failures++; this.retryMs = error.retryMs ?? 0;
         if (this.active && this.active.dispatch !== 'reserved') await this.halt('control/publication outcome unavailable; stop new actions and reconcile ownership and pending receipts');
         if (error.auth) { this.mode = 'paused'; if (this.active) await this.halt('linear authentication/access revoked; reconcile owners locally'); }
@@ -574,7 +577,7 @@ export class Connector {
     });
   }
   status() {
-    return { mode: this.mode, lastPoll: this.lastPoll, nextPoll: this.nextPoll, error: this.error, failures: this.failures, issue: this.active?.id ?? null, dispatch: this.active?.dispatch ?? null, halted: this.active?.halted ?? null, terminal: this.active?.terminal ?? null, pending: this.active?.publications.filter(p => p.comment === 'intent' || p.state === 'intent').map(p => p.key) ?? [], sessionLimit: 'one ticket per explicit start; reload/restart off; ownership release is manual' };
+    return { mode: this.mode, lastPoll: this.lastPoll, nextPoll: this.nextPoll, error: this.error, diagnostic: this.diagnostic, failures: this.failures, issue: this.active?.id ?? null, dispatch: this.active?.dispatch ?? null, halted: this.active?.halted ?? null, terminal: this.active?.terminal ?? null, pending: this.active?.publications.filter(p => p.comment === 'intent' || p.state === 'intent').map(p => p.key) ?? [], sessionLimit: 'one ticket per explicit start; reload/restart off; ownership release is manual' };
   }
   async dispose() {
     this.disposed = true; this.mode = 'off'; clearTimeout(this.timer); this.nextPoll = null;

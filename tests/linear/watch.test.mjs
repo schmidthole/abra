@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { runWatch, createWatchReporter } from '../../extensions/linear/watch.mjs';
 import { configuration, readJson, Store } from '../../extensions/linear/core.mjs';
+import { WatchFailure, failureCode, diagnosticText } from '../../extensions/linear/diagnostics.mjs';
 
 const root = resolve('.');
 function fixture(t, scenario, stopAfter = 1) {
@@ -75,9 +76,9 @@ test('watch startup failure, missing trust and preexisting locks never retry', a
   const f = fixture(t, 'no-work');
   await assert.rejects(runWatch({ ...f.options, acknowledge: false }), /acknowledgment/); assert.equal(f.spawned(), 0);
   const store = new Store(f.path, f.cfg); store.acquire('foreign-owner');
-  await assert.rejects(runWatch(f.options), /ownership\/lock/); assert.equal(f.spawned(), 0);
+  await assert.rejects(runWatch(f.options), /ownership-unresolved/); assert.equal(f.spawned(), 0);
   assert.equal(readJson(join(store.lock, 'owner.json')).session, 'foreign-owner'); store.release();
-  await assert.rejects(runWatch({ ...f.options, spawnChild: (_cmd, _args, options) => spawn(join(f.path, 'does-not-exist'), [], options) }), /startup\/io/);
+  await assert.rejects(runWatch({ ...f.options, spawnChild: (_cmd, _args, options) => spawn(join(f.path, 'does-not-exist'), [], options) }), /child-start-failed/);
 });
 
 test('terminal ctrl-c reaches foreground watch before its separately grouped tracked rpc child', { skip: process.platform === 'win32' }, async t => {
@@ -220,4 +221,100 @@ test('cli configuration and argument failures give safe actionable guidance with
     assert.doesNotMatch(stderr, /unknown-secret-option|"state"/);
   }
   assert.equal(f.spawned(), 0);
+});
+
+for (const [scenario, code] of [
+  ['failed-check', 'rpc-command-failed'], ['malformed-check', 'rpc-protocol-invalid'],
+  ['timeout-check', 'rpc-timeout'], ['extension-error-check', 'extension-failed'],
+  ['auth-loss', 'connector-auth-failed'], ['unknown-owner', 'native-ownership-uncertain'],
+  ['private-uncertain', 'unknown-failure'], ['missing-outcome', 'outcome-missing'],
+]) {
+  test(`task-status failure ${scenario} reports a bounded cause and phase without leaking payloads`, async t => {
+    const f = fixture(t, scenario), output = reporterFixture(), capture = f.options.diagnose;
+    await assert.rejects(runWatch({ ...f.options, diagnose: event => { output.diagnose(event); capture(event); } }), error => error.code === code);
+    assert.equal(f.spawned(), 1);
+    const halted = f.diagnostics.find(event => event.state === 'halted');
+    assert.equal(halted.phase, 'extension-outcome'); assert.equal(halted.code, code);
+    assert.match(output.lines.join(''), new RegExp(`halted while checking task status: \\[${code}\\]`));
+    assert.doesNotMatch(JSON.stringify(f.diagnostics) + output.lines.join(''), /secret-|ticket-description|credential-file|stack-canary/);
+    assert.ok(!f.diagnostics.some(event => event.state === 'session-closed'));
+    if (scenario !== 'missing-outcome') assert.ok(new Store(f.path, f.cfg).load().active);
+  });
+}
+
+test('reporter accepts only exact diagnostic codes and phases, including inherited property names', () => {
+  const f = reporterFixture();
+  for (const code of ['constructor', '__proto__', 'secret-canary\n/private/path', { message: 'secret-canary' }]) {
+    f.diagnose({ state: 'halted', code, phase: 'constructor' });
+    assert.match(f.lines.at(-1), /checking watch safety: \[unknown-failure\]/);
+  }
+  assert.doesNotMatch(f.lines.join(''), /secret-canary|private|function Object/);
+});
+
+async function cliResult(path, args, env = {}) {
+  const child = spawn(join(root, 'bin/linear-watch'), args, { cwd: path, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
+  const timer = setTimeout(() => child.kill('SIGTERM'), 5000);
+  try {
+    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+    return { code, stdout, stderr };
+  } finally { clearTimeout(timer); }
+}
+
+test('launcher distinguishes options, configuration, opt-in, journal, ownership and executable failures safely', async t => {
+  const f = fixture(t, 'no-work');
+  const args = ['--trusted-managed-work'];
+  const cases = [
+    { args: ['--private-secret-option'], code: 'options-invalid' },
+    { args: ['--pi'], code: 'options-invalid' },
+    { args: ['ticket-description'], code: 'options-invalid' },
+    { args: [], code: 'acknowledgment-required' },
+    { prepare: () => fs.writeFileSync(join(f.path, '.pi/abra-linear.json'), '{secret-token'), code: 'configuration-invalid' },
+    { prepare: () => { const cfg = readJson(join(f.path, '.pi/abra-linear.json')); delete cfg.watch; fs.writeFileSync(join(f.path, '.pi/abra-linear.json'), JSON.stringify(cfg)); }, code: 'watch-opt-in-required' },
+    { prepare: () => { const store = new Store(f.path, f.cfg); store.load(); fs.writeFileSync(store.path, '{secret-journal'); }, code: 'journal-invalid' },
+    { prepare: () => { const store = new Store(f.path, f.cfg); store.acquire('secret-owner'); }, code: 'ownership-unresolved' },
+    { args: [...args, '--pi', join(f.path, 'secret-private-executable')], code: 'child-start-failed' },
+  ];
+  for (const trial of cases) {
+    fs.writeFileSync(join(f.path, '.pi/abra-linear.json'), JSON.stringify(f.cfg));
+    fs.rmSync(join(f.path, 'data'), { recursive: true, force: true });
+    trial.prepare?.();
+    const result = await cliResult(f.path, trial.args ?? args);
+    assert.equal(result.code, 1, result.stderr); assert.equal(result.stdout, '');
+    assert.ok(result.stderr.includes(`[${trial.code}]`), result.stderr);
+    assert.match(result.stderr, /action needed:.*no automatic retry or lock removal/);
+    assert.doesNotMatch(result.stderr, /secret-|ticket-description|stack|\/Users\/|\/private\//);
+    if (trial.code === 'journal-invalid') assert.equal(fs.readFileSync(join(f.path, 'data/linear/connector.json'), 'utf8'), '{secret-journal');
+    if (trial.code === 'ownership-unresolved') assert.equal(readJson(join(f.path, 'data/linear/owner.lock/owner.json')).session, 'secret-owner');
+  }
+  assert.equal(f.spawned(), 0);
+});
+
+test('launcher task-status failure prints safe cause and phase, never raw rpc errors or stderr', async t => {
+  const f = fixture(t, 'failed-check');
+  const result = await cliResult(f.path, ['--trusted-managed-work', '--pi', join(root, 'tests/linear/fixtures/rpc-child.mjs')], { WATCH_TEST_SCENARIO: 'failed-check', WATCH_TEST_LOG: f.log });
+  assert.equal(result.code, 1); assert.equal(result.stdout, '');
+  assert.match(result.stderr, /halted while checking task status: \[rpc-command-failed\].*pi rejected a control command/);
+  assert.doesNotMatch(result.stderr, /secret-|ticket-description|credential-file|stack-canary/);
+  assert.equal(fs.readFileSync(f.log, 'utf8').trim().split('\n').length, 1);
+});
+
+test('correlated startup uncertainty reports its safe cause without admitting work or retrying', async t => {
+  const f = fixture(t, 'start-uncertain');
+  await assert.rejects(runWatch(f.options), error => error.code === 'native-ownership-uncertain');
+  const halted = f.diagnostics.find(event => event.state === 'halted');
+  assert.equal(halted.phase, 'extension-start'); assert.equal(halted.code, 'native-ownership-uncertain');
+  assert.equal(f.spawned(), 1); assert.ok(!f.diagnostics.some(event => ['ready', 'admitted', 'session-closed'].includes(event.state)));
+  assert.doesNotMatch(JSON.stringify(f.diagnostics), /secret-start-canary/);
+});
+
+test('untyped exceptions and forged codes cannot supply terminal diagnostic text', () => {
+  const payload = 'secret-exception-canary /private/path ticket-description\nstack-canary';
+  for (const error of [new Error(payload), { code: 'connector-auth-failed', message: payload }, payload, null]) {
+    assert.equal(failureCode(error), 'unknown-failure');
+    assert.doesNotMatch(diagnosticText(failureCode(error)), /secret-|private|ticket-description|stack-canary/);
+  }
+  assert.equal(failureCode(new WatchFailure('rpc-timeout')), 'rpc-timeout');
+  assert.equal(failureCode(new WatchFailure(payload)), 'unknown-failure');
 });

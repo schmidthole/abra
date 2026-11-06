@@ -395,7 +395,7 @@ test('leftover temporary blocks fresh metadata initialization without deleting e
   assert.throws(() => store.load(), /leftover connector temporary/); assert.ok(fs.existsSync(leftover));
 });
 
-async function watchFixture(t) {
+async function watchFixture(t, configure = () => {}) {
   const path = temporary(t), cfg = config(), api = new FakeApi(), pi = fakePi(), nonce = randomUUID();
   cfg.watch = { trustedManagedWork: true }; fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
   const old = process.env.ABRA_LINEAR_WATCH_NONCE; process.env.ABRA_LINEAR_WATCH_NONCE = nonce;
@@ -407,6 +407,7 @@ async function watchFixture(t) {
   const ctx = context(path); ctx.mode = 'rpc';
   resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
   const command = args => pi.commands['abra-linear'].handler(args, ctx);
+  configure(api);
   await command(`watch-start ${nonce}`);
   const f = { path, cfg, api, pi, nonce, ctx, command };
   saveTask(f);
@@ -581,4 +582,58 @@ test('bound task disappearance blocks report review but not truthful blocked rep
   assert.equal(f.connector.active.terminal, null); assert.equal(f.api.issues[0].state.id, id(4));
   await f.connector.checkpoint({ ...checkpoint('blocked'), blocker: 'original task/source unavailable; preserve and reconcile before any review' });
   assert.equal(f.connector.active.terminal, 'blocked'); assert.equal(f.api.issues[0].state.id, id(6));
+});
+
+for (const [error, code] of [
+  [new ApiError('secret-auth-canary /private/path ticket-description', { auth: true }), 'connector-auth-failed'],
+  [new ApiError('secret-request-canary /private/path ticket-description'), 'connector-request-failed'],
+  [new DOMException('secret-timeout-canary', 'TimeoutError'), 'connector-request-failed'],
+  [new Error('secret-operation-canary /private/path ticket-description'), 'connector-operation-failed'],
+]) {
+  test(`connector status and watch-check expose only typed ${code} diagnostics`, async t => {
+    const f = await watchFixture(t);
+    f.api.issue = async () => { throw error; };
+    await f.command('poll');
+    await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+    const outcome = f.pi.entries.at(-1).data;
+    assert.equal(outcome.state, 'uncertain'); assert.equal(outcome.code, code);
+    assert.equal(outcome.diagnostic, undefined);
+    assert.doesNotMatch(JSON.stringify(outcome) + f.ctx.notifications.join(''), /secret-|\/private\/path|ticket-description/);
+    await f.command('status');
+    const status = JSON.parse(f.ctx.notifications.at(-1));
+    assert.equal(status.diagnostic, code); assert.ok(status.error.includes(`[${code}]`));
+    assert.ok(new Store(f.path, f.cfg).load().active);
+    assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
+  });
+}
+
+test('connector diagnostic clears after a successful explicit poll', async t => {
+  const f = fixture(t), discover = f.api.discover.bind(f.api);
+  f.api.discover = async () => { throw new ApiError('secret-canary'); };
+  await f.connector.enable('session-1'); assert.equal(f.connector.status().diagnostic, 'connector-request-failed');
+  f.api.discover = discover;
+  await f.connector.poll(); assert.equal(f.connector.status().diagnostic, null); assert.equal(f.connector.error, null);
+});
+
+test('watch-check distinguishes pending publication from native ownership faults', async t => {
+  const f = await watchFixture(t);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
+  f.api.failState = 'after';
+  await assert.rejects(f.pi.tools.abra_linear_checkpoint.execute('blocked', checkpoint('blocked'), null, null, f.ctx));
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  assert.equal(f.pi.entries.at(-1).data.code, 'publication-pending');
+  f.pi.handlers.tool_execution_start({ toolName: 'subagent', toolCallId: 'unknown', args: { async: true } });
+  f.pi.handlers.tool_execution_end({ toolName: 'subagent', toolCallId: 'unknown', result: { details: {} } });
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  assert.equal(f.pi.entries.at(-1).data.code, 'native-ownership-uncertain');
+  assert.ok(new Store(f.path, f.cfg).load().active);
+});
+
+test('watch-start reports authentication failure as a correlated typed uncertainty', async t => {
+  const f = await watchFixture(t, api => { api.validate = async () => { throw new ApiError('secret-startup-canary /private/path', { auth: true }); }; });
+  const outcome = f.pi.entries.at(-1).data;
+  assert.equal(outcome.state, 'uncertain'); assert.equal(outcome.request, 'start'); assert.equal(outcome.nonce, f.nonce);
+  assert.equal(outcome.code, 'connector-auth-failed');
+  assert.doesNotMatch(JSON.stringify(outcome) + f.ctx.notifications.join(''), /secret-startup-canary|\/private\/path/);
+  assert.ok(!f.pi.entries.some(entry => entry.data.state === 'admitted'));
 });

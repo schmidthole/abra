@@ -1,10 +1,11 @@
 import { join } from 'node:path';
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { configuration, readJson, Store, LinearClient, Connector, requireValue } from './core.mjs';
+import { configuration, readJson, Store, LinearClient, Connector, ApiError, connectorDiagnostic, requireValue } from './core.mjs';
 import { ManagedOwners } from './managed.mjs';
 import { ClientCredentials, resolveCredentials } from './auth.mjs';
 import { setup } from './setup.mjs';
+import { WatchFailure, failureCode, diagnosticText, requireWatch } from './diagnostics.mjs';
 
 const marker = 'abra-linear-dedicated';
 const result = message => ({ content: [{ type: 'text', text: message }], details: {} });
@@ -73,10 +74,10 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
           dedicated = true;
           watch = { nonce, owners: new ManagedOwners(pi, ctx, dependencies.nativeRequest), stopped: false, handed: false };
           pi.appendEntry(marker, { watch: nonce });
-          await watch.owners.ready();
+          try { await watch.owners.ready(); } catch { throw new WatchFailure('native-ownership-uncertain'); }
           emitWatch(ctx, 'start', 'ready', { sessionFile: ctx.sessionManager.getSessionFile() });
           await connector.enable(ctx.sessionManager.getSessionId());
-          requireValue(!connector.error, 'watch admission failed; inspect connector receipts');
+          requireWatch(!connector.error, connector.status().diagnostic ?? 'connector-check-failed');
           return;
         }
         if (command === 'watch-check' || command === 'watch-stop') {
@@ -87,11 +88,16 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
             await connector.stop();
           }
           const active = connector.active;
-          requireValue(active || watch.owners.runs.size === 0, 'managed owner without an admitted task; reconcile manually');
-          requireValue(!connector.error && !watch.owners.fault && !connector.status().pending.length, 'uncertain connector/native/publication state; reconcile manually');
+          requireWatch(active || watch.owners.runs.size === 0, 'native-ownership-uncertain');
+          const status = connector.status();
+          requireWatch(!connector.error, status.diagnostic ?? 'connector-check-failed');
+          requireWatch(!watch.owners.fault, 'native-ownership-uncertain');
+          requireWatch(!status.pending.length, 'publication-pending');
           if (active?.terminal && !active.waiting && settled && ctx.isIdle() && !ctx.hasPendingMessages()) {
             const identity = { issue: active.id, task: active.taskId, outcome: active.terminal };
-            await connector.release('trusted managed-work handoff: settled coordinator, confirmed reporting receipts and exact native terminal proofs', () => watch.owners.verify());
+            await connector.release('trusted managed-work handoff: settled coordinator, confirmed reporting receipts and exact native terminal proofs', async () => {
+              try { return await watch.owners.verify(); } catch { throw new WatchFailure('native-ownership-uncertain'); }
+            });
             watch.handed = true;
             emitWatch(ctx, request, 'handoff', identity);
           } else if (watch.stopped && !active && ctx.isIdle() && !ctx.hasPendingMessages()) {
@@ -144,8 +150,13 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         } else throw new Error('usage: /abra-linear setup|start|pause|status|poll|stop|resume|release <evidence>|reconcile <absolute receipt.json>');
         if (ctx.hasUI) ctx.ui.notify(JSON.stringify(connector.status()), 'info');
       } catch (error) {
-        const detail = command === 'setup' ? 'setup requires trusted idle terminal, valid configuration and reconciled ownership; inspect locally' : error instanceof Error ? error.message.split('\n')[0].slice(0, 300) : 'unknown failure';
-        if (watch && connector) emitWatch(ctx, rest[1] ?? 'start', 'uncertain', { diagnostic: connector.redacted(detail) });
+        const watchCommand = ['watch-start', 'watch-check', 'watch-stop'].includes(command);
+        const code = error instanceof ApiError ? connectorDiagnostic(error) : failureCode(error) === 'unknown-failure' ? 'connector-check-failed' : failureCode(error);
+        const detail = watchCommand ? diagnosticText(code) : command === 'setup' ? 'setup requires trusted idle terminal, valid configuration and reconciled ownership; inspect locally' : error instanceof Error ? error.message.split('\n')[0].slice(0, 300) : 'unknown failure';
+        if (watch && connector) emitWatch(ctx, rest[1] ?? 'start', 'uncertain', { code });
+        else if (command === 'watch-start' && ctx.mode === 'rpc' && rest[0] === process.env.ABRA_LINEAR_WATCH_NONCE) {
+          pi.appendEntry('abra-linear-watch', { version: 1, nonce: rest[0], request: 'start', session: ctx.sessionManager.getSessionId(), state: 'uncertain', code });
+        }
         if (ctx.hasUI) ctx.ui.notify(`linear command blocked/failed: ${connector?.redacted(detail) ?? detail}. no automatic retry or reset`, 'error');
       }
     },

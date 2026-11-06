@@ -34,6 +34,7 @@ process.stdin.on('data', chunk => {
       if (scenario === 'malformed') { process.stdout.write('not-json\n'); continue; }
       if (scenario === 'failed-prompt') { send({ type: 'response', id: command.id, command: 'prompt', success: false }); continue; }
       if (scenario === 'timeout') continue;
+      if (scenario === 'start-uncertain') { event('start', 'uncertain', { code: 'native-ownership-uncertain', diagnostic: 'secret-start-canary' }); send({ type: 'response', id: command.id, command: 'prompt', success: true }); continue; }
       store.acquire(session);
       event('start', 'ready', { sessionFile: join(process.cwd(), 'fake-session.jsonl') });
       if (scenario === 'duplicate-ready') event('start', 'ready', { sessionFile: 'fake' });
@@ -56,8 +57,16 @@ process.stdin.on('data', chunk => {
       store.release(); event(request, 'stopped');
     } else {
       checks++;
+      if (scenario === 'failed-check') {
+        process.stderr.write('secret-stderr-canary /private/credential-file ticket-description\n');
+        send({ type: 'response', id: command.id, command: 'prompt', success: false, error: 'secret-error-canary /private/credential-file ticket-description\nstack-canary' });
+        continue;
+      }
+      if (scenario === 'malformed-check') { process.stdout.write('secret-malformed-canary\n'); continue; }
+      if (scenario === 'timeout-check') continue;
+      if (scenario === 'extension-error-check') { send({ type: 'extension_error', error: 'secret-extension-canary /private/credential-file' }); continue; }
       if (scenario === 'missing-outcome') { /* accepted is not an outcome. */ }
-      else if (['uncertain', 'auth-loss', 'unknown-owner'].includes(scenario)) event(request, 'uncertain');
+      else if (['uncertain', 'auth-loss', 'unknown-owner', 'private-uncertain'].includes(scenario)) event(request, 'uncertain', { code: scenario === 'auth-loss' ? 'connector-auth-failed' : scenario === 'unknown-owner' ? 'native-ownership-uncertain' : 'secret-code-canary\n/private/credential-file', diagnostic: 'secret-diagnostic-canary ticket-description' });
       else if (['clarification', 'interrupt-active'].includes(scenario)) event(request, 'awaiting-input');
       else if (!admitted) event(request, 'no-work');
       else if (scenario === 'working' && checks <= 3) event(request, 'working', { runs: ['private-run-id'] });
