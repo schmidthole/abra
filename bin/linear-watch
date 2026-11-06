@@ -5,7 +5,7 @@ import { runWatch } from '../extensions/linear/watch.mjs';
 try {
   const { values } = parseArgs({ options: { help: { type: 'boolean' }, pi: { type: 'string', default: 'pi' }, 'trusted-managed-work': { type: 'boolean', default: false } }, strict: true, allowPositionals: false });
   if (values.help) {
-    process.stdout.write('usage: bin/linear-watch --trusted-managed-work [--pi /absolute/path/to/pi]\n\nposix foreground only; one persisted rpc child per confirmed safe handoff.\nrequires .pi/abra-linear.json watch.trustedManagedWork=true, configured credentials,\ntrusted project and compatible pi-subagents native proof api.\nacknowledgment forbids detached/untracked/nested/external writers; not a sandbox.\nctrl-c stops admission and requests shutdown; uncertain owners require manual recovery.\nno model, linear or process is started by --help. see docs/linear-polling.md.\n');
+    process.stdout.write('usage: bin/linear-watch --trusted-managed-work [--pi /absolute/path/to/pi]\n\nposix foreground only; one persisted rpc child per confirmed safe handoff.\nrequires .pi/abra-linear.json watch.trustedManagedWork=true, configured credentials,\ntrusted project and compatible pi-subagents native proof api.\nacknowledgment forbids detached/untracked/nested/external writers; not a sandbox.\nstatus is plain-language on stderr, with unchanged polls quiet and a heartbeat about once a minute.\nctrl-c stops admission and requests shutdown; uncertain owners require manual recovery.\nno model, linear or process is started by --help. see docs/linear-polling.md.\n');
   } else {
     const controller = new AbortController();
     const stop = () => controller.abort();
@@ -14,6 +14,6 @@ try {
     finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
   }
 } catch {
-  process.stderr.write(JSON.stringify({ state: 'halted', note: 'watch failed; inspect configuration, connector receipts and saved session/native ownership; no automatic retry or lock removal' }) + '\n');
+  process.stderr.write('linear watch: unable to continue. action needed: check command options (--help), .pi/abra-linear.json, credentials and pi compatibility; if a session started, preserve connector receipts and reconcile saved session/task/worker ownership before restarting. no automatic retry or lock removal. see docs/linear-polling.md.\n');
   process.exitCode = 1;
 }

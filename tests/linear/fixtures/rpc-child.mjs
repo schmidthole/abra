@@ -45,6 +45,12 @@ process.stdin.on('data', chunk => {
         if (scenario !== 'out-of-order') event('start', 'admitted');
       }
       if (scenario === 'dialog') send({ type: 'extension_ui_request', id: 'dialog', method: 'input', title: 'clarification' });
+      if (scenario === 'noisy') {
+        process.stderr.write('secret-stderr-canary /home/private/operator\n');
+        send({ type: 'message_update', delta: 'secret-model-canary' });
+        send({ type: 'tool_execution_end', result: 'secret-tool-canary' });
+        send({ type: 'extension_ui_request', method: 'notify', message: 'secret-notification-canary' });
+      }
     } else if (action === 'watch-stop' && !admitted) {
       if (scenario === 'signal-sequence') fs.appendFileSync(process.env.WATCH_TEST_SIGNAL_LOG, 'stop-command\n');
       store.release(); event(request, 'stopped');
@@ -54,6 +60,7 @@ process.stdin.on('data', chunk => {
       else if (['uncertain', 'auth-loss', 'unknown-owner'].includes(scenario)) event(request, 'uncertain');
       else if (['clarification', 'interrupt-active'].includes(scenario)) event(request, 'awaiting-input');
       else if (!admitted) event(request, 'no-work');
+      else if (scenario === 'working' && checks <= 3) event(request, 'working', { runs: ['private-run-id'] });
       else {
         const outcome = scenario === 'blocked' ? 'blocked' : 'review';
         const record = state.records.at(-1); record.terminal = outcome; record.delivery = { kind: 'report', reference: 'https://example.test/public-report' }; record.releaseEvidence = 'verified fixture boundary'; record.managedProofs = [];
@@ -77,4 +84,4 @@ process.stdin.on('data', chunk => {
     send({ type: 'response', id: command.id, command: 'prompt', success: true, data: { disposition: 'handled' } });
   }
 });
-process.stdin.on('end', () => { store.release(); });
+process.stdin.on('end', () => { store.release(); if (scenario === 'close-failure') process.exitCode = 1; });
