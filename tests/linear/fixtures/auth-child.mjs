@@ -23,7 +23,7 @@ globalThis.fetch = async (url, options) => {
   assert.equal(options.headers.Authorization, 'Bearer fake-child-token');
   if (query.includes('AbraIdentity')) data = { viewer: { id: config.personaId }, organization: { id: config.workspaceId } };
   else if (query.includes('AbraStates')) data = { workflowStates: { nodes: Object.entries(config.teams[0]).filter(([key]) => key !== 'id').map(([key, id]) => ({ id, type: key === 'working' ? 'started' : 'unstarted', team: { id: config.teams[0].id } })), pageInfo: { hasNextPage: false } } };
-  else { assert.ok(query.includes('AbraDelegated')); scans++; data = { issues: { nodes: [], pageInfo: { hasNextPage: false } } }; }
+  else { assert.ok(query.includes('AbraAssignedOrDelegated')); scans++; data = { issues: { nodes: [], pageInfo: { hasNextPage: false } } }; }
   return { ok: true, status: 200, headers: new Headers(), json: async () => ({ data }) };
 };
 const ctx = { cwd: root, mode: 'rpc', hasUI: true, isProjectTrusted: () => true, isIdle: () => true, hasPendingMessages: () => false, sessionManager: { getSessionId: () => session, getBranch: () => [], getSessionFile: () => '/fake/session' }, ui: { notify: () => {} } };

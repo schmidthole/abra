@@ -98,3 +98,28 @@ test('a native start during final ownership recheck prevents handoff', async t =
   };
   await assert.rejects(f.verify(), /ownership changed/);
 });
+
+for (const state of ['queued', 'running', 'complete', 'failed', 'paused', 'stopped']) test(`native continuation observes ${state} without inferring task success`, async t => {
+  const { NativeContinuation } = await import('../../extensions/linear/managed.mjs');
+  const f = fixture(t), continuation = new NativeContinuation(f.pi, f.ctx, f.owners.request); t.after(() => continuation.dispose());
+  f.status.state = state; f.save(); f.pi.events.emit('subagent:async-started', f.start);
+  const pending = await continuation.pending();
+  if (['queued', 'running'].includes(state)) assert.deepEqual(pending, { running: ['run-1'], completed: [] });
+  else {
+    assert.deepEqual(pending, { running: [], completed: [{ id: 'run-1', state }] });
+    continuation.observeMessage({ customType: 'subagent-notify', details: { runs: [{ runId: 'foreign' }] } });
+    assert.deepEqual(await continuation.pending(), pending);
+    continuation.observeMessage({ customType: 'subagent-notify', details: { runs: [{ runId: 'run-1' }] } });
+    assert.deepEqual(await continuation.pending(), { running: [], completed: [] });
+  }
+});
+
+test('native continuation fails closed on unknown or missing status and foreign starts', async t => {
+  const { NativeContinuation } = await import('../../extensions/linear/managed.mjs');
+  const f = fixture(t), continuation = new NativeContinuation(f.pi, f.ctx, f.owners.request); t.after(() => continuation.dispose());
+  f.pi.events.emit('subagent:async-started', f.start);
+  f.status.state = 'future-state'; f.save(); await assert.rejects(continuation.pending(), /unknown async state/);
+  fs.unlinkSync(join(f.path, 'status.json')); await assert.rejects(continuation.pending());
+  f.pi.events.emit('subagent:async-started', { ...f.start, id: 'foreign', sessionId: 'foreign' });
+  await assert.rejects(continuation.pending(), /ownership could not be confirmed/);
+});

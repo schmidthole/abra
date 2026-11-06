@@ -79,7 +79,7 @@ export class RpcChild {
 function released(root, config, outcome) {
   const store = new Store(root, config), state = store.load();
   const record = state.records.find(r => r.id === outcome.issue);
-  requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.bound === true && record.dispatch === 'sent' && (record.terminal !== 'review' || record.delivery) && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed')), 'handoff disagrees with durable connector/lock/publication receipts');
+  requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.bound === true && record.dispatch === 'sent' && (record.terminal !== 'review' || record.delivery) && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed') && p.unassign !== 'intent'), 'handoff disagrees with durable connector/lock/publication receipts');
 }
 
 // display only allowlisted descriptions and validated ids, never remote prose or raw streams.
@@ -93,9 +93,9 @@ export function createWatchReporter({ write = line => process.stderr.write(line)
       case 'starting-session':
         dialog = false;
         message = 'opening a fresh pi session; waiting for saved bootstrap and connector checks. no action needed.'; break;
-      case 'ready': message = 'connector ready; checking for eligible delegated linear issues within the configured scope.'; break;
-      case 'admitted': message = 'picked up a delegated issue; the coordinator will handle this task within the configured authority. no action needed.'; break;
-      case 'no-work': message = 'waiting for an eligible delegated issue; none admitted. checking automatically; no action needed.'; break;
+      case 'ready': message = 'connector ready; checking for eligible assigned or delegated linear issues within the configured scope.'; break;
+      case 'admitted': message = 'picked up an assigned or delegated issue; the coordinator will handle this task within the configured authority. no action needed.'; break;
+      case 'no-work': message = 'waiting for an eligible assigned or delegated issue; none admitted. checking automatically; no action needed.'; break;
       case 'working': message = 'task in progress; waiting for the coordinator, confirmed reporting and proof that all tracked workers have stopped. no action needed unless input is requested.'; break;
       case 'awaiting-input':
         if (event.reason === 'dialog') dialog = true;
@@ -107,7 +107,7 @@ export function createWatchReporter({ write = line => process.stderr.write(line)
         ? 'coordinator reports this task blocked; checking saved reporting, ownership receipts and session shutdown before any handoff. this is not successful delivery.'
         : 'coordinator reports output ready for review; checking saved delivery, reporting and ownership receipts before closing the session. handoff is not yet confirmed.'; break;
       case 'session-closed': message = event.outcome === 'blocked'
-        ? 'safe handoff confirmed and coordinator closed; task remains blocked. action needed: inspect the linear blocker and next steps. the issue is not completed.'
+        ? 'safe handoff confirmed and coordinator closed; issue returned to todo and abra unassigned. action needed: inspect the blocker, then re-delegate when ready to retry. the issue is not completed.'
         : event.outcome === 'review'
           ? 'safe handoff confirmed and coordinator closed; output awaits review in linear. no merge or issue completion is implied.'
           : 'coordinator closed cleanly after stopping; no new work will start.'; break;

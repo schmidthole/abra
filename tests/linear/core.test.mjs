@@ -12,7 +12,7 @@ import { SessionManager } from './fixtures/session-manager.mjs';
 const root = resolve('.');
 const id = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
 const clone = value => structuredClone(value);
-const config = () => configuration({ version: 1, tokenEnv: 'LINEAR_TOKEN', workspaceId: id(1), personaId: id(2), teams: [{ id: id(3), working: id(4), inReview: id(5), blocked: id(6) }], repositories: [{ name: 'abra', path: root, labelId: id(7), teamId: id(3), remote: 'https://github.com/example/abra', base: 'main' }], pollMs: 1000, controlMs: 1000, timeoutMs: 100 });
+const config = () => configuration({ version: 1, authority: { mode: 'report' }, tokenEnv: 'LINEAR_TOKEN', workspaceId: id(1), personaId: id(2), teams: [{ id: id(3), working: id(4), inReview: id(5), blocked: id(6) }], repositories: [{ name: 'abra', path: root, labelId: id(7), teamId: id(3), remote: 'https://github.com/example/abra', base: 'main' }], pollMs: 1000, controlMs: 1000, timeoutMs: 100 });
 const issue = (n = 8) => ({ id: id(n), identifier: `ABRA-${n}`, title: 'review request', description: 'original intent and acceptance', url: 'https://linear.app/example/issue/ABRA-8', delegate: { id: id(2) }, team: { id: id(3) }, state: { id: id(9), type: 'unstarted' }, labels: { nodes: [{ id: id(7) }], pageInfo: { hasNextPage: false } } });
 const resources = new WeakMap();
 function temporary(t) {
@@ -34,6 +34,19 @@ class FakeApi {
     this.thread.push(comment);
     if (this.failComment === 'after') throw new Error('response lost');
     return comment.id;
+  }
+  async attachPR(id, url) {
+    this.calls.push('attachPR');
+    if (this.failAttachment) throw new Error('attachment unavailable');
+    this.attached = { id, url }; return 'attachment-id';
+  }
+  async unassign(id, clearAssignee) {
+    this.calls.push('unassign');
+    if (this.failUnassign === 'before') throw new Error('network timeout');
+    const issue = this.issues.find(i => i.id === id);
+    issue.delegate = null;
+    if (clearAssignee) issue.assignee = null;
+    if (this.failUnassign === 'after') throw new Error('response lost');
   }
   async status(id, stateId) {
     this.calls.push('status');
@@ -66,9 +79,28 @@ function saveTask(f, requestedDelivery = 'report', overrides = {}) {
 }
 async function bind(f, requestedDelivery = 'report') { saveTask(f, requestedDelivery); await f.connector.checkpoint({ ...checkpoint('bind'), requestedDelivery }); }
 
-test('configuration defaults off/report and rejects credentials, unsafe status and unbounded authority', () => {
+test('graphql blocked ownership updates preserve human assignees and attach PRs by issue and url', async () => {
+  const calls = [], cfg = config();
+  const api = new LinearClient(cfg, 'test-token', async (_url, options) => {
+    const { query, variables } = JSON.parse(options.body); calls.push({ query, variables });
+    const data = query.includes('AbraUnassign') ? { issueUpdate: { success: true, issue: { id: id(8), delegate: null, assignee: variables.input.assigneeId === null ? null : { id: id(70) } } } } : { attachmentCreate: { success: true, attachment: { id: 'attachment-id', url: variables.input.url } } };
+    return { ok: true, status: 200, headers: new Headers(), json: async () => ({ data }) };
+  });
+  await api.unassign(id(8), false);
+  assert.deepEqual(calls.at(-1).variables.input, { delegateId: null });
+  await api.unassign(id(8), true);
+  assert.deepEqual(calls.at(-1).variables.input, { delegateId: null, assigneeId: null });
+  const url = 'https://github.com/example/abra/pull/1';
+  assert.equal(await api.attachPR(id(8), url), 'attachment-id');
+  assert.deepEqual(calls.at(-1).variables.input, { issueId: id(8), title: 'pull request', url });
+});
+
+test('configuration defaults to pr delivery without size limits and allows explicit report-only authority', () => {
   const cfg = config(); assert.equal(cfg.authority.mode, 'report');
-  for (const mutate of [c => c.token = 'secret', c => c.teams[0].blocked = c.teams[0].working, c => c.teams[0].blocked = '', c => c.repositories[0].path = '../repo', c => c.repositories[0].base = '--output=unexpected', c => c.authority = { mode: 'merge' }, c => c.authority = { mode: 'pr' }, c => c.repositories.push(c.repositories[0])]) {
+  const defaults = clone(cfg); delete defaults.authority;
+  assert.deepEqual(configuration(defaults).authority, { mode: 'pr' });
+  assert.deepEqual(configuration({ ...cfg, authority: { mode: 'pr' } }).authority, { mode: 'pr' });
+  for (const mutate of [c => c.token = 'secret', c => c.teams[0].blocked = c.teams[0].working, c => c.teams[0].blocked = '', c => c.repositories[0].path = '../repo', c => c.repositories[0].base = '--output=unexpected', c => c.authority = { mode: 'merge' }, c => c.authority = { mode: 'unknown' }, c => c.repositories.push(c.repositories[0])]) {
     const value = clone(cfg); mutate(value); assert.throws(() => configuration(value));
   }
 });
@@ -294,7 +326,7 @@ test('graphql timeout/cancellation and http errors do not leak credentials or se
 
 test('prompt preserves policy, exact-candidate review, authority and terminal discipline', () => {
   const prompt = coordinatorPrompt(issue(), config().repositories[0], config());
-  for (const required of ['original intent', 'AGENTS.md', 'bin/tasks', 'native owners', 'dispatch intent', 'exact-candidate', 'make format', 'make test', 'report is not code delivery', 'no merge/deploy', 'raw reasoning', 'in linear', 'kind blocked']) assert.ok(prompt.includes(required), required);
+  for (const required of ['original intent', 'AGENTS.md', 'bin/tasks', 'native owners', 'dispatch intent', 'exact-candidate', 'make format', 'make test', 'report is not code delivery', 'no merge/deploy', 'raw reasoning', 'in linear', 'kind blocked', 'implementation is authorized under pr authority', 'push the verified branch', 'in review using kind review', 'explicit re-delegation permits another attempt']) assert.ok(prompt.includes(required), required);
 });
 
 function fakePi() {
@@ -317,18 +349,23 @@ test('pi factory/reload never auto-enables and commands only create new sessions
   const input = pi.handlers.input({ source: 'interactive' }, ctx); assert.equal(input.action, 'handled');
 });
 
-test('pi clean handoff admits one issue, blocks session switching and settles only as blocked', async t => {
+test('pi idle without delivery gets one reporting continuation before readable blocked handoff', async t => {
   const path = temporary(t), api = new FakeApi(), pi = fakePi(); fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(config()));
   install(pi, '.pi', { api }); const ctx = context(path);
   ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
   seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
   await pi.handlers.session_start({ reason: 'new' }, ctx); assert.equal(pi.sent.length, 1); assert.deepEqual(pi.handlers.session_before_switch(), { cancel: true });
-  await pi.handlers.agent_settled(); assert.equal(api.issues[0].state.id, id(6)); assert.match(api.thread.at(-1).body, /no verified success inferred/);
+  await pi.handlers.agent_settled({}, ctx); assert.equal(api.issues[0].state.id, id(4)); assert.equal(pi.sent.length, 2);
+  await pi.handlers.agent_settled({}, ctx); assert.equal(api.issues[0].state.id, id(6)); assert.match(api.thread.at(-1).body, /coordinator stopped without delivering/);
+  assert.equal(api.issues[0].delegate, null);
   await pi.handlers.session_shutdown(); assert.ok(!fs.existsSync(join(path, 'data/linear/owner.lock')));
 });
 
 test('explicit not-sent reconciliation recovers admission only after proven no dispatch', async t => {
   const f = fixture(t); f.api.failComment = 'before'; await f.connector.enable('session-1');
+  // legacy marker receipts must remain retryable after upgrading the extension.
+  f.connector.active.publications[0].body = f.connector.active.publications[0].body.replace(':session-1:pickup', ':pickup');
+  f.connector.persist();
   f.api.failComment = null;
   await f.connector.reconcile({ key: 'pickup', comment: 'not-applied', dispatch: 'not-sent', evidence: 'operator inspected pi session and native owners: no dispatch occurred; original request ended without comment' });
   assert.equal(f.sent.length, 1); assert.equal(f.connector.active.dispatch, 'sent');
@@ -349,33 +386,44 @@ test('shutdown aborts an in-flight poll before releasing the host lock', async t
   assert.equal(aborted, true); assert.equal(f.store.held, false);
 });
 
-test('pr evidence gates exact clean candidate, independent detached review, repository, base and bounded diff', async t => {
+test('pr evidence gates exact clean candidate, independent detached review, repository and base without size limits', async t => {
   const { execFileSync } = await import('node:child_process');
   const f = fixture(t); const directory = join(f.path, 'candidate'); fs.mkdirSync(directory);
   const git = args => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8' }).trim();
   git(['init', '-q', '-b', 'main']); git(['config', 'user.name', 'local test']); git(['config', 'user.email', 'test@example.invalid']); git(['remote', 'add', 'origin', 'https://github.com/example/abra.git']);
   fs.writeFileSync(join(directory, 'file.md'), 'base\n'); git(['add', '.']); git(['commit', '-qm', 'base']); const baseCommit = git(['rev-parse', 'HEAD']);
-  git(['checkout', '-qb', 'candidate']); fs.appendFileSync(join(directory, 'file.md'), 'changed\n'); git(['commit', '-qam', 'candidate']);
+  git(['checkout', '-qb', 'candidate']);
+  fs.appendFileSync(join(directory, 'file.md'), 'changed\n'.repeat(10001));
+  for (let index = 0; index < 101; index++) fs.writeFileSync(join(directory, `added-${index}.md`), 'new file\n');
+  fs.writeFileSync(join(directory, 'asset.bin'), Buffer.from([0, 1, 2, 3]));
+  git(['add', '.']); git(['commit', '-qm', 'candidate']);
   const candidate = git(['rev-parse', 'HEAD']), verifierDirectory = join(f.path, 'detached-verifier'), verificationReport = join(f.path, 'review.md');
   git(['worktree', 'add', '--detach', verifierDirectory, candidate]); fs.writeFileSync(verificationReport, 'independent review: pass with command evidence');
-  f.cfg.authority = { mode: 'pr', maxFiles: 1, maxChangedLines: 2 };
+  f.cfg.authority = { mode: 'pr' };
   const delivery = { kind: 'pr', reference: 'https://github.com/example/abra/pull/1', candidate, baseCommit, workerDirectory: directory, verifierDirectory, verificationReport, verifiedCommit: candidate, checks: { intent: 'pass', tests: 'pass', docs: 'not-applicable', format: 'pass' }, prHead: candidate, prBase: 'main', ci: 'passed', externalEvidence: 'coordinator checked authorized pr target/head and required ci through gh-axi' };
   const repo = { ...f.cfg.repositories[0], path: directory }; await f.connector.codeDelivery(delivery, repo);
   f.cfg.repositories[0].path = directory;
   await f.connector.enable('session-1'); await bind(f, 'pr');
   await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery: { ...delivery, reference: 'https://github.com/foreign/repo/pull/1' } }), /configured repository/);
+  f.api.failAttachment = true;
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('review'), delivery }), /attachment unavailable/);
+  assert.equal(f.api.issues[0].state.id, id(4)); assert.equal(f.connector.active.terminal, null);
+  f.api.failAttachment = false;
   await f.connector.checkpoint({ ...checkpoint('review'), delivery });
+  assert.deepEqual(f.api.attached, { id: id(8), url: delivery.reference });
+  assert.equal(f.api.issues[0].state.id, id(5));
+  assert.equal(f.api.thread.filter(c => c.body.includes('reviewable pr:')).length, 1);
   assert.equal(f.connector.active.terminal, 'review');
   assert.deepEqual(f.store.load().records[0].delivery, delivery);
+  await f.connector.codeDelivery({ ...delivery, ci: 'not-required', externalEvidence: 'gh-axi confirmed no required checks; ci did not run' }, repo);
 
   for (const [field, value, pattern] of [['verifiedCommit', 'a'.repeat(40), /exact candidate/], ['baseCommit', candidate, /base changed/], ['ci', 'pending', /required ci/], ['prHead', baseCommit, /pr head/], ['prBase', 'other', /pr head/], ['externalEvidence', '', /external evidence/], ['verifierDirectory', directory, /independent verifier/]]) {
     await assert.rejects(f.connector.codeDelivery({ ...delivery, [field]: value }, repo), pattern);
   }
   await assert.rejects(f.connector.codeDelivery({ ...delivery, checks: { ...delivery.checks, tests: 'blocked' } }, repo), /checks must pass/);
-  f.cfg.authority.maxChangedLines = 0; await assert.rejects(f.connector.codeDelivery(delivery, repo), /changed-line/); f.cfg.authority.maxChangedLines = 2;
   await assert.rejects(f.connector.codeDelivery(delivery, { ...repo, remote: 'https://github.com/foreign/repo' }), /repository differs/);
   fs.appendFileSync(join(verifierDirectory, 'file.md'), 'dirty\n'); await assert.rejects(f.connector.codeDelivery(delivery, repo), /dirty/);
-  fs.writeFileSync(join(verifierDirectory, 'file.md'), 'base\nchanged\n');
+  fs.writeFileSync(join(verifierDirectory, 'file.md'), 'base\n' + 'changed\n'.repeat(10001));
   fs.appendFileSync(join(directory, 'file.md'), 'dirty\n'); await assert.rejects(f.connector.codeDelivery(delivery, repo), /dirty/);
   git(['worktree', 'remove', verifierDirectory]);
 });
@@ -399,16 +447,16 @@ test('leftover temporary blocks fresh metadata initialization without deleting e
   assert.throws(() => store.load(), /leftover connector temporary/); assert.ok(fs.existsSync(leftover));
 });
 
-async function watchFixture(t, configure = () => {}) {
+async function watchFixture(t, configure = () => {}, nativeRequest) {
   const path = temporary(t), cfg = config(), api = new FakeApi(), pi = fakePi(), nonce = randomUUID();
   cfg.watch = { trustedManagedWork: true }; fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
   const old = process.env.ABRA_LINEAR_WATCH_NONCE; process.env.ABRA_LINEAR_WATCH_NONCE = nonce;
   t.after(() => { if (old === undefined) delete process.env.ABRA_LINEAR_WATCH_NONCE; else process.env.ABRA_LINEAR_WATCH_NONCE = old; });
   const ctx = context(path); ctx.mode = 'rpc';
-  const dependencies = { api, nativeRequest: async method => {
+  const dependencies = { api, nativeRequest: nativeRequest ? (method, params) => nativeRequest(method, params, ctx) : (async method => {
     if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: ctx.sessionManager.getSessionId() } };
     return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
-  } };
+  }) };
   install(pi, '.pi', dependencies);
   ctx.newSession = async options => {
     await pi.handlers.session_shutdown();
@@ -435,7 +483,7 @@ test('extension watch binds nonce/session/task, confirmed linear delivery and se
   await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } }, null, null, f.ctx);
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
-  await f.pi.handlers.agent_settled();
+  await f.pi.handlers.agent_settled({}, f.ctx);
   f.ctx.hasPendingMessages = () => true;
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
   f.ctx.hasPendingMessages = () => false;
@@ -450,7 +498,7 @@ test('waiting checkpoint retains clarification session without false blocked fal
   const f = await watchFixture(t);
   await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('wait', checkpoint('waiting'), null, null, f.ctx);
-  await f.pi.handlers.agent_settled();
+  await f.pi.handlers.agent_settled({}, f.ctx);
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
   assert.equal(f.pi.entries.at(-1).data.state, 'awaiting-input'); assert.equal(f.api.issues[0].state.id, id(4));
   assert.ok(new Store(f.path, f.cfg).load().active);
@@ -460,7 +508,7 @@ test('watch never releases terminal blocked while native launch intent is unreso
   const f = await watchFixture(t);
   await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('blocked', checkpoint('blocked'), null, null, f.ctx);
-  await f.pi.handlers.agent_settled();
+  await f.pi.handlers.agent_settled({}, f.ctx);
   f.pi.handlers.tool_execution_start({ toolName: 'subagent', toolCallId: 'unresolved', args: { agent: 'worker', async: true } });
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
   assert.equal(f.pi.entries.at(-1).data.state, 'uncertain'); assert.ok(new Store(f.path, f.cfg).load().active);
@@ -539,7 +587,7 @@ test('taskBinding rejects missing, foreign, edited and symlink original source s
 
 for (const mode of ['report', 'pr']) {
   test(`bound code intent cannot become terminal report under ${mode} authority; blocked remains available`, async t => {
-    const f = fixture(t); f.cfg.authority = mode === 'pr' ? { mode, maxFiles: 8, maxChangedLines: 400 } : { mode };
+    const f = fixture(t); f.cfg.authority = { mode };
     f.api.issues[0].title = 'implement the login fix and deliver a pull request';
     f.api.issues[0].description = 'product code, independent review and actual pr required; report is not delivery';
     await f.connector.enable('session-1'); await bind(f, 'pr');
@@ -651,4 +699,240 @@ test('watch-start reports authentication failure as a correlated typed uncertain
   assert.equal(outcome.code, 'connector-auth-failed');
   assert.doesNotMatch(JSON.stringify(outcome) + f.ctx.notifications.join(''), /secret-startup-canary|\/private\/path/);
   assert.ok(!f.pi.entries.some(entry => entry.data.state === 'admitted'));
+});
+
+test('blocked handoff comments, returns to todo, removes only abra ownership and admits a re-delegated issue', async t => {
+  const f = fixture(t); f.api.issues[0].assignee = { id: id(70) };
+  await f.connector.enable('first'); await bind(f);
+  await f.connector.checkpoint(checkpoint('blocked'));
+  assert.equal(f.api.issues[0].state.id, f.cfg.teams[0].blocked);
+  assert.equal(f.api.issues[0].delegate, null);
+  assert.equal(f.api.issues[0].assignee.id, id(70));
+  assert.ok(f.api.calls.lastIndexOf('comment') < f.api.calls.lastIndexOf('status'));
+  assert.ok(f.api.calls.lastIndexOf('status') < f.api.calls.lastIndexOf('unassign'));
+  await f.connector.poll(); assert.equal(f.cancellations.length, 0);
+  await f.connector.release('all owners inspected and stopped', async () => []);
+  const next = new Connector({ root: f.path, config: f.cfg, store: new Store(f.path, f.cfg), api: f.api, host: f.host });
+  resources.set(t, [...resources.get(t), next]);
+  await next.enable('second'); assert.equal(next.active, undefined);
+  f.api.issues[0].delegate = { id: id(2) };
+  await next.poll(); assert.equal(next.active.id, id(8));
+  assert.equal(f.sent.length, 2); assert.equal(next.state.records.length, 1);
+  assert.equal(next.active.halted, null); assert.equal(next.active.bound, false);
+  assert.equal(f.api.thread.filter(c => c.body.includes('picked up ABRA-8:')).length, 2);
+  assert.match(f.sent[1], /reuse the existing task and source snapshot/);
+});
+
+for (const failure of ['before', 'after']) {
+  test(`uncertain unassignment (${failure}) retains receipts and never releases or blindly retries`, async t => {
+    const f = fixture(t); f.api.issues[0].assignee = { id: id(2) };
+    await f.connector.enable('first'); await bind(f);
+    f.api.failUnassign = failure;
+    await assert.rejects(f.connector.checkpoint(checkpoint('blocked')), /timeout|lost/);
+    assert.equal(f.connector.status().pending.includes('blocked'), true);
+    await assert.rejects(f.connector.release('not enough evidence'), /terminal checkpoint/);
+    f.api.failUnassign = null;
+    if (failure === 'before') {
+      await assert.rejects(f.connector.checkpoint(checkpoint('blocked')), /unassignment outcome uncertain/);
+      await assert.rejects(f.connector.checkpoint(checkpoint('blocked', 'fallback-blocked')), /unassignment outcome uncertain/);
+      assert.equal(f.api.calls.filter(c => c === 'unassign').length, 1);
+      await f.connector.reconcile({ key: 'blocked', unassign: 'not-applied', evidence: 'original request finished without applying; owners stopped' });
+    }
+    await f.connector.checkpoint(checkpoint('blocked'));
+    assert.equal(f.api.issues[0].delegate, null); assert.equal(f.api.issues[0].assignee, null);
+    assert.equal(f.connector.active.terminal, 'blocked'); assert.deepEqual(f.connector.status().pending, []);
+    assert.equal(f.api.thread.length, failure === 'before' ? 3 : 2);
+  });
+}
+
+test('a blocked record without stopped-owner release remains protected against duplicate execution', async t => {
+  const f = fixture(t); await f.connector.enable('first'); await bind(f);
+  await f.connector.checkpoint(checkpoint('blocked'));
+  await f.connector.dispose();
+  const next = new Connector({ root: f.path, config: f.cfg, store: new Store(f.path, f.cfg), api: f.api, host: f.host });
+  resources.set(t, [...resources.get(t), next]);
+  f.api.issues[0].delegate = { id: id(2) };
+  await assert.rejects(next.enable('second'), /unresolved ownership/);
+  assert.equal(f.sent.length, 1);
+});
+
+test('explicit authority changes preserve a released journal but cannot bypass ownership or change scope', async t => {
+  const f = fixture(t); await f.connector.enable('first'); await bind(f);
+  const cfg = { ...f.cfg, authority: { mode: 'pr' } };
+  assert.throws(() => f.store.reconfigureAuthority(cfg), /reconcile native ownership/);
+  await f.connector.checkpoint(checkpoint('blocked'));
+  await f.connector.release('all owners stopped');
+  f.store.acquire('configuration');
+  assert.throws(() => f.store.reconfigureAuthority({ ...cfg, personaId: id(90) }), /only authority/);
+  f.store.reconfigureAuthority(cfg); f.store.release();
+  const state = new Store(f.path, cfg).load();
+  assert.equal(state.records[0].terminal, 'blocked'); assert.ok(state.records[0].releaseEvidence);
+});
+
+test('discovery queries assignment or delegation, and pickup rejects a different delegate', async t => {
+  const f = fixture(t), assigned = issue(); assigned.delegate = null; assigned.assignee = { id: id(2) };
+  assert.ok(f.connector.eligible(assigned));
+  assigned.delegate = { id: id(90) }; assert.equal(f.connector.eligible(assigned), null);
+  assigned.delegate = null; f.api.issues = [assigned];
+  await f.connector.enable('assigned-session'); assert.equal(f.sent.length, 1);
+  let query;
+  const api = new LinearClient(config(), 'test-token', async (_url, options) => {
+    query = JSON.parse(options.body).query;
+    return { ok: true, status: 200, headers: new Headers(), json: async () => ({ data: { issues: { nodes: [], pageInfo: { hasNextPage: false } } } }) };
+  });
+  await api.discover();
+  assert.match(query, /or: \[\{delegate:.*\{assignee:/);
+});
+
+for (const assignee of [2, 70]) test(`review removes abra ownership and ${assignee === 2 ? 'clears app assignee' : 'preserves human assignee'}`, async t => {
+  const f = fixture(t); f.api.issues[0].assignee = { id: id(assignee) };
+  await f.connector.enable('session-1'); await bind(f);
+  await f.connector.checkpoint({ ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } });
+  assert.equal(f.api.issues[0].delegate, null);
+  assert.deepEqual(f.api.issues[0].assignee, assignee === 2 ? null : { id: id(70) });
+  assert.equal(f.api.issues[0].state.id, id(5));
+  await f.connector.poll(); assert.equal(f.cancellations.length, 0);
+});
+
+for (const lost of ['comment', 'status', 'unassign']) test(`review reconciles lost ${lost} response without replay or self-unassignment halt`, async t => {
+  const f = fixture(t); f.api.issues[0].assignee = { id: id(70) };
+  await f.connector.enable('session-1'); await bind(f);
+  const input = { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } };
+  const field = { comment: 'failComment', status: 'failState', unassign: 'failUnassign' }[lost];
+  f.api[field] = 'after'; await assert.rejects(f.connector.checkpoint(input), /lost/); f.api[field] = null;
+  await f.connector.poll();
+  assert.equal(f.cancellations.length, 0);
+  await f.connector.checkpoint(input);
+  assert.equal(f.connector.active.terminal, 'review'); assert.equal(f.connector.active.halted, null);
+  assert.equal(f.api.calls.filter(c => c === 'unassign').length, 1);
+  assert.equal(f.api.thread.length, 2); assert.equal(f.api.issues[0].assignee.id, id(70));
+  assert.deepEqual(f.connector.status().pending, []);
+  await f.connector.release('all owners inspected and stopped');
+});
+
+for (const changed of ['source', 'delegate']) test(`lost review unassignment does not permit mutations after changed ${changed}`, async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  const input = { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } };
+  f.api.failUnassign = 'after'; await assert.rejects(f.connector.checkpoint(input));
+  if (changed === 'source') f.api.issues[0].description += ' new acceptance';
+  else f.api.issues[0].delegate = { id: id(90) };
+  const writes = f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length;
+  await assert.rejects(f.connector.checkpoint(input), /unchanged delegation/);
+  assert.equal(f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length, writes);
+});
+
+test('uncertain unapplied review unassignment requires explicit reconciliation before retry', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  const input = { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } };
+  f.api.failUnassign = 'before'; await assert.rejects(f.connector.checkpoint(input)); f.api.failUnassign = null;
+  await f.connector.poll(); await assert.rejects(f.connector.checkpoint(input), /unassignment outcome uncertain/);
+  assert.equal(f.api.calls.filter(c => c === 'unassign').length, 1);
+  await f.connector.reconcile({ key: 'review', unassign: 'not-applied', evidence: 'original request finished without applying; operator inspected remote issue' });
+  await f.connector.checkpoint(input); assert.equal(f.connector.active.terminal, 'review');
+});
+
+test('public comments omit placeholder sections and describe pickup, milestones, checks and review', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  for (const [kind, summary] of [['approach', 'trace the token renewal path'], ['progress', 'found the stale token cache'], ['checks', 'renewal regression passes']]) {
+    await f.connector.checkpoint({ kind, key: kind, summary, nextAction: 'review the renewal fix' });
+  }
+  await f.connector.checkpoint({ kind: 'review', key: 'review', summary: 'token renewal investigation is ready', nextAction: 'review the findings', delivery: { kind: 'report', reference: 'https://example.test/findings' } });
+  const body = f.api.thread.map(c => c.body).join('\n');
+  for (const expected of ['picked up ABRA-8: review request', 'trace the token renewal path', 'found the stale token cache', 'renewal regression passes', 'ready for review', 'https://example.test/findings']) assert.ok(body.includes(expected));
+  assert.doesNotMatch(body, /not changed|not run|evidence-backed terminal|approach: undefined|checks\/tests: undefined/);
+});
+
+for (const mode of ['manual', 'watch']) for (const outcome of ['complete', 'failed']) test(`${mode} async yield stays working until real ${outcome} result is reported`, async t => {
+  const path = temporary(t), pi = fakePi(), api = new FakeApi();
+  const nativeDir = join(path, 'native'); fs.mkdirSync(nativeDir);
+  let status, ctx, command, f;
+  const request = async (method, params, ownerCtx = ctx) => {
+    if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: ownerCtx.sessionManager.getSessionId() } };
+    if (params?.id) return { details: { runId: 'scout-1' } };
+    return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
+  };
+  if (mode === 'watch') {
+    f = await watchFixture(t, () => {}, request); ctx = f.ctx; command = f.command;
+  } else {
+    fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(config()));
+    install(pi, '.pi', { api, nativeRequest: request }); ctx = context(path);
+    ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
+    seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
+    await pi.handlers.session_start({ reason: 'new' }, ctx);
+    command = args => pi.commands['abra-linear'].handler(args, ctx); f = { path, pi, api, ctx }; saveTask(f);
+    resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
+  }
+  const activePi = f.pi;
+  await activePi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, ctx);
+  status = { lifecycleArtifactVersion: 3, runId: 'scout-1', sessionId: ctx.sessionManager.getSessionFile(), mode: 'single', state: 'running' };
+  const save = () => fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status)); save();
+  activePi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: 'scout-1', sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
+  await activePi.handlers.agent_settled({}, ctx); await command('poll');
+  assert.equal(f.api.issues[0].state.id, id(4)); assert.equal(activePi.sent.length, 1); assert.equal(f.api.thread.length, 1);
+  status.state = outcome; save();
+  // terminal artifact can precede its grouped completion notice; settle must still wait.
+  await activePi.handlers.agent_settled({}, ctx); assert.equal(activePi.sent.length, 1);
+  activePi.handlers.message_start({ message: { role: 'custom', customType: 'subagent-notify', details: { runs: [{ runId: 'scout-1', status: outcome === 'complete' ? 'completed' : 'failed' }] } } });
+  activePi.handlers.agent_start();
+  const input = outcome === 'complete' ? { ...checkpoint('review'), summary: 'scout located the renewal bug', delivery: { kind: 'report', reference: 'https://example.test/scout-report' } } : { ...checkpoint('blocked'), summary: 'scout returned no findings', blocker: 'scout failed with an empty response; no code was changed', nextAction: 'check the scout model configuration and retry the investigation' };
+  await activePi.tools.abra_linear_checkpoint.execute('terminal', input, null, null, ctx);
+  await activePi.handlers.agent_settled({}, ctx);
+  assert.equal(f.api.issues[0].state.id, outcome === 'complete' ? id(5) : id(6)); assert.equal(f.api.issues[0].delegate, null);
+  assert.doesNotMatch(f.api.thread.at(-1).body, /evidence-backed terminal|not changed|not run/);
+  if (outcome === 'failed') assert.match(f.api.thread.at(-1).body, /empty response/);
+});
+
+test('a missing native completion notice gets one result-inspection wake, not a false blocker or relaunch', async t => {
+  const path = temporary(t), api = new FakeApi(), pi = fakePi(), ctx = context(path);
+  const nativeDir = join(path, 'native'); fs.mkdirSync(nativeDir);
+  fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(config()));
+  install(pi, '.pi', { api, nativeRequest: async () => ({ details: { runId: 'scout-1' } }) });
+  resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
+  ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
+  seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
+  await pi.handlers.session_start({ reason: 'new' }, ctx);
+  const status = { lifecycleArtifactVersion: 3, runId: 'scout-1', sessionId: ctx.sessionManager.getSessionFile(), mode: 'single', state: 'failed' };
+  fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status));
+  pi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: 'scout-1', sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
+  await pi.handlers.agent_settled({}, ctx); assert.equal(pi.sent.length, 1);
+  await pi.commands['abra-linear'].handler('poll', ctx); assert.equal(pi.sent.length, 2); assert.match(pi.sent.at(-1)[0], /inspect these exact native results/);
+  await pi.commands['abra-linear'].handler('poll', ctx); assert.equal(pi.sent.length, 2);
+  assert.equal(api.issues[0].state.id, id(4));
+  await pi.handlers.agent_settled({}, ctx); assert.equal(pi.sent.length, 3);
+  await pi.handlers.agent_settled({}, ctx); assert.equal(api.issues[0].state.id, id(6));
+  assert.match(api.thread.at(-1).body, /stopped without delivering/);
+});
+
+test('a native completion wake during status inspection cannot publish a stale settled blocker', async t => {
+  const path = temporary(t), api = new FakeApi(), pi = fakePi(), ctx = context(path);
+  const nativeDir = join(path, 'native'); fs.mkdirSync(nativeDir);
+  fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(config()));
+  let wake = false;
+  install(pi, '.pi', { api, nativeRequest: async () => {
+    if (wake) pi.handlers.agent_start();
+    return { details: { runId: 'scout-1' } };
+  } });
+  resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
+  ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
+  seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
+  await pi.handlers.session_start({ reason: 'new' }, ctx);
+  // use the single reporting reminder so a stale second settle would otherwise block.
+  await pi.handlers.agent_settled({}, ctx); assert.equal(pi.sent.length, 2);
+  const status = { lifecycleArtifactVersion: 3, runId: 'scout-1', sessionId: ctx.sessionManager.getSessionFile(), mode: 'single', state: 'complete' };
+  fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status));
+  pi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: 'scout-1', sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
+  wake = true;
+  await pi.handlers.agent_settled({}, ctx);
+  assert.equal(api.issues[0].state.id, id(4)); assert.equal(pi.sent.length, 2);
+  assert.equal(api.thread.length, 1);
+});
+
+for (const scenario of ['aborted', 'unknown-native']) test(`${scenario} gives a readable blocked handoff without freeing ownership`, async t => {
+  const f = await watchFixture(t);
+  if (scenario === 'unknown-native') f.pi.events.emit('subagent:async-started', { id: 'foreign', sessionId: 'foreign' });
+  await f.pi.handlers.agent_settled({ aborted: scenario === 'aborted' }, f.ctx);
+  assert.equal(f.api.issues[0].state.id, id(6)); assert.equal(f.api.issues[0].delegate, null);
+  assert.match(f.api.thread.at(-1).body, scenario === 'aborted' ? /interrupted/ : /could not confirm the status/);
+  assert.ok(new Store(f.path, f.cfg).load().active);
+  assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
 });

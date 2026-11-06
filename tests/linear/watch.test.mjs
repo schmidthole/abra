@@ -87,7 +87,7 @@ test('terminal ctrl-c reaches foreground watch before its separately grouped tra
   let interrupted = false, stderr = '';
   child.stderr.on('data', chunk => {
     stderr += chunk.toString();
-    if (!interrupted && stderr.includes('waiting for an eligible delegated issue')) { interrupted = true; process.kill(-child.pid, 'SIGINT'); }
+    if (!interrupted && stderr.includes('waiting for an eligible assigned or delegated issue')) { interrupted = true; process.kill(-child.pid, 'SIGINT'); }
   });
   const timer = setTimeout(() => child.kill('SIGTERM'), 5000);
   const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); }); clearTimeout(timer);
@@ -108,7 +108,7 @@ test('watch reporter explains lifecycle without treating reported handoff as con
   for (const state of ['starting', 'starting-session', 'ready', 'no-work', 'admitted', 'working', 'awaiting-input']) f.diagnose({ state, issue: ['admitted', 'working', 'awaiting-input'].includes(state) ? issue : null });
   assert.match(f.lines[0], /checking configuration.*ctrl-c/);
   assert.match(f.lines[1], /fresh pi session.*saved bootstrap.*no action needed/);
-  assert.match(f.lines[2], /eligible delegated linear issues/);
+  assert.match(f.lines[2], /eligible assigned or delegated linear issues/);
   assert.match(f.lines[3], /none admitted.*no action needed/);
   assert.match(f.lines[4], new RegExp(`picked up.*task linear-${issue}`));
   assert.match(f.lines[5], /task in progress.*proof.*workers have stopped/);
@@ -160,7 +160,7 @@ test('watch reporter distinguishes blocked handoff and fails closed without rend
   f.diagnose({ state: 'handoff', outcome: 'blocked', issue });
   assert.match(f.lines.at(-1), /blocked.*checking saved reporting.*not successful delivery/);
   f.diagnose({ state: 'session-closed', outcome: 'blocked', issue });
-  assert.match(f.lines.at(-1), /task remains blocked.*action needed/);
+  assert.match(f.lines.at(-1), /returned to todo and abra unassigned.*action needed/);
   for (const state of ['uncertain', 'halted']) f.diagnose({ state, issue: '\x1b[31msecret-id\n', phase: 'private-phase', diagnostic: 'secret-token', note: '/home/private', session: 'secret-session', runs: ['secret-run'] });
   assert.match(f.lines.at(-1), /halted while checking watch safety.*reconcile owners.*no automatic retry or lock removal/);
   f.diagnose({ state: 'halted', phase: 'child-shutdown', issue });
@@ -203,7 +203,7 @@ test('default cli output is plain language and omits raw model, tool, notificati
   assert.equal(code, 0, stderr);
   assert.equal(stdout, '');
   assert.match(stderr, /checking configuration/);
-  assert.match(stderr, /picked up a delegated issue/);
+  assert.match(stderr, /picked up an assigned or delegated issue/);
   assert.match(stderr, /safe handoff confirmed/);
   assert.match(stderr, /watch stopped/);
   assert.doesNotMatch(stderr, /secret-|private|"state"|"type"|"session"/);
