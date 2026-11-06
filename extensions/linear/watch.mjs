@@ -92,7 +92,7 @@ export function createWatchReporter({ write = line => process.stderr.write(line)
       case 'starting': message = 'starting; checking configuration and saved ownership before opening a coordinator. ctrl-c requests a safe stop.'; break;
       case 'starting-session':
         dialog = false;
-        message = 'opening a fresh saved pi session; waiting for startup and connector checks. no action needed.'; break;
+        message = 'opening a fresh pi session; waiting for saved bootstrap and connector checks. no action needed.'; break;
       case 'ready': message = 'connector ready; checking for eligible delegated linear issues within the configured scope.'; break;
       case 'admitted': message = 'picked up a delegated issue; the coordinator will handle this task within the configured authority. no action needed.'; break;
       case 'no-work': message = 'waiting for an eligible delegated issue; none admitted. checking automatically; no action needed.'; break;
@@ -161,7 +161,7 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
         try { saved = store.load(); } catch { throw new WatchFailure('journal-invalid'); }
         requireWatch(!saved.active && !fs.existsSync(store.lock), 'ownership-unresolved');
         const nonce = randomUUID();
-        let ready, admitted, outcome, expected, reported, stopDeadline, stopped = false;
+        let ready, admitted, outcome, expected, reported, stopDeadline, bootstrapped, stopped = false;
         phase = 'fresh-child-state';
         diagnose({ state: 'starting-session' });
         let child;
@@ -174,9 +174,9 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
           }
           if (event.type !== 'entry_appended' || event.entry?.customType !== 'abra-linear-watch') return;
           const data = event.entry.data;
-          requireValue(data?.version === 1 && data.nonce === nonce && data.session === initial.sessionId, 'foreign watch outcome');
+          requireValue(data?.version === 1 && data.nonce === nonce && data.session === (bootstrapped?.sessionId ?? initial.sessionId), 'foreign watch outcome');
           if (data.state === 'ready') {
-            requireValue(!ready && data.request === 'start' && data.sessionFile && data.owner, 'duplicate/out-of-order watch ready'); ready = data;
+            requireValue(!ready && expected === 'start' && data.request === 'start' && bootstrapped && data.sessionFile === bootstrapped.sessionFile && data.previousSession === initial.sessionId && data.owner, 'duplicate/out-of-order watch ready'); ready = data;
             diagnose({ state: 'ready', session: data.session });
           } else {
             // a failed start can report uncertainty, never readiness or stopped ownership.
@@ -208,6 +208,9 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
           requireWatch(initial?.sessionId && initial.messageCount === 0 && initial.pendingMessageCount === 0 && !initial.isStreaming && !initial.isCompacting, 'session-not-idle');
           expected = 'start'; phase = 'extension-start';
           await rpc.command('prompt', { message: `/abra-linear watch-start ${nonce}` });
+          bootstrapped = await rpc.command('get_state');
+          requireWatch(bootstrapped?.sessionId && bootstrapped.sessionId !== initial.sessionId && bootstrapped.sessionFile && bootstrapped.messageCount === 1 && bootstrapped.pendingMessageCount === 0 && !bootstrapped.isStreaming && !bootstrapped.isCompacting, 'session-not-idle');
+          await rpc.command('prompt', { message: `/abra-linear watch-arm ${nonce} ${initial.sessionId}` });
           requireWatch(ready, 'outcome-missing');
           while (!outcome) {
             phase = stop ? 'interruption-reconciliation' : 'extension-outcome';
@@ -221,7 +224,7 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
           }
           phase = 'handoff-session-and-receipts';
           const state = await rpc.command('get_state');
-          requireWatch(state.sessionId === initial.sessionId && !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0, 'session-not-idle');
+          requireWatch(state.sessionId === ready.session && !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0, 'session-not-idle');
           if (outcome.state === 'handoff') {
             try { released(root, config, outcome); } catch { throw new WatchFailure('handoff-invalid'); }
           }

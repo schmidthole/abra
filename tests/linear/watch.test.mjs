@@ -63,7 +63,7 @@ test('rpc dialog is never automatically approved and retains its child', async t
   assert.equal(f.spawned(), 1); assert.ok(f.diagnostics.some(d => d.state === 'awaiting-input'));
 });
 
-for (const scenario of ['crash', 'malformed', 'failed-prompt', 'timeout', 'duplicate-ready', 'duplicate-handoff', 'out-of-order', 'wrong-session', 'wrong-task', 'wrong-nonce', 'wrong-request', 'missing-outcome', 'uncertain', 'auth-loss', 'unknown-owner', 'uncertain-publication', 'lock-retained', 'unreleased', 'pending', 'missing-delivery', 'unbound', 'dispatch-intent']) {
+for (const scenario of ['bootstrap-cancelled', 'wrong-bootstrap-parent', 'crash', 'malformed', 'failed-prompt', 'timeout', 'duplicate-ready', 'duplicate-handoff', 'out-of-order', 'wrong-session', 'wrong-task', 'wrong-nonce', 'wrong-request', 'missing-outcome', 'uncertain', 'auth-loss', 'unknown-owner', 'uncertain-publication', 'lock-retained', 'unreleased', 'pending', 'missing-delivery', 'unbound', 'dispatch-intent']) {
   test(`watch halts without restart on ${scenario}`, async t => {
     const f = fixture(t, scenario);
     await assert.rejects(runWatch(f.options));
@@ -107,7 +107,7 @@ test('watch reporter explains lifecycle without treating reported handoff as con
   const f = reporterFixture();
   for (const state of ['starting', 'starting-session', 'ready', 'no-work', 'admitted', 'working', 'awaiting-input']) f.diagnose({ state, issue: ['admitted', 'working', 'awaiting-input'].includes(state) ? issue : null });
   assert.match(f.lines[0], /checking configuration.*ctrl-c/);
-  assert.match(f.lines[1], /fresh saved pi session.*no action needed/);
+  assert.match(f.lines[1], /fresh pi session.*saved bootstrap.*no action needed/);
   assert.match(f.lines[2], /eligible delegated linear issues/);
   assert.match(f.lines[3], /none admitted.*no action needed/);
   assert.match(f.lines[4], new RegExp(`picked up.*task linear-${issue}`));

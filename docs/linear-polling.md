@@ -156,8 +156,16 @@ installation is needed. inspect your installed harness docs and agent tool profi
   no merge, deployment or issue-close authority is supported.
 
 in pi, `/abra-linear start` requires idle/no pending messages, no unresolved task
-or lock, credentials and UI confirmation. it saves the current session as parent
-and opens a clean dedicated session; admission consumes that session once. controls:
+or lock, credentials and UI confirmation. it records the current session path as
+parent and opens a dedicated session; admission consumes that session once. before
+ownership acquisition or any pickup mutation, documented `newSession({ setup })`
+SessionManager APIs append a dedicated recovery marker and truthful user bootstrap
+context, without requesting a model turn or making network calls. the connector
+reads back the saved header, exact session id, marker and complete fresh bootstrap;
+an allocated path or custom-entry event alone is not persistence proof. ephemeral
+storage, write/read failure or an unexpected conversation blocks admission. the
+bootstrap grants no extra authority and is not an issue dispatch. an empty outgoing
+parent may itself remain unsaved under pi's normal lazy storage behavior. controls:
 
 | command | behavior |
 | --- | --- |
@@ -270,10 +278,17 @@ supported. operator/agent compliance is assumed for arbitrary shell descendants;
 the launcher cannot discover hidden writers. revisit the adapter before adding
 run types or stronger containment, never replace proofs with PID/age heuristics.
 
-each child is persisted `pi --mode rpc`, with normal trusted resources, no resume,
-`--no-session` or automatic dialog approvals. nonce/session/owner/task/request
-correlation binds extension outcomes. no-work keeps one child; working/waiting
-retains its session. dialogs are diagnosed but not answered; resolve through Linear
+each child starts with `pi --mode rpc`, with normal trusted resources, no resume,
+`--no-session` or automatic dialog approvals. startup checks the initial empty idle
+session, then `/abra-linear watch-start` creates a replacement with the saved
+bootstrap described above. a second, internal `watch-arm` handshake requires the
+exact launcher nonce and initial session id, a new idle session containing only the
+recognized bootstrap conversation, and fresh saved-file checks before ready or
+ownership acquisition. it runs in the replacement extension instance, not a stale
+pre-switch context. cancellation, reload, extra messages or persistence failure
+cannot arm polling. nonce/session/owner/task/request correlation then binds
+extension outcomes to the saved replacement identity. no-work keeps one child;
+working/waiting retains its session. dialogs are diagnosed but not answered; resolve through Linear
 comments (which halt for saved steering reconciliation) or interrupt and reopen
 manually. uncertainty halts without fresh children or blind command retry.
 
@@ -390,6 +405,14 @@ malformed/foreign/incompatible/symlink/leftover-temporary evidence rejects uncha
    as incident evidence, then manually remove only its `owner.json`/empty lock
    directory. never delete the journal/task to force admission. reopen the recorded
    pi session and `/abra-linear resume` for paused controls, never redispatch.
+   the saved header identity and dedicated marker must still match; another session
+   cannot take over. even a failure during pickup before first coordinator dispatch
+   now leaves that owning session reopenable. reload/resume never arms a bootstrap
+   or automatically retries pickup. this is prevention, not repair of old incidents:
+   a historic missing owning session remains unresolved and blocks replacement;
+   do not fabricate a marker/session, alter journal ownership or weaken the guard.
+   saved-file readback provides process-exit recoverability, not fsync/power-loss
+   durability or proof that remote mutations/native owners stopped.
 3. exact saved comment body **and persona** or observed target status reconcile
    uncertain receipts. absence does not prove a timed-out mutation failed. explicitly
    retry the same checkpoint key/body to finish reporting only, not execution.
@@ -422,8 +445,14 @@ boundaries and harmless RPC subprocesses: credential acquisition/proactive renew
 revocation/failure, single-flight/cancellation, secret storage/redaction, wizard
 cancellation/persistence/legacy migration, dedupe, scope/control, cancellation,
 report/delivery gates, uncertain receipts, exact native proofs, session handoffs and
-failure/interrupt/lock handling. no live Linear/OAuth/pi model/PR/CI behavior is
-certified. a later authorized smoke check should use disposable report-only issues,
+failure/interrupt/lock handling. session regression tests additionally require an
+installed pi package (resolved beside the node executable, or set
+`PI_CODING_AGENT_PACKAGE` to its absolute package root). they exercise installed
+SessionManager lazy persistence and new-session runtime replacement offline,
+including bootstrap failure, exact owner reopening before dispatch and paused
+recovery; no mocked custom-entry event substitutes for those storage checks.
+validated against pi 1.5.0; inspect/retest the installed public APIs after upgrades.
+no live Linear/OAuth/pi model/PR/CI behavior is certified. a later authorized smoke check should use disposable report-only issues,
 verify identity/states and all config fields first, observe pickup/checks/report or
 blocked, two fresh-session handoffs, clarification retention and interruption, then
 reconcile owners and revoke test credentials. never admit real work merely to check

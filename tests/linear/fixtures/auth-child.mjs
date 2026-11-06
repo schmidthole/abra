@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { readJson } from '../../../extensions/linear/core.mjs';
 import { SCOPES } from '../../../extensions/linear/auth.mjs';
 import { install } from '../../../extensions/linear/pi.mjs';
+import { SessionManager } from './session-manager.mjs';
 
 // fresh foreground-child boundary: real extension construction, fake network/native api.
 const root = process.argv[2], config = readJson(join(root, '.pi/abra-linear.json'));
@@ -26,14 +27,26 @@ globalThis.fetch = async (url, options) => {
   return { ok: true, status: 200, headers: new Headers(), json: async () => ({ data }) };
 };
 const ctx = { cwd: root, mode: 'rpc', hasUI: true, isProjectTrusted: () => true, isIdle: () => true, hasPendingMessages: () => false, sessionManager: { getSessionId: () => session, getBranch: () => [], getSessionFile: () => '/fake/session' }, ui: { notify: () => {} } };
-install({ on: (name, handler) => handlers[name] = handler, registerCommand: (name, command) => commands[name] = command, registerTool: () => {}, appendEntry: (customType, data) => entries.push({ customType, data }), events: { on: () => () => {} } }, '.pi', { nativeRequest: async method => {
-  if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: session } };
+const pi = { on: (name, handler) => handlers[name] = handler, registerCommand: (name, command) => commands[name] = command, registerTool: () => {}, appendEntry: (customType, data) => entries.push({ customType, data }), events: { on: () => () => {} } };
+const dependencies = { nativeRequest: async method => {
+  if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: ctx.sessionManager.getSessionId() } };
   return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
-} });
+} };
+install(pi, '.pi', dependencies);
+ctx.newSession = async options => {
+  await handlers.session_shutdown();
+  ctx.sessionManager = SessionManager.create(root, join(root, 'sessions'));
+  await options.setup(ctx.sessionManager);
+  install(pi, '.pi', dependencies);
+  await handlers.session_start({ reason: 'new' }, ctx);
+  return { cancelled: false };
+};
 try {
   await handlers.session_start({ reason: 'startup' }, ctx);
   assert.equal(acquisitions, 0);
   await commands['abra-linear'].handler(`watch-start ${nonce}`, ctx);
+  assert.equal(acquisitions, 0);
+  await commands['abra-linear'].handler(`watch-arm ${nonce} ${session}`, ctx);
   assert.equal(entries.at(-1).data.state, 'ready');
   assert.equal(acquisitions, 1); assert.equal(scans, 1);
 } finally { await handlers.session_shutdown(); }
