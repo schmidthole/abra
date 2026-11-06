@@ -10,9 +10,10 @@ export const requireValue = (ok, message) => { if (!ok) throw new Error(message)
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
 const text = value => typeof value === 'string' && value.trim().length > 0;
+export const isAutomaticFallbackKey = key => typeof key === 'string' && /^settled-without-terminal(?:-(?:[2-9]|[1-9][0-9]+))?$/.test(key);
 // canceled automatic fallbacks still require every issued mutation receipt to settle.
 export const publicationSettled = p => {
-  const canceledFallback = p.canceled === true && p.key === 'settled-without-terminal';
+  const canceledFallback = p.canceled === true && isAutomaticFallbackKey(p.key);
   const commentSettled = p.comment && p.comment !== 'intent' || canceledFallback && p.comment === null && p.notApplied?.includes('comment');
   const stateSettled = !p.stateId || p.state === 'confirmed' || canceledFallback && p.state === null;
   return Boolean(commentSettled && stateSettled && p.unassign !== 'intent');
@@ -108,7 +109,7 @@ export class Store {
       requireValue(uuid(r.id) && text(r.session) && /^[a-f0-9]{64}$/.test(r.fingerprint) && ['reserved', 'intent', 'sent'].includes(r.dispatch) && typeof r.bound === 'boolean' && ['review', 'blocked', null].includes(r.terminal) && (r.halted === null || text(r.halted)) && Array.isArray(r.publications) && r.comments && typeof r.comments === 'object', 'malformed correlation');
       if (r.bound) requireValue(r.binding && ['report', 'pr'].includes(r.binding.requestedDelivery) && r.binding.source === `data/${r.taskId}/source.json` && /^[a-f0-9]{64}$/.test(r.binding.sourceHash), 'incompatible task binding; preserve journal and reconcile original source/acceptance');
       if (r.terminal === 'review') requireValue(r.bound && r.delivery?.kind === r.binding.requestedDelivery, 'review differs from bound requested delivery; preserve and reconcile');
-      requireValue(r.publications.every(p => p.canceled === undefined || (p.canceled === true && p.key === 'settled-without-terminal' && this.config.teams.some(t => t.blocked === p.stateId))), 'malformed fallback cancellation receipt');
+      requireValue(r.publications.every(p => p.canceled === undefined || (p.canceled === true && isAutomaticFallbackKey(p.key) && this.config.teams.some(t => t.blocked === p.stateId))), 'malformed fallback cancellation receipt');
       requireValue(r.publications.every(p => p.notApplied === undefined || (p.canceled === true && Array.isArray(p.notApplied) && p.notApplied.length > 0 && new Set(p.notApplied).size === p.notApplied.length && p.notApplied.every(k => ['comment', 'state', 'unassign'].includes(k) && p[k] === null) && text(p.reconciliation))), 'malformed fallback reconciliation receipt');
       requireValue(r.publications.every(p => p.unassign === undefined || [null, 'intent', 'confirmed'].includes(p.unassign)), 'malformed unassignment receipt');
       requireValue(new Set(r.publications.map(p => p.key)).size === r.publications.length, 'duplicate publication key');
@@ -448,8 +449,9 @@ export class Connector {
     if (secret) result = result.split(secret).join('[redacted]');
     return result.replace(/(?:Bearer\s+\S+|(?:api[_-]?key|token|secret|password)\s*[:=]\s*\S+)/gi, '[redacted]').replace(/\/(?:Users|home)\/[^\s)]+/g, '[private local path]');
   }
-  cancelFallbackPublication() {
-    const publication = this.active.publications.find(p => p.key === 'settled-without-terminal');
+  cancelFallbackPublication(key = 'settled-without-terminal') {
+    requireValue(isAutomaticFallbackKey(key), 'only automatic fallback publications may be canceled');
+    const publication = this.active.publications.find(p => p.key === key);
     if (!publication) return;
     if (!publication.comment && !publication.state && !publication.unassign) this.active.publications.splice(this.active.publications.indexOf(publication), 1);
     else publication.canceled = true;
@@ -471,6 +473,7 @@ export class Connector {
     if (!isCurrent()) return null;
     await this.reconcilePublications(current, comments);
     if (!isCurrent()) return null;
+    requireValue(!stateId || !active.publications.some(p => p.key !== key && isAutomaticFallbackKey(p.key) && (p.comment === 'intent' || p.state === 'intent' || p.unassign === 'intent')), 'automatic fallback outcome uncertain; reconcile issued mutations before another status or unassignment');
     // do not save an empty fallback receipt when a wake canceled only publication reads.
     if (!publication) {
       publication = { key, body, stateId: stateId ?? null, comment: null, state: null };
@@ -566,7 +569,7 @@ export class Connector {
         active.binding = binding; active.bound = true; this.persist();
         return binding.requestedDelivery === 'pr' && this.config.authority.mode !== 'pr' ? 'code intent bound without publication authority; report blocked, do not dispatch or substitute a report' : 'tasks-axi source/acceptance and requested delivery bound; keep native dispatch and material continuity in the task';
       }
-      requireValue(input.key !== 'settled-without-terminal', 'automatic fallback key is reserved');
+      requireValue(!isAutomaticFallbackKey(input.key), 'automatic fallback key is reserved');
       requireValue(active.bound && ['approach', 'progress', 'checks', 'waiting', 'blocked', 'review'].includes(input.kind), 'bind task first; structured checkpoint kind required');
       requireValue(text(input.summary) && text(input.nextAction), 'summary and next action required');
       if (input.kind !== 'blocked') requireValue(active.binding.requestedDelivery !== 'pr' || this.config.authority.mode === 'pr', 'no configured code publication authority; report blocked, not a substitute report');

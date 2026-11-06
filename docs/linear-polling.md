@@ -320,13 +320,27 @@ canceling before any remote request leaves no empty publication or intent receip
 if a fallback request already started, cancellation cannot prove it was not applied
 and cannot retract a public comment. all issued comment/status/unassignment intents
 and confirmations are retained. only interrupted **automatic** fallback publications
-may carry `canceled: true`; their reserved key cannot be used by ordinary checkpoints
-or replayed. remaining never-issued steps are not obligations to perform stale Todo
+may carry `canceled: true`; their reserved keys (`settled-without-terminal`, then
+`settled-without-terminal-2`, `-3`, etc.) cannot be used by ordinary checkpoints or
+replayed. remaining never-issued steps are not obligations to perform stale Todo
 or unassignment mutations. issued uncertainties still block release until observed
 receipts or explicit known-not-applied reconciliation resolve them; the latter is
 retained in `notApplied` with reconciliation evidence. release still requires a later
 valid terminal checkpoint and every exact native stopped-owner proof. neither a
 canceled fallback nor its partial public comment establishes task success.
+
+a canceled receipt does not disable later settlement handling. native running/result
+checks continue, including result-inspection wakes. after a cancellation, an otherwise
+idle coordinator gets **one additional reporting reminder per session**, never one per
+poll or wake. if it still stops without delivery, the next stable settlement can post
+a new blocked decision under the next reserved key while retaining every canceled
+receipt. actual new activity can invalidate that decision through the same guards;
+after activity stops, a stable decision can complete Todo/unassignment. there is no
+loop of reporting prompts, execution retries or canceled-key replay. a queued wake
+cancellation requires a new settlement before another fallback decision, not merely
+another control poll. unknown native ownership still blocks safely, and unresolved
+issued fallback intents prevent conflicting status/unassignment mutations and release
+until remote receipts or explicit reconciliation resolve them.
 
 these hooks follow installed pi 1.5.0 `docs/extensions.md` agent lifecycle and message
 APIs and the `notify.ts`, `send-user-message.ts`, `event-bus.ts` examples; pi-subagents

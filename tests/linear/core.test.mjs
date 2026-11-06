@@ -945,10 +945,10 @@ for (const scenario of ['aborted', 'unknown-native']) test(`${scenario} gives a 
   assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
 });
 
-async function fallbackFixture(t) {
+async function fallbackFixture(t, dependencies = {}) {
   const path = temporary(t), api = new FakeApi(), pi = fakePi(), ctx = context(path), cfg = config();
   fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
-  install(pi, '.pi', { api });
+  install(pi, '.pi', { api, ...dependencies });
   resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
   ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
   seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
@@ -1114,8 +1114,7 @@ for (const step of ['comment', 'state', 'unassign']) test(`canceled fallback ret
   const receipt = f.connector.active.publications.at(-1);
   assert.equal(receipt.canceled, true); assert.equal(receipt[step], 'intent');
   const input = { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/actual-report' } };
-  if (step === 'unassign') await assert.rejects(f.connector.checkpoint(input), /unassignment outcome uncertain/);
-  else await f.connector.checkpoint(input);
+  await assert.rejects(f.connector.checkpoint(input), /automatic fallback outcome uncertain/);
   await assert.rejects(f.connector.release('owners stopped', async () => []), /terminal checkpoint|unresolved partial publication/);
   const writes = f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length;
   await assert.rejects(f.connector.publish('settled-without-terminal', 'blocked: interrupted fallback', id(6), f.connector.controller.signal), /cannot be replayed/);
@@ -1130,7 +1129,7 @@ for (const step of ['comment', 'state', 'unassign']) test(`canceled fallback ret
 
 test('ordinary checkpoints cannot cancel publications or use the automatic fallback key', async t => {
   const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
-  await assert.rejects(f.connector.checkpoint({ ...checkpoint('blocked'), key: 'settled-without-terminal' }), /reserved/);
+  for (const key of ['settled-without-terminal', 'settled-without-terminal-2', 'settled-without-terminal-10']) await assert.rejects(f.connector.checkpoint({ ...checkpoint('blocked'), key }), /reserved/);
   const raw = fs.readFileSync(f.store.path, 'utf8');
   for (const extra of [{ canceled: true }, { canceled: false }, { canceled: 'true' }, { notApplied: ['comment'] }]) {
     const state = JSON.parse(raw); Object.assign(state.records[0].publications[0], extra);
@@ -1138,4 +1137,155 @@ test('ordinary checkpoints cannot cancel publications or use the automatic fallb
     assert.throws(() => new Store(f.path, f.cfg).load(), /fallback/);
   }
   fs.writeFileSync(f.store.path, raw);
+});
+
+test('canceled fallback must not disable all later settlement recovery', async t => {
+  const f = await fallbackFixture(t), comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => {
+    const value = await comment(...args);
+    f.pi.handlers.agent_start(); f.ctx.isIdle = () => false;
+    return value;
+  };
+  await settleAndPoll(f.pi, f.ctx);
+  const canceled = f.state().publications.at(-1);
+  assert.equal(canceled.canceled, true);
+  f.api.comment = comment; f.ctx.isIdle = () => true;
+  const sentBefore = f.pi.sent.length;
+  for (let cycle = 0; cycle < 5; cycle++) await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.pi.sent.length, sentBefore + 1, 'one final reporting reminder, not an idle prompt loop');
+  assert.equal(f.state().terminal, 'blocked'); assert.equal(f.state().halted, null);
+  assert.equal(f.api.issues[0].state.id, id(6)); assert.equal(f.api.issues[0].delegate, null);
+  assert.deepEqual(f.state().publications.find(p => p.key === canceled.key), canceled);
+  assert.equal(f.state().publications.at(-1).key, 'settled-without-terminal-2');
+  assert.equal(f.api.thread.length, 3, 'pickup, canceled partial comment, then a new current blocked report');
+});
+
+test('multiple genuine wakes preserve canceled receipts and converge after stable settlement without extra reminders or replay', async t => {
+  const f = await fallbackFixture(t), comment = f.api.comment.bind(f.api);
+  let wakes = 0;
+  f.api.comment = async (...args) => {
+    const value = await comment(...args);
+    if (wakes < 3) { wakes++; f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; }
+    return value;
+  };
+  await settleAndPoll(f.pi, f.ctx);
+  f.ctx.isIdle = () => true;
+  await settleAndPoll(f.pi, f.ctx); // the only additional reporting reminder.
+  for (let cycle = 0; cycle < 2; cycle++) {
+    f.ctx.isIdle = () => true;
+    await settleAndPoll(f.pi, f.ctx);
+  }
+  const canceled = f.state().publications.filter(p => p.canceled);
+  assert.equal(wakes, 3); assert.equal(canceled.length, 3);
+  assert.deepEqual(canceled.map(p => p.key), ['settled-without-terminal', 'settled-without-terminal-2', 'settled-without-terminal-3']);
+  assert.equal(f.pi.sent.length, 3);
+  f.ctx.isIdle = () => true;
+  for (let cycle = 0; cycle < 5; cycle++) await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.pi.sent.length, 3);
+  assert.deepEqual(f.state().publications.filter(p => p.canceled), canceled);
+  assert.equal(f.state().publications.at(-1).key, 'settled-without-terminal-4');
+  assert.equal(f.state().terminal, 'blocked'); assert.equal(f.api.issues[0].delegate, null);
+  assert.equal(f.api.thread.length, 5);
+  assert.equal(f.api.calls.filter(c => c === 'status').length, 2, 'only pickup and the final stable fallback change status');
+});
+
+test('a canceled fallback does not hide running native work or eventual native completion', async t => {
+  const f = await fallbackFixture(t, { nativeRequest: async () => ({ details: { runId: 'scout-after-wake' } }) }), comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => {
+    const value = await comment(...args); f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; return value;
+  };
+  await settleAndPoll(f.pi, f.ctx); f.api.comment = comment; f.ctx.isIdle = () => true;
+  const nativeDir = join(f.path, 'native-after-wake'); fs.mkdirSync(nativeDir);
+  const status = { lifecycleArtifactVersion: 3, runId: 'scout-after-wake', sessionId: f.ctx.sessionManager.getSessionFile(), mode: 'single', state: 'running' };
+  const save = () => fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status)); save();
+  f.pi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: status.runId, sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
+  await settleAndPoll(f.pi, f.ctx); await f.poll();
+  assert.equal(f.pi.sent.length, 2); assert.equal(f.state().terminal, null);
+  assert.equal(f.api.issues[0].state.id, id(4));
+  status.state = 'failed'; save();
+  await f.poll();
+  assert.equal(f.pi.sent.length, 3); assert.match(f.pi.sent.at(-1)[0], /inspect these exact native results/);
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.pi.sent.length, 4); assert.match(f.pi.sent.at(-1)[0], /final reporting reminder/);
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.state().terminal, 'blocked'); assert.equal(f.api.issues[0].delegate, null);
+});
+
+test('unknown native ownership after cancellation still blocks safely instead of sending more reporting prompts', async t => {
+  const f = await fallbackFixture(t), comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => { const value = await comment(...args); f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; return value; };
+  await settleAndPoll(f.pi, f.ctx); f.api.comment = comment; f.ctx.isIdle = () => true;
+  f.pi.events.emit('subagent:async-started', { id: 'unknown', sessionId: 'foreign' });
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.pi.sent.length, 2); assert.equal(f.state().terminal, 'blocked');
+  assert.match(f.api.thread.at(-1).body, /could not confirm the status/);
+  assert.equal(f.state().releaseEvidence, undefined);
+});
+
+for (const step of ['comment', 'state', 'unassign']) test(`canceled uncertain ${step} blocks later automatic status changes until reconciliation`, async t => {
+  const f = await fallbackFixture(t), method = step === 'state' ? 'status' : step, original = f.api[method].bind(f.api);
+  f.api[method] = async () => { f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; throw new DOMException('issued request canceled', 'AbortError'); };
+  await settleAndPoll(f.pi, f.ctx);
+  const receipt = f.state().publications.at(-1);
+  assert.equal(receipt.canceled, true); assert.equal(receipt[step], 'intent');
+  f.api[method] = original; f.ctx.isIdle = () => true;
+  const writes = f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length;
+  for (let cycle = 0; cycle < 5; cycle++) await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.pi.sent.length, 3, 'one reporting continuation may request receipt reconciliation');
+  assert.equal(f.state().terminal, null); assert.equal(f.state().releaseEvidence, undefined);
+  assert.deepEqual(f.state().publications.at(-1), receipt);
+  assert.equal(f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length, writes);
+  await f.pi.commands['abra-linear'].handler('release unresolved requests', f.ctx);
+  assert.ok(new Store(f.path, f.cfg).load().active);
+  await f.pi.commands['abra-linear'].handler('reconcile ' + writeFallbackReconciliationReceipt(f.path, receipt.key, step), f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.state().terminal, 'blocked'); assert.equal(f.api.issues[0].delegate, null);
+  assert.equal(f.pi.sent.length, 3);
+});
+
+function writeFallbackReconciliationReceipt(path, key, step) {
+  const file = join(path, 'explicit-reconciliation.json');
+  fs.writeFileSync(file, JSON.stringify({ key, [step]: 'not-applied', evidence: 'operator confirmed the original request ended without applying; native and remote evidence inspected' }));
+  return file;
+}
+
+test('a queued wake cancellation cannot start another fallback on a mere poll without a new settlement', async t => {
+  const f = await fallbackFixture(t), comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => { const value = await comment(...args); f.ctx.hasPendingMessages = () => true; return value; };
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.state().publications.at(-1).canceled, true);
+  f.api.comment = comment; f.ctx.hasPendingMessages = () => false;
+  const sent = f.pi.sent.length, publications = f.state().publications;
+  await f.poll(); await f.poll();
+  assert.equal(f.pi.sent.length, sent); assert.deepEqual(f.state().publications, publications);
+  for (let cycle = 0; cycle < 3; cycle++) await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.pi.sent.length, sent + 1); assert.equal(f.state().terminal, 'blocked');
+});
+
+for (const unknownOwner of [false, true]) test(`watch canceled fallback recovers to a new blocked decision with native handoff gates (unknownOwner=${unknownOwner})`, async t => {
+  const f = await watchFixture(t, api => { api.issues[0].assignee = { id: id(70) }; });
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
+  const comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => { const value = await comment(...args); f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; return value; };
+  await settleAndPoll(f.pi, f.ctx); f.api.comment = comment; f.ctx.isIdle = () => true;
+  await settleAndPoll(f.pi, f.ctx); await settleAndPoll(f.pi, f.ctx);
+  let state = new Store(f.path, f.cfg).load();
+  assert.equal(f.pi.sent.length, 3); assert.equal(state.records[0].terminal, 'blocked');
+  assert.equal(state.records[0].publications.at(-1).key, 'settled-without-terminal-2');
+  assert.equal(f.api.issues[0].delegate, null); assert.equal(f.api.issues[0].assignee.id, id(70));
+  if (unknownOwner) {
+    f.pi.handlers.tool_execution_start({ toolName: 'subagent', toolCallId: 'unknown-after-cancellation', args: { agent: 'worker', async: true } });
+    f.pi.handlers.tool_execution_end({ toolName: 'subagent', toolCallId: 'unknown-after-cancellation', result: { details: {} } });
+  }
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  state = new Store(f.path, f.cfg).load();
+  if (unknownOwner) {
+    assert.equal(f.pi.entries.at(-1).data.state, 'uncertain');
+    assert.ok(state.active); assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
+  } else {
+    assert.equal(f.pi.entries.at(-1).data.state, 'handoff'); assert.equal(f.pi.entries.at(-1).data.outcome, 'blocked');
+    assert.equal(state.active, null); assert.deepEqual(state.records[0].managedProofs, []);
+    assert.equal(fs.existsSync(join(f.path, 'data/linear/owner.lock')), false);
+  }
 });

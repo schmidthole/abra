@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { configuration, readJson, Store, LinearClient, Connector, ApiError, connectorDiagnostic, requireValue } from './core.mjs';
+import { configuration, readJson, Store, LinearClient, Connector, ApiError, connectorDiagnostic, requireValue, isAutomaticFallbackKey } from './core.mjs';
 import { ManagedOwners, NativeContinuation } from './managed.mjs';
 import { ClientCredentials, resolveCredentials } from './auth.mjs';
 import { setup } from './setup.mjs';
@@ -18,8 +18,10 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let freshHandoff;
   let continuation;
   let reportingRequested = false;
+  let cancellationReportingRequested = false;
   let aborted = false;
   let activityVersion = 0;
+  let settlementVersion = 0;
   let settlementToken;
   let settledReady = false;
   let fallbackController;
@@ -244,8 +246,9 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   });
   const checkSettled = async ctx => {
     if (!settledReady || !settled || !connector?.active || connector.disposed || connector.active.terminal || connector.active.waiting || connector.active.dispatch !== 'sent' || !ctx.isIdle() || ctx.hasPendingMessages()) return;
-    if (connector.active.publications.some(p => p.key === 'settled-without-terminal' && p.canceled)) return;
-    const version = activityVersion, active = connector.active;
+    const version = activityVersion, settlement = settlementVersion, active = connector.active;
+    const fallbacks = active.publications.filter(p => isAutomaticFallbackKey(p.key));
+    const canceled = fallbacks.some(p => p.canceled);
     const isCurrent = () => settledReady && settled && version === activityVersion && connector.active === active && !active.terminal && !active.waiting && !connector.disposed && ctx.isIdle() && !ctx.hasPendingMessages();
     let pending, uncertain = false;
     try { pending = await continuation.pending(); } catch { uncertain = true; }
@@ -264,7 +267,20 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         pi.sendUserMessage('continue the original issue request from the saved task and results. no async work remains pending. finish the requested PR/report and publish kind review with delivery/check evidence, ask a specific question with kind waiting, or publish kind blocked with the actual failure and a useful next action. do not stop with only a chat summary or invent a blocker.');
         return;
       }
+      if (canceled && !cancellationReportingRequested) {
+        cancellationReportingRequested = true; settled = false;
+        pi.sendUserMessage('new activity interrupted an automatic status update. continue the original issue from the saved task and actual native results; finish reporting the PR/report, a specific question, or the concrete failure and next action. preserve canceled publication receipts and reconcile any uncertain requests before further status/unassignment changes. do not replay canceled checkpoints or relaunch uncertain work. this is the final reporting reminder.');
+        return;
+      }
     }
+    if (fallbacks.some(p => p.comment === 'intent' || p.state === 'intent' || p.unassign === 'intent')) return;
+    let attempt = 1, key = 'settled-without-terminal';
+    while (fallbacks.some(p => p.key === key && p.canceled)) key = `settled-without-terminal-${++attempt}`;
+    const cancelFallback = () => {
+      connector.cancelFallbackPublication(key);
+      // a queued wake needs a new settlement; do not discard a newer settled epoch.
+      if (settlementVersion === settlement) { settled = false; settledReady = false; settlementToken = undefined; }
+    };
     const issue = await connector.api.issue(connector.active.id, connector.controller.signal);
     const team = connector.team(issue);
     if (!isCurrent()) return;
@@ -272,19 +288,19 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     const reason = aborted ? 'the coordinator was interrupted before delivering a PR or report' : uncertain ? 'abra could not confirm the status of its background work' : 'the coordinator stopped without delivering a PR or report, even after a request to finish reporting';
     const controller = new AbortController(); fallbackController = controller;
     try {
-      const publication = await connector.publish('settled-without-terminal', `blocked: ${reason}. next action: reopen the saved task and inspect the worker results and any running workers before retrying. no verified delivery is available; this does not mean the requested change is impossible.`, team.blocked, AbortSignal.any([connector.controller.signal, controller.signal]), isCurrent);
-      if (!publication || !isCurrent()) { connector.cancelFallbackPublication(); return; }
+      const publication = await connector.publish(key, `blocked: ${reason}. next action: reopen the saved task and inspect the worker results and any running workers before retrying. no verified delivery is available; this does not mean the requested change is impossible.`, team.blocked, AbortSignal.any([connector.controller.signal, controller.signal]), isCurrent);
+      if (!publication || !isCurrent()) { cancelFallback(); return; }
       connector.pause(); active.terminal = 'blocked'; active.waiting = false; connector.persist();
     } catch (error) {
       // cancellation never erases a request that may already have reached linear.
       if (!controller.signal.aborted) throw error;
-      connector.cancelFallbackPublication();
+      cancelFallback();
     } finally {
       if (fallbackController === controller) fallbackController = undefined;
     }
   };
   pi.on('agent_settled', (event) => {
-    settled = true; settledReady = false; aborted = event?.aborted === true; activityVersion++;
+    settled = true; settledReady = false; aborted = event?.aborted === true; activityVersion++; settlementVersion++;
     fallbackController?.abort();
     if (!connector?.active || connector.disposed || connector.active.terminal) return;
     settlementToken = randomUUID();
