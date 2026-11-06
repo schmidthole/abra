@@ -336,6 +336,29 @@ for example (times and task ids vary):
   the evidence and follow recovery below. watch never claims that closing pi alone
   stopped native workers and never retries or removes locks automatically.
 
+failures include a bounded phase (for example, **checking task status**) and a
+fixed diagnostic code/cause with local next steps. common codes:
+
+| code | next action |
+| --- | --- |
+| `options-invalid` / `acknowledgment-required` | read `bin/linear-watch --help`; provide the explicit trusted-work acknowledgment |
+| `configuration-invalid` / `watch-opt-in-required` | inspect local configuration and explicit watch opt-in |
+| `journal-invalid` / `ownership-unresolved` | preserve saved evidence and reconcile existing ownership; never reset it to start |
+| `child-start-failed` | check the pi executable and local permissions |
+| `rpc-command-failed` / `extension-failed` / `outcome-missing` / `rpc-protocol-invalid` | inspect the saved session and installed pi/extension compatibility |
+| `rpc-timeout` | inspect the retained session and owners; no blind command retry |
+| `connector-auth-failed` / `connector-request-failed` | check credential references, pinned app/workspace access or connectivity locally; reconcile any uncertain mutations |
+| `publication-pending` / `native-ownership-uncertain` | reconcile remote publication receipts or every captured native owner respectively |
+| `connector-check-failed` / `connector-operation-failed` / `unknown-failure` | no narrower safe cause is available; inspect saved task/session/owner evidence locally |
+
+codes and explanations are allowlisted local text, not redacted exception messages.
+unknown/untyped failures use a fixed fallback; raw exceptions/stacks, RPC error
+payloads, model/tool stderr, ticket text, credentials and private paths are never
+rendered by watch. connector `status` additionally exposes a nullable `diagnostic`
+code for poll failures; its `error` explanation uses the same fixed vocabulary.
+a startup uncertainty can explain a failed safety check without asserting readiness
+or stopped ownership. no failure code authorizes retry, restart or lock removal.
+
 these are presentation-only messages: admission, reporting, ownership proofs and
 handoff gates are unchanged. the injected `diagnose` callback still receives
 structured per-poll outcomes for local tests/integrations; only the default terminal
