@@ -81,13 +81,71 @@ function released(root, config, outcome) {
   requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.bound === true && record.dispatch === 'sent' && (record.terminal !== 'review' || record.delivery) && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed')), 'handoff disagrees with durable connector/lock/publication receipts');
 }
 
-export async function runWatch({ root = process.cwd(), configDirectory = '.pi', pi = 'pi', acknowledge = false, signal, intervalMs = 1000, timeoutMs = 60000, spawnChild = (command, args, options) => spawn(command, args, options), diagnose = event => process.stderr.write(JSON.stringify(event) + '\n') } = {}) {
+// display only allowlisted descriptions and validated ids, never remote prose or raw streams.
+export function createWatchReporter({ write = line => process.stderr.write(line), now = Date.now, heartbeatMs = 60000 } = {}) {
+  let previous, lastOutput = 0, interrupted = false, dialog = false;
+  return event => {
+    const task = typeof event.issue === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(event.issue) ? ` [task linear-${event.issue}]` : '';
+    let message;
+    switch (event.state) {
+      case 'starting': message = 'starting; checking configuration and saved ownership before opening a coordinator. ctrl-c requests a safe stop.'; break;
+      case 'starting-session':
+        dialog = false;
+        message = 'opening a fresh saved pi session; waiting for startup and connector checks. no action needed.'; break;
+      case 'ready': message = 'connector ready; checking for eligible delegated linear issues within the configured scope.'; break;
+      case 'admitted': message = 'picked up a delegated issue; the coordinator will handle this task within the configured authority. no action needed.'; break;
+      case 'no-work': message = 'waiting for an eligible delegated issue; none admitted. checking automatically; no action needed.'; break;
+      case 'working': message = 'task in progress; waiting for the coordinator, confirmed reporting and proof that all tracked workers have stopped. no action needed unless input is requested.'; break;
+      case 'awaiting-input':
+        if (event.reason === 'dialog') dialog = true;
+        message = 'action needed: read the clarification on the linear issue and reply there. this session is retained; replies require manual saved-steering and owner reconciliation, not automatic resumption. see docs/linear-polling.md.'; break;
+      case 'interrupted':
+        interrupted = true;
+        message = 'stop requested; no further sessions will open. requesting admission stop and owner reconciliation; please wait. shutdown alone does not prove workers stopped.'; break;
+      case 'handoff': message = event.outcome === 'blocked'
+        ? 'coordinator reports this task blocked; checking saved reporting, ownership receipts and session shutdown before any handoff. this is not successful delivery.'
+        : 'coordinator reports output ready for review; checking saved delivery, reporting and ownership receipts before closing the session. handoff is not yet confirmed.'; break;
+      case 'session-closed': message = event.outcome === 'blocked'
+        ? 'safe handoff confirmed and coordinator closed; task remains blocked. action needed: inspect the linear blocker and next steps. the issue is not completed.'
+        : event.outcome === 'review'
+          ? 'safe handoff confirmed and coordinator closed; output awaits review in linear. no merge or issue completion is implied.'
+          : 'coordinator closed cleanly after stopping; no new work will start.'; break;
+      case 'stopped': message = event.ended
+        ? 'watch stopped; no further sessions will open and no unattended execution is promised.'
+        : 'connector stopped admission; checking the session is idle before closing it. please wait.'; break;
+      case 'uncertain': message = 'action needed: connector, reporting or worker ownership is uncertain. halting without retry; preserve the saved session and receipts for manual reconciliation. see docs/linear-polling.md.'; break;
+      case 'halted': {
+        const phases = {
+          'fresh-child-state': 'starting the pi session',
+          'extension-start': 'starting the connector',
+          'extension-outcome': 'checking task status',
+          'interruption-reconciliation': 'stopping and reconciling workers',
+          'handoff-session-and-receipts': 'validating the handoff receipts and idle session',
+          'child-shutdown': 'waiting for the coordinator to close',
+        };
+        message = `halted while ${phases[event.phase] ?? 'checking watch safety'}. action needed: preserve connector receipts, saved session, task and worker artifacts; reconcile owners before restarting. child shutdown is not proof workers stopped. no automatic retry or lock removal; see docs/linear-polling.md.`;
+        break;
+      }
+      default: return;
+    }
+    const polling = ['no-work', 'working', 'awaiting-input'].includes(event.state);
+    if (polling && dialog) message = 'action needed: a session dialog requested input; watch cannot answer or approve it. if still waiting, use ctrl-c, reconcile owners and reopen the saved pi session manually. no automatic approval; see docs/linear-polling.md.';
+    if (polling && interrupted) message = 'stop in progress; waiting for confirmed reporting and stopped-worker evidence. session retained; if shutdown cannot be confirmed, manual reconciliation is required. please wait.';
+    const text = message + task, time = now(), unchanged = text === previous;
+    if (unchanged && (!polling || time - lastOutput < heartbeatMs)) return;
+    write(`[${new Date(time).toISOString().slice(11, 19)} utc] linear watch: ${unchanged ? 'still checking: ' : ''}${text}\n`);
+    previous = text; lastOutput = time;
+  };
+}
+
+export async function runWatch({ root = process.cwd(), configDirectory = '.pi', pi = 'pi', acknowledge = false, signal, intervalMs = 1000, timeoutMs = 60000, spawnChild = (command, args, options) => spawn(command, args, options), diagnose = createWatchReporter() } = {}) {
+  diagnose({ state: 'starting' });
   requireValue(process.platform !== 'win32', 'foreground watch currently requires posix signal/process-group semantics');
   requireValue(acknowledge, 'explicit trusted managed-work acknowledgment required');
   const config = configuration(readJson(join(root, configDirectory, 'abra-linear.json')));
   requireValue(config.watch?.trustedManagedWork === true, 'configure watch.trustedManagedWork first');
   let stop = signal?.aborted ?? false;
-  const interrupt = () => { stop = true; };
+  const interrupt = () => { if (!stop) diagnose({ state: 'interrupted' }); stop = true; };
   signal?.addEventListener('abort', interrupt);
   try {
     while (!stop) {
@@ -95,10 +153,11 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
       requireValue(!store.load().active && !fs.existsSync(store.lock), 'existing tracked ownership/lock blocks watch; no automatic recovery');
       const nonce = randomUUID();
       let ready, admitted, outcome, expected, reported, stopDeadline, stopped = false, phase = 'fresh-child-state';
+      diagnose({ state: 'starting-session' });
       const child = spawnChild(pi, ['--mode', 'rpc'], { cwd: root, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ABRA_LINEAR_WATCH_NONCE: nonce } });
       const rpc = new RpcChild(child, event => {
         if (event.type === 'extension_ui_request') {
-          if (['select', 'confirm', 'input', 'editor'].includes(event.method)) diagnose({ state: 'awaiting-input', note: 'session retained; no automatic dialog approval; interrupt and reconcile manually if needed' });
+          if (['select', 'confirm', 'input', 'editor'].includes(event.method)) diagnose({ state: 'awaiting-input', reason: 'dialog', note: 'session retained; no automatic dialog approval; interrupt and reconcile manually if needed' });
           return;
         }
         if (event.type !== 'entry_appended' || event.entry?.customType !== 'abra-linear-watch') return;
@@ -106,10 +165,12 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
         requireValue(data?.version === 1 && data.nonce === nonce && data.session === initial.sessionId, 'foreign watch outcome');
         if (data.state === 'ready') {
           requireValue(!ready && data.request === 'start' && data.sessionFile && data.owner, 'duplicate/out-of-order watch ready'); ready = data;
+          diagnose({ state: 'ready', session: data.session });
         } else {
           requireValue(ready && data.owner === ready.owner && !outcome, 'out-of-order/duplicate watch outcome');
           if (data.state === 'admitted') {
             requireValue(!admitted && data.request === 'start' && data.issue && data.task === `linear-${data.issue}`, 'invalid/duplicate admission'); admitted = data;
+            diagnose({ state: 'admitted', session: data.session, issue: data.issue });
           } else {
             requireValue(data.request === expected && reported !== expected, 'uncorrelated/duplicate watch outcome');
             reported = expected;
@@ -150,6 +211,7 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
         if (outcome.state === 'handoff') released(root, config, outcome);
         phase = 'child-shutdown';
         await rpc.close();
+        diagnose({ state: 'session-closed', issue: admitted?.issue, outcome: outcome.outcome });
       } catch (error) {
         diagnose({ state: 'halted', phase, session: initial?.sessionId ?? null, issue: admitted?.issue ?? null, note: 'no restart; preserve connector/session/task/native artifacts; surviving native owners are not disproved by child shutdown' });
         try { await rpc.close(); } catch { /* preserve original failure; shutdown is not owner proof. */ }
@@ -157,6 +219,6 @@ export async function runWatch({ root = process.cwd(), configDirectory = '.pi', 
       }
       if (stopped) stop = true;
     }
-    diagnose({ state: 'stopped', note: 'foreground watch ended; no unattended execution promised' });
+    diagnose({ state: 'stopped', ended: true, note: 'foreground watch ended; no unattended execution promised' });
   } finally { signal?.removeEventListener('abort', interrupt); }
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { runWatch } from '../../extensions/linear/watch.mjs';
+import { runWatch, createWatchReporter } from '../../extensions/linear/watch.mjs';
 import { configuration, readJson, Store } from '../../extensions/linear/core.mjs';
 
 const root = resolve('.');
@@ -86,11 +86,138 @@ test('terminal ctrl-c reaches foreground watch before its separately grouped tra
   let interrupted = false, stderr = '';
   child.stderr.on('data', chunk => {
     stderr += chunk.toString();
-    if (!interrupted && stderr.includes('"state":"no-work"')) { interrupted = true; process.kill(-child.pid, 'SIGINT'); }
+    if (!interrupted && stderr.includes('waiting for an eligible delegated issue')) { interrupted = true; process.kill(-child.pid, 'SIGINT'); }
   });
   const timer = setTimeout(() => child.kill('SIGTERM'), 5000);
   const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); }); clearTimeout(timer);
   assert.equal(code, 0, stderr); assert.equal(interrupted, true);
   assert.equal(fs.readFileSync(signalLog, 'utf8'), 'stop-command\n');
   assert.ok(!fs.existsSync(join(f.path, 'data/linear/owner.lock')));
+});
+
+const issue = '00000000-0000-0000-0000-000000000101';
+function reporterFixture() {
+  let time = 0;
+  const lines = [], diagnose = createWatchReporter({ write: line => lines.push(line), now: () => time });
+  return { lines, diagnose, advance: ms => { time += ms; } };
+}
+
+test('watch reporter explains lifecycle without treating reported handoff as confirmed delivery', () => {
+  const f = reporterFixture();
+  for (const state of ['starting', 'starting-session', 'ready', 'no-work', 'admitted', 'working', 'awaiting-input']) f.diagnose({ state, issue: ['admitted', 'working', 'awaiting-input'].includes(state) ? issue : null });
+  assert.match(f.lines[0], /checking configuration.*ctrl-c/);
+  assert.match(f.lines[1], /fresh saved pi session.*no action needed/);
+  assert.match(f.lines[2], /eligible delegated linear issues/);
+  assert.match(f.lines[3], /none admitted.*no action needed/);
+  assert.match(f.lines[4], new RegExp(`picked up.*task linear-${issue}`));
+  assert.match(f.lines[5], /task in progress.*proof.*workers have stopped/);
+  assert.match(f.lines[6], /action needed.*reply there.*not automatic resumption/);
+  f.diagnose({ state: 'handoff', outcome: 'review', issue });
+  assert.match(f.lines.at(-1), /reports output ready for review.*not yet confirmed/);
+  f.diagnose({ state: 'session-closed', outcome: 'review', issue });
+  assert.match(f.lines.at(-1), /safe handoff confirmed.*awaits review.*no merge or issue completion/);
+  f.diagnose({ state: 'stopped', ended: true });
+  assert.match(f.lines.at(-1), /watch stopped.*no unattended execution/);
+  assert.ok(f.lines.every(line => line.startsWith('[00:00:00 utc] linear watch: ') && line === line.toLowerCase()));
+});
+
+test('watch reporter suppresses unchanged polls and emits minute heartbeats without resetting on quiet polls', () => {
+  for (const state of ['no-work', 'working', 'awaiting-input']) {
+    const f = reporterFixture();
+    const event = { state, issue: state === 'no-work' ? null : issue };
+    f.diagnose(event);
+    for (let i = 0; i < 59; i++) { f.advance(1000); f.diagnose({ ...event, session: `ignored-${i}`, runs: ['not-an-active-worker-count'] }); }
+    assert.equal(f.lines.length, 1);
+    f.advance(1000); f.diagnose(event);
+    assert.equal(f.lines.length, 2);
+    assert.match(f.lines[1], /^\[00:01:00 utc\] linear watch: still checking:/);
+    f.advance(1000); f.diagnose(event); assert.equal(f.lines.length, 2);
+    f.diagnose({ state: state === 'working' ? 'awaiting-input' : 'working', issue });
+    assert.equal(f.lines.length, 3);
+    f.diagnose({ state: 'working', issue: '00000000-0000-0000-0000-000000000102' });
+    assert.equal(f.lines.length, 4);
+  }
+});
+
+test('watch reporter keeps dialog and interruption guidance visible across unchanged connector polls', () => {
+  const f = reporterFixture();
+  f.diagnose({ state: 'awaiting-input', reason: 'dialog' });
+  assert.match(f.lines.at(-1), /action needed.*cannot answer or approve.*reopen the saved pi session/);
+  f.diagnose({ state: 'no-work' });
+  assert.equal(f.lines.length, 1);
+  f.advance(60000); f.diagnose({ state: 'working' });
+  assert.match(f.lines.at(-1), /still checking:.*session dialog/);
+  f.diagnose({ state: 'interrupted' });
+  assert.match(f.lines.at(-1), /stop requested.*please wait.*does not prove workers stopped/);
+  f.diagnose({ state: 'working', issue });
+  assert.match(f.lines.at(-1), /stop in progress.*manual reconciliation/);
+  assert.doesNotMatch(f.lines.at(-1), /no action needed/);
+});
+
+test('watch reporter distinguishes blocked handoff and fails closed without rendering raw diagnostic fields', () => {
+  const f = reporterFixture();
+  f.diagnose({ state: 'handoff', outcome: 'blocked', issue });
+  assert.match(f.lines.at(-1), /blocked.*checking saved reporting.*not successful delivery/);
+  f.diagnose({ state: 'session-closed', outcome: 'blocked', issue });
+  assert.match(f.lines.at(-1), /task remains blocked.*action needed/);
+  for (const state of ['uncertain', 'halted']) f.diagnose({ state, issue: '\x1b[31msecret-id\n', phase: 'private-phase', diagnostic: 'secret-token', note: '/home/private', session: 'secret-session', runs: ['secret-run'] });
+  assert.match(f.lines.at(-1), /halted while checking watch safety.*reconcile owners.*no automatic retry or lock removal/);
+  f.diagnose({ state: 'halted', phase: 'child-shutdown', issue });
+  assert.match(f.lines.at(-1), /waiting for the coordinator to close/);
+  const text = f.lines.join('');
+  assert.doesNotMatch(text, /secret|private|\x1b|private-phase/);
+});
+
+test('watch work events remain injectable on every poll while terminal output stays quiet', async t => {
+  const f = fixture(t, 'working'), output = reporterFixture(), capture = f.options.diagnose;
+  await runWatch({ ...f.options, diagnose: event => { output.diagnose(event); capture(event); } });
+  assert.equal(f.diagnostics.filter(event => event.state === 'working').length, 3);
+  assert.equal(output.lines.filter(line => line.includes('task in progress')).length, 1);
+  assert.ok(f.diagnostics.findIndex(event => event.state === 'admitted') < f.diagnostics.findIndex(event => event.state === 'working'));
+  assert.ok(f.diagnostics.findIndex(event => event.state === 'handoff') < f.diagnostics.findIndex(event => event.state === 'session-closed'));
+});
+
+for (const scenario of ['lock-retained', 'pending', 'missing-delivery', 'close-failure']) {
+  test(`watch reporter never confirms handoff when ${scenario} fails verification`, async t => {
+    const f = fixture(t, scenario), output = reporterFixture(), capture = f.options.diagnose;
+    await assert.rejects(runWatch({ ...f.options, diagnose: event => { output.diagnose(event); capture(event); } }));
+    assert.match(output.lines.join(''), /handoff is not yet confirmed/);
+    assert.ok(output.lines.some(line => line.includes(scenario === 'close-failure' ? 'halted while waiting for the coordinator to close' : 'halted while validating the handoff')));
+    assert.ok(!output.lines.some(line => line.includes('safe handoff confirmed')));
+    assert.ok(!f.diagnostics.some(event => event.state === 'session-closed'));
+  });
+}
+
+test('default cli output is plain language and omits raw model, tool, notification and stderr streams', async t => {
+  const f = fixture(t, 'noisy');
+  const child = spawn(join(root, 'bin/linear-watch'), ['--trusted-managed-work', '--pi', join(root, 'tests/linear/fixtures/rpc-child.mjs')], { cwd: f.path, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, WATCH_TEST_SCENARIO: 'noisy', WATCH_TEST_LOG: f.log } });
+  let stdout = '', stderr = '', interrupted = false;
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => {
+    stderr += chunk;
+    if (!interrupted && stderr.includes('coordinator reports output ready for review')) { interrupted = true; child.kill('SIGINT'); }
+  });
+  const timer = setTimeout(() => child.kill('SIGTERM'), 5000);
+  const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); }); clearTimeout(timer);
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, '');
+  assert.match(stderr, /checking configuration/);
+  assert.match(stderr, /picked up a delegated issue/);
+  assert.match(stderr, /safe handoff confirmed/);
+  assert.match(stderr, /watch stopped/);
+  assert.doesNotMatch(stderr, /secret-|private|"state"|"type"|"session"/);
+});
+
+test('cli configuration and argument failures give safe actionable guidance with nonzero exit', async t => {
+  const f = fixture(t, 'no-work');
+  for (const args of [[], ['--unknown-secret-option']]) {
+    const child = spawn(join(root, 'bin/linear-watch'), args, { cwd: f.path, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
+    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+    assert.equal(code, 1); assert.equal(stdout, '');
+    assert.match(stderr, /action needed.*--help.*abra-linear.json.*reconcile.*no automatic retry/);
+    assert.doesNotMatch(stderr, /unknown-secret-option|"state"/);
+  }
+  assert.equal(f.spawned(), 0);
 });

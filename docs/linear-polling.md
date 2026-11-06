@@ -294,6 +294,53 @@ a stuck child receives SIGTERM and an unsuccessful halt with surviving ownership
 unknown. the child stays piped/referenced/awaited, not daemonized. diagnostics on
 stderr omit raw model/tool stderr and secrets. no restart after a crash/timeout.
 
+### reading the watch terminal
+
+watch prints timestamped, plain-language status lines on **stderr** (stdout stays
+empty except for `--help`). it explains startup checks, waiting for eligible
+issues, task pickup, work in progress, clarification/dialog input, handoff checks,
+shutdown and failures. unchanged polling stays quiet; a heartbeat about once a
+minute repeats the current wait and any action needed, only while status checks
+are returning. it is reassurance that watch is checking, not proof that model or
+worker execution is making progress. blocked startup/control calls still use the
+existing bounded deadlines, not an independent heartbeat timer.
+
+for example (times and task ids vary):
+
+```text
+[12:00:00 utc] linear watch: starting; checking configuration and saved ownership before opening a coordinator. ctrl-c requests a safe stop.
+[12:00:01 utc] linear watch: waiting for an eligible delegated issue; none admitted. checking automatically; no action needed.
+[12:01:01 utc] linear watch: still checking: waiting for an eligible delegated issue; none admitted. checking automatically; no action needed.
+```
+
+- pickup/work lines identify the task as `linear-<issue-uuid>` from the existing
+  correlated outcome. human issue keys/titles are not in that outcome, so watch
+  does not fetch them merely for display or print ticket text, raw model/tool
+  streams, dialog contents, credentials, session paths or native run ids.
+- **no action needed** means watch will keep checking. it does not mean the task
+  is done. work status includes waiting for reporting and stopped-worker evidence;
+  it cannot distinguish coding, testing or worker shutdown from this status alone.
+- **action needed** for clarification means read/reply on the Linear issue and
+  follow saved-steering/owner reconciliation; replies never automatically resume
+  work. a dialog request is not approved or answered in this terminal. if it is
+  still open, interrupt, reconcile owners and reopen the saved pi session manually.
+  watch conservatively retains the dialog warning for that session because it
+  does not receive dialog-dismissal proof.
+- a coordinator's **reported handoff** is not yet confirmed: watch must still
+  check saved receipts, idle session and clean child close. only then is **safe
+  handoff confirmed** printed. review means output awaits review, not merged or
+  issue completed. blocked means inspect the issue's blocker/next steps, not success;
+  a safe blocked handoff may still let watch check for another issue.
+- **stop requested** means please wait for reconciliation/shutdown. **halted** or
+  **unable to continue** means operator action is needed before restart; preserve
+  the evidence and follow recovery below. watch never claims that closing pi alone
+  stopped native workers and never retries or removes locks automatically.
+
+these are presentation-only messages: admission, reporting, ownership proofs and
+handoff gates are unchanged. the injected `diagnose` callback still receives
+structured per-poll outcomes for local tests/integrations; only the default terminal
+reporter suppresses repeats. no raw-event/verbose command-line mode is provided.
+
 ## stop and recovery
 
 discovery/control/checkpoints serialize. defaults: discovery 30 seconds, active
