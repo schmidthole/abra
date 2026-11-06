@@ -6,8 +6,8 @@ import { ManagedOwners } from './managed.mjs';
 import { ClientCredentials, resolveCredentials } from './auth.mjs';
 import { setup } from './setup.mjs';
 import { WatchFailure, failureCode, diagnosticText, requireWatch } from './diagnostics.mjs';
+import { dedicatedMarker as marker, seedDedicatedSession, verifySavedBootstrap, verifySavedDedicated } from './session.mjs';
 
-const marker = 'abra-linear-dedicated';
 const result = message => ({ content: [{ type: 'text', text: message }], details: {} });
 export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let connector;
@@ -15,6 +15,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let watch;
   let settled = false;
   let settingUp = false;
+  let freshHandoff;
   const setupController = new AbortController();
   const emitWatch = (ctx, request, state, extra = {}) => {
     pi.appendEntry('abra-linear-watch', { version: 1, nonce: watch.nonce, request, session: ctx.sessionManager.getSessionId(), owner: connector.store.owner, state, issue: connector.active?.id ?? null, task: connector.active?.taskId ?? null, ...extra });
@@ -45,10 +46,14 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   pi.on('session_start', async (event, ctx) => {
     const entries = ctx.sessionManager.getBranch();
     dedicated = entries.some(e => e.type === 'custom' && e.customType === marker);
-    // only the explicit /start new-session handoff arms polling, never reload/resume.
-    if (event.reason === 'new' && dedicated && !entries.some(e => e.type === 'message')) {
-      connector = build(ctx);
-      await connector.enable(ctx.sessionManager.getSessionId());
+    // only the exact explicit new-session bootstrap arms polling, never reload/resume.
+    if (event.reason === 'new' && dedicated) {
+      freshHandoff = verifySavedBootstrap(ctx.sessionManager);
+      requireValue(ctx.isIdle() && !ctx.hasPendingMessages(), 'dedicated bootstrap requires idle session');
+      if (freshHandoff.source === 'interactive') {
+        connector = build(ctx);
+        await connector.enable(ctx.sessionManager.getSessionId());
+      }
     }
   });
   pi.registerCommand('abra-linear', {
@@ -69,13 +74,25 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
           const config = load(ctx);
           requireValue(ctx.mode === 'rpc' && config.watch?.trustedManagedWork === true && nonce === process.env.ABRA_LINEAR_WATCH_NONCE && /^[a-f0-9-]{36}$/.test(nonce), 'watch requires rpc launcher and acknowledged trusted managed-work configuration');
           requireValue(!connector && !watch && ctx.isIdle() && !ctx.hasPendingMessages() && !ctx.sessionManager.getBranch().some(e => e.type === 'message' || e.customType === marker), 'watch requires a fresh unused persisted child session');
+          const store = new Store(ctx.cwd, config);
+          requireValue(!store.load().active && !fs.existsSync(store.lock), 'existing connector/native ownership must be reconciled');
+          const handoff = { source: 'watch', token: nonce, previousSession: ctx.sessionManager.getSessionId() };
+          // replacement invalidates this pi/ctx; return its promise without old-runtime work.
+          return ctx.newSession({ setup: sm => seedDedicatedSession(sm, handoff) });
+        }
+        if (command === 'watch-arm') {
+          const [nonce, previousSession] = rest;
+          const config = load(ctx);
+          requireValue(ctx.mode === 'rpc' && config.watch?.trustedManagedWork === true && nonce === process.env.ABRA_LINEAR_WATCH_NONCE && freshHandoff?.source === 'watch' && freshHandoff.token === nonce && freshHandoff.previousSession === previousSession, 'watch bootstrap handoff disagrees');
+          requireValue(!connector && !watch && ctx.isIdle() && !ctx.hasPendingMessages(), 'watch requires an unused idle bootstrap');
+          verifySavedBootstrap(ctx.sessionManager);
           connector = build(ctx);
           requireValue(!connector.active && !fs.existsSync(connector.store.lock), 'existing connector/native ownership must be reconciled');
-          dedicated = true;
           watch = { nonce, owners: new ManagedOwners(pi, ctx, dependencies.nativeRequest), stopped: false, handed: false };
-          pi.appendEntry(marker, { watch: nonce });
           try { await watch.owners.ready(); } catch { throw new WatchFailure('native-ownership-uncertain'); }
-          emitWatch(ctx, 'start', 'ready', { sessionFile: ctx.sessionManager.getSessionFile() });
+          requireValue(ctx.isIdle() && !ctx.hasPendingMessages(), 'watch requires idle bootstrap after native checks');
+          verifySavedBootstrap(ctx.sessionManager);
+          emitWatch(ctx, 'start', 'ready', { sessionFile: ctx.sessionManager.getSessionFile(), previousSession });
           await connector.enable(ctx.sessionManager.getSessionId());
           requireWatch(!connector.error, connector.status().diagnostic ?? 'connector-check-failed');
           return;
@@ -117,9 +134,9 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
           }
           const store = new Store(ctx.cwd, config);
           requireValue(!store.load().active && !fs.existsSync(store.lock), 'existing connector/native ownership must be reconciled before start');
-          requireValue(ctx.hasUI && await ctx.ui.confirm('start dedicated linear task session?', 'saves this session and opens a clean coordinator session; polls while pi is alive, admits only one ticket. next ticket needs another explicit /start. configured delegation grants only the saved authority ceiling. no merge/deploy/close.'), 'start not confirmed');
-          await ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), setup: async sm => { sm.appendCustomEntry(marker, { start: randomUUID() }); } });
-          return;
+          requireValue(ctx.hasUI && await ctx.ui.confirm('start dedicated linear task session?', 'opens a dedicated coordinator session with saved recovery context; polls while pi is alive, admits only one ticket. next ticket needs another explicit /start. configured delegation grants only the saved authority ceiling. no merge/deploy/close.'), 'start not confirmed');
+          const handoff = { source: 'interactive', token: randomUUID(), previousSession: ctx.sessionManager.getSessionId() };
+          return ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), setup: sm => seedDedicatedSession(sm, handoff) });
         }
         if (command === 'status') {
           const status = connector?.status() ?? { mode: 'off', note: 'disabled; configure and explicitly start; reload/restart never auto-dispatches' };
@@ -132,6 +149,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         if (command === 'resume') {
           requireValue(dedicated && (!connector || connector.mode === 'off') && ctx.hasUI, 'resume the original dedicated pi session first; inspect task/native ownership');
           requireValue(await ctx.ui.confirm('resume control polling only?', 'confirm you inspected saved dispatch and surviving native owners. this does not redispatch or replay uncertain mutations. admission stays paused.'), 'resume not confirmed');
+          verifySavedDedicated(ctx.sessionManager);
           await connector?.dispose();
           connector = build(ctx);
           await connector.enable(ctx.sessionManager.getSessionId(), true);
@@ -150,11 +168,11 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         } else throw new Error('usage: /abra-linear setup|start|pause|status|poll|stop|resume|release <evidence>|reconcile <absolute receipt.json>');
         if (ctx.hasUI) ctx.ui.notify(JSON.stringify(connector.status()), 'info');
       } catch (error) {
-        const watchCommand = ['watch-start', 'watch-check', 'watch-stop'].includes(command);
+        const watchCommand = ['watch-start', 'watch-arm', 'watch-check', 'watch-stop'].includes(command);
         const code = error instanceof ApiError ? connectorDiagnostic(error) : failureCode(error) === 'unknown-failure' ? 'connector-check-failed' : failureCode(error);
         const detail = watchCommand ? diagnosticText(code) : command === 'setup' ? 'setup requires trusted idle terminal, valid configuration and reconciled ownership; inspect locally' : error instanceof Error ? error.message.split('\n')[0].slice(0, 300) : 'unknown failure';
-        if (watch && connector) emitWatch(ctx, rest[1] ?? 'start', 'uncertain', { code });
-        else if (command === 'watch-start' && ctx.mode === 'rpc' && rest[0] === process.env.ABRA_LINEAR_WATCH_NONCE) {
+        if (watch && connector) emitWatch(ctx, command === 'watch-arm' ? 'start' : rest[1] ?? 'start', 'uncertain', { code });
+        else if (['watch-start', 'watch-arm'].includes(command) && ctx.mode === 'rpc' && rest[0] === process.env.ABRA_LINEAR_WATCH_NONCE) {
           pi.appendEntry('abra-linear-watch', { version: 1, nonce: rest[0], request: 'start', session: ctx.sessionManager.getSessionId(), state: 'uncertain', code });
         }
         if (ctx.hasUI) ctx.ui.notify(`linear command blocked/failed: ${connector?.redacted(detail) ?? detail}. no automatic retry or reset`, 'error');

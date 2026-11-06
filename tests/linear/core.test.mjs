@@ -6,6 +6,8 @@ import * as fs from 'node:fs';
 import { join, resolve } from 'node:path';
 import { configuration, Store, LinearClient, ApiError, Connector, coordinatorPrompt } from '../../extensions/linear/core.mjs';
 import { install } from '../../extensions/linear/pi.mjs';
+import { seedDedicatedSession } from '../../extensions/linear/session.mjs';
+import { SessionManager } from './fixtures/session-manager.mjs';
 
 const root = resolve('.');
 const id = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
@@ -309,7 +311,7 @@ test('pi factory/reload never auto-enables and commands only create new sessions
   install(pi, '.pi', { api }); const ctx = context(path);
   await pi.handlers.session_start({ reason: 'startup' }, ctx); assert.equal(api.calls.length, 0);
   let setup;
-  ctx.newSession = async options => { setup = options; await options.setup({ appendCustomEntry: (kind, data) => { assert.equal(kind, 'abra-linear-dedicated'); assert.ok(data.start); } }); return { cancelled: false }; };
+  ctx.newSession = async options => { setup = options; await options.setup(SessionManager.create(path, join(path, 'sessions'))); return { cancelled: false }; };
   await pi.commands['abra-linear'].handler('start', ctx); assert.ok(setup); assert.equal(api.calls.length, 0);
   await pi.handlers.session_start({ reason: 'reload' }, context(path, [{ type: 'custom', customType: 'abra-linear-dedicated' }])); assert.equal(api.calls.length, 0);
   const input = pi.handlers.input({ source: 'interactive' }, ctx); assert.equal(input.action, 'handled');
@@ -317,7 +319,9 @@ test('pi factory/reload never auto-enables and commands only create new sessions
 
 test('pi clean handoff admits one issue, blocks session switching and settles only as blocked', async t => {
   const path = temporary(t), api = new FakeApi(), pi = fakePi(); fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(config()));
-  install(pi, '.pi', { api }); const ctx = context(path, [{ type: 'custom', customType: 'abra-linear-dedicated' }]);
+  install(pi, '.pi', { api }); const ctx = context(path);
+  ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
+  seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
   await pi.handlers.session_start({ reason: 'new' }, ctx); assert.equal(pi.sent.length, 1); assert.deepEqual(pi.handlers.session_before_switch(), { cancel: true });
   await pi.handlers.agent_settled(); assert.equal(api.issues[0].state.id, id(6)); assert.match(api.thread.at(-1).body, /no verified success inferred/);
   await pi.handlers.session_shutdown(); assert.ok(!fs.existsSync(join(path, 'data/linear/owner.lock')));
@@ -400,15 +404,26 @@ async function watchFixture(t, configure = () => {}) {
   cfg.watch = { trustedManagedWork: true }; fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
   const old = process.env.ABRA_LINEAR_WATCH_NONCE; process.env.ABRA_LINEAR_WATCH_NONCE = nonce;
   t.after(() => { if (old === undefined) delete process.env.ABRA_LINEAR_WATCH_NONCE; else process.env.ABRA_LINEAR_WATCH_NONCE = old; });
-  install(pi, '.pi', { api, nativeRequest: async method => {
-    if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: 'pi-session' } };
-    return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
-  } });
   const ctx = context(path); ctx.mode = 'rpc';
+  const dependencies = { api, nativeRequest: async method => {
+    if (method === 'ping') return { version: 1, capabilities: { processTerminalProof: { version: 1, lifecycleArtifactVersion: 3 } }, session: { sessionId: ctx.sessionManager.getSessionId() } };
+    return { fleet: { version: 1, totalActive: 0, omitted: 0 }, asyncSnapshot: { kind: 'pi-subagents.async-status-snapshot', version: 1, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [] } };
+  } };
+  install(pi, '.pi', dependencies);
+  ctx.newSession = async options => {
+    await pi.handlers.session_shutdown();
+    ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
+    await options.setup(ctx.sessionManager);
+    install(pi, '.pi', dependencies);
+    await pi.handlers.session_start({ reason: 'new' }, ctx);
+    return { cancelled: false };
+  };
   resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
   const command = args => pi.commands['abra-linear'].handler(args, ctx);
   configure(api);
   await command(`watch-start ${nonce}`);
+  assert.equal(api.calls.length, 0); assert.equal(pi.sent.length, 0);
+  await command(`watch-arm ${nonce} pi-session`);
   const f = { path, cfg, api, pi, nonce, ctx, command };
   saveTask(f);
   return f;

@@ -4,12 +4,15 @@ import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { configuration, readJson, Store } from '../../../extensions/linear/core.mjs';
+import { seedDedicatedSession } from '../../../extensions/linear/session.mjs';
+import { SessionManager } from './session-manager.mjs';
 
 const scenario = process.env.WATCH_TEST_SCENARIO;
 const log = process.env.WATCH_TEST_LOG;
 const serial = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).length + 1 : 1;
 fs.appendFileSync(log, `${process.pid}\n`);
-const session = randomUUID(), nonce = process.env.ABRA_LINEAR_WATCH_NONCE;
+const initialSession = randomUUID(), nonce = process.env.ABRA_LINEAR_WATCH_NONCE;
+let session = initialSession, sessionFile;
 const config = configuration(readJson(join(process.cwd(), '.pi/abra-linear.json')));
 const store = new Store(process.cwd(), config), state = store.load();
 const issue = `00000000-0000-0000-0000-${String(serial + 100).padStart(12, '0')}`, task = `linear-${issue}`;
@@ -25,7 +28,7 @@ process.stdin.on('data', chunk => {
   while ((index = buffer.indexOf('\n')) !== -1) {
     const command = JSON.parse(buffer.slice(0, index)); buffer = buffer.slice(index + 1);
     if (command.type === 'get_state') {
-      send({ type: 'response', id: command.id, command: command.type, success: true, data: { sessionId: session, messageCount: admitted ? 3 : 0, pendingMessageCount: scenario === 'pending' && checks > 0 ? 1 : 0, isStreaming: false, isCompacting: false } });
+      send({ type: 'response', id: command.id, command: command.type, success: true, data: { sessionId: session, sessionFile, messageCount: admitted ? 3 : sessionFile ? 1 : 0, pendingMessageCount: scenario === 'pending' && checks > 0 ? 1 : 0, isStreaming: false, isCompacting: false } });
       continue;
     }
     const [, action, , request] = command.message.split(' ');
@@ -35,8 +38,14 @@ process.stdin.on('data', chunk => {
       if (scenario === 'failed-prompt') { send({ type: 'response', id: command.id, command: 'prompt', success: false }); continue; }
       if (scenario === 'timeout') continue;
       if (scenario === 'start-uncertain') { event('start', 'uncertain', { code: 'native-ownership-uncertain', diagnostic: 'secret-start-canary' }); send({ type: 'response', id: command.id, command: 'prompt', success: true }); continue; }
+      if (scenario !== 'bootstrap-cancelled') {
+        const sm = SessionManager.create(process.cwd(), join(process.cwd(), 'sessions'));
+        seedDedicatedSession(sm, { source: 'watch', token: nonce, previousSession: initialSession });
+        session = sm.getSessionId(); sessionFile = sm.getSessionFile();
+      }
+    } else if (action === 'watch-arm') {
       store.acquire(session);
-      event('start', 'ready', { sessionFile: join(process.cwd(), 'fake-session.jsonl') });
+      event('start', 'ready', { sessionFile, previousSession: scenario === 'wrong-bootstrap-parent' ? 'foreign' : initialSession });
       if (scenario === 'duplicate-ready') event('start', 'ready', { sessionFile: 'fake' });
       if (!['no-work', 'dialog', 'missing-outcome', 'signal-sequence'].includes(scenario) && !(scenario === 'multiple' && serial > 2)) {
         admitted = true;
