@@ -24,7 +24,7 @@
       "base": "main"
     }
   ],
-  "authority": { "mode": "report" },
+  "authority": { "mode": "pr" },
   "watch": { "trustedManagedWork": true },
   "pollMs": 30000,
   "controlMs": 10000,

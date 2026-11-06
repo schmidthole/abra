@@ -33,7 +33,7 @@ function boundary() {
     if (query.includes('AbraTeams')) return response({ data: { teams: connection([{ id: id(3), name: 'engineering', key: 'eng' }]) } });
     if (query.includes('AbraStates')) return response({ data: { workflowStates: connection(fake.states) } });
     if (query.includes('AbraLabels')) return response({ data: { issueLabels: connection([7, 8].map(n => ({ id: id(n), name: `route-${n}`, team: { id: id(3) } }))) } });
-    if (query.includes('AbraDelegated')) return response({ data: { issues: connection([]) } });
+    if (query.includes('AbraAssignedOrDelegated')) return response({ data: { issues: connection([]) } });
     return response({ data: { ok: true, variables } });
   };
   return fake;
@@ -239,13 +239,13 @@ function wizard(t, { cancelAt = 0, persist = false, multiple = false, existing }
   return { ctx, fake, configPath, path, prompts, notifications, secretDirectory, run: () => setup(ctx, '.pi', { env, fetcher: fake.fetcher, secretDirectory }) };
 }
 
-test('wizard discovers complete team/status/label mappings and multiple registered repositories, saves report-only without admission', async t => {
+test('wizard discovers complete team/status/label mappings and multiple registered repositories, saves pr authority without admission', async t => {
   const f = wizard(t, { multiple: true }); assert.equal(await f.run(), true);
   const saved = configuration(JSON.parse(fs.readFileSync(f.configPath)));
-  assert.equal(saved.authority.mode, 'report'); assert.equal(saved.personaId, id(2)); assert.equal(saved.workspaceId, id(1));
+  assert.equal(saved.authority.mode, 'pr'); assert.equal(saved.personaId, id(2)); assert.equal(saved.workspaceId, id(1));
   assert.deepEqual(saved.teams, base().teams); assert.equal(saved.repositories.length, 2);
   assert.equal(saved.repositories[1].labelId, id(8)); assert.equal(saved.repositories[0].remote, 'https://github.com/example/abra');
-  assert.equal(f.fake.calls.some(c => /mutation|AbraDelegated/.test(c.body)), false);
+  assert.equal(f.fake.calls.some(c => /mutation|AbraAssignedOrDelegated/.test(c.body)), false);
   assert.equal(fs.existsSync(join(f.path, 'data/linear/owner.lock')), false);
   const artifacts = fs.readFileSync(f.configPath, 'utf8') + JSON.stringify(f.notifications) + JSON.stringify(f.prompts);
   assert.equal(artifacts.includes(env.CLIENT_SECRET), false); assert.equal(artifacts.includes('private-access-'), false);
@@ -313,12 +313,25 @@ test('two fresh foreground child processes acquire credentials from consented st
 });
 
 test('wizard preserves legacy workspace/persona and pr authority while migrating credentials', async t => {
-  const legacy = base(); delete legacy.auth; legacy.tokenEnv = 'OLD_TOKEN'; legacy.authority = { mode: 'pr', maxFiles: 2, maxChangedLines: 30 };
+  const legacy = base(); delete legacy.auth; legacy.tokenEnv = 'OLD_TOKEN'; legacy.authority = { mode: 'pr' };
   const f = wizard(t, { existing: legacy }); assert.equal(await f.run(), true);
   const saved = JSON.parse(fs.readFileSync(f.configPath)); assert.deepEqual(saved.authority, legacy.authority);
   assert.equal(saved.tokenEnv, undefined); assert.equal(saved.personaId, legacy.personaId);
   const cancelled = wizard(t, { existing: legacy, cancelAt: 2 }); assert.equal(await cancelled.run(), false);
   assert.deepEqual(JSON.parse(fs.readFileSync(cancelled.configPath)), legacy);
+});
+
+test('wizard explicitly upgrades report-only authority without discarding a reconciled journal', async t => {
+  const existing = { ...base(), authority: { mode: 'report' } };
+  const f = wizard(t, { existing });
+  const store = new Store(f.path, existing);
+  store.acquire('old'); store.save({ version: 2, identity: store.identity, records: [], active: null }); store.release();
+  const select = f.ctx.ui.select;
+  f.ctx.ui.select = async (title, values) => title === 'delivery authority' ? values.find(v => v.startsWith('implementation')) : select(title, values);
+  assert.equal(await f.run(), true);
+  const saved = configuration(JSON.parse(fs.readFileSync(f.configPath)));
+  assert.equal(saved.authority.mode, 'pr');
+  assert.deepEqual(new Store(f.path, saved).load().records, []);
 });
 
 test('wizard rejects changed identity, terminal/missing states and incompatible journal without persistence', async t => {
@@ -366,5 +379,5 @@ test('registered setup command uses native dialogs only and never sends model me
   const f = wizard(t), commands = new Map();
   install({ on: () => {}, registerCommand: (name, command) => commands.set(name, command), registerTool: () => {}, sendUserMessage: () => assert.fail('no model messages'), appendEntry: () => assert.fail('no session secret persistence') }, '.pi', { setup: { env, fetcher: f.fake.fetcher, secretDirectory: f.secretDirectory } });
   await commands.get('abra-linear').handler('setup', f.ctx);
-  assert.equal(fs.existsSync(f.configPath), true); assert.equal(f.fake.calls.some(c => c.body.includes('AbraDelegated')), false);
+  assert.equal(fs.existsSync(f.configPath), true); assert.equal(f.fake.calls.some(c => c.body.includes('AbraAssignedOrDelegated')), false);
 });

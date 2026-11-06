@@ -85,3 +85,43 @@ export class ManagedOwners {
   }
   dispose() { this.unsubscribe(); }
 }
+
+// parent idle is not child completion; native notices can wake a settled parent later.
+export class NativeContinuation {
+  constructor(pi, ctx, request = (method, params) => nativeRequest(pi, method, params)) {
+    this.request = request; this.runs = new Map(); this.fault = false;
+    this.unsubscribe = pi.events.on('subagent:async-started', event => {
+      try {
+        requireValue(event?.lifecycleArtifactVersion === 3 && nonempty(event.id) && [ctx.sessionManager.getSessionId(), ctx.sessionManager.getSessionFile()].includes(event.sessionId) && nonempty(event.asyncDir) && !this.runs.has(event.id), 'unrecognized async start');
+        const asyncDir = realpathSync(event.asyncDir); safePath(asyncDir);
+        this.runs.set(event.id, { asyncDir, sessionId: event.sessionId, consumed: false });
+      } catch { this.fault = true; }
+    });
+  }
+  observeMessage(message) {
+    if (message?.customType !== 'subagent-notify') return;
+    for (const run of message.details?.runs ?? []) {
+      const start = this.runs.get(run.runId);
+      if (start) start.consumed = true;
+    }
+  }
+  async pending() {
+    requireValue(!this.fault, 'async ownership could not be confirmed');
+    const running = [], completed = [];
+    for (const [id, run] of this.runs) {
+      if (run.consumed) continue;
+      // targeted native status reconciles real runner failure; file ages never prove it.
+      const data = await this.request('status', { id });
+      const status = readJson(join(run.asyncDir, 'status.json'));
+      requireValue(data?.details?.runId === id && status.runId === id && status.sessionId === run.sessionId && status.lifecycleArtifactVersion === 3, 'async status could not be confirmed');
+      if (['queued', 'running'].includes(status.state)) running.push(id);
+      else {
+        requireValue(terminal.has(status.state), 'unknown async state');
+        if (!run.consumed) completed.push({ id, state: status.state });
+      }
+    }
+    return { running, completed };
+  }
+  consume(completed) { for (const { id } of completed) this.runs.get(id).consumed = true; }
+  dispose() { this.unsubscribe(); }
+}

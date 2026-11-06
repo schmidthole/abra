@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { configuration, readJson, Store, LinearClient, Connector, ApiError, connectorDiagnostic, requireValue } from './core.mjs';
-import { ManagedOwners } from './managed.mjs';
+import { configuration, readJson, Store, LinearClient, Connector, ApiError, connectorDiagnostic, requireValue, isAutomaticFallbackKey } from './core.mjs';
+import { ManagedOwners, NativeContinuation } from './managed.mjs';
 import { ClientCredentials, resolveCredentials } from './auth.mjs';
 import { setup } from './setup.mjs';
 import { WatchFailure, failureCode, diagnosticText, requireWatch } from './diagnostics.mjs';
@@ -16,6 +16,15 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let settled = false;
   let settingUp = false;
   let freshHandoff;
+  let continuation;
+  let reportingRequested = false;
+  let cancellationReportingRequested = false;
+  let aborted = false;
+  let activityVersion = 0;
+  let settlementVersion = 0;
+  let settlementToken;
+  let settledReady = false;
+  let fallbackController;
   const setupController = new AbortController();
   const emitWatch = (ctx, request, state, extra = {}) => {
     pi.appendEntry('abra-linear-watch', { version: 1, nonce: watch.nonce, request, session: ctx.sessionManager.getSessionId(), owner: connector.store.owner, state, issue: connector.active?.id ?? null, task: connector.active?.taskId ?? null, ...extra });
@@ -29,8 +38,9 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     requireValue(!config.auth?.credentialsFile?.startsWith(ctx.cwd + '/'), 'credential files must be outside checkout');
     const store = new Store(ctx.cwd, config);
     const api = dependencies.api ?? new LinearClient(config, config.auth ? new ClientCredentials(config) : process.env[config.tokenEnv]);
-    return new Connector({ root: ctx.cwd, config, store, api, ...dependencies, host: {
+    const built = new Connector({ root: ctx.cwd, config, store, api, ...dependencies, host: {
       idle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
+      afterControl: () => checkSettled(ctx),
       send: async prompt => {
         if (watch) emitWatch(ctx, 'start', 'admitted');
         pi.setSessionName(`abra linear coordinator`); pi.sendUserMessage(prompt);
@@ -42,6 +52,9 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       steer: async message => { pi.sendUserMessage(message, { deliverAs: 'steer' }); },
       notify: message => { if (ctx.hasUI) ctx.ui.notify(message, 'warning'); },
     } });
+    continuation?.dispose();
+    continuation = new NativeContinuation(pi, ctx, dependencies.nativeRequest);
+    return built;
   };
   pi.on('session_start', async (event, ctx) => {
     const entries = ctx.sessionManager.getBranch();
@@ -62,6 +75,11 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       const [command, ...rest] = args.trim().split(/\s+/);
       try {
         requireValue(!settingUp, 'finish or cancel the setup dialog first');
+        if (command === 'settled') {
+          requireValue(settlementToken && rest[0] === settlementToken && connector?.active?.session === ctx.sessionManager.getSessionId(), 'foreign or stale settlement control');
+          settlementToken = undefined; settledReady = true;
+          return;
+        }
         if (command === 'setup') {
           requireValue(!watch && !connector?.active && (!connector || connector.mode === 'off'), 'stop and reconcile connector ownership before setup');
           settingUp = true;
@@ -181,7 +199,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   });
   pi.registerTool({
     name: 'abra_linear_checkpoint', label: 'linear checkpoint',
-    description: 'bind the real tasks-axi task and immutable source.json with original requestedDelivery (report or pr) before dispatch, then report redacted approach/progress/checks or evidence-backed review/blocked. stable key is immutable; review requires structured delivery evidence; reports never substitute for code delivery. no raw logs/reasoning. summaries <=16000 characters; public report <=12000 bytes.',
+    description: 'bind the real tasks-axi task and immutable source.json with original requestedDelivery (report or pr) before dispatch, then report concrete approach/progress/checks, completed PR/report for review, or an actual blocker and next action. stable key is immutable; review requires structured delivery evidence; reports never substitute for code delivery. no raw logs/reasoning. summaries <=16000 characters; public report <=12000 bytes.',
     executionMode: 'sequential',
     parameters: {
       type: 'object', additionalProperties: false,
@@ -214,21 +232,81 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   pi.on('session_before_switch', prevent);
   pi.on('session_before_fork', prevent);
   pi.on('session_before_tree', prevent);
-  pi.on('agent_start', () => { settled = false; });
+  pi.on('agent_start', () => {
+    settled = false; settledReady = false; settlementToken = undefined; activityVersion++;
+    fallbackController?.abort();
+  });
   pi.on('tool_execution_start', event => watch?.owners.observeTool(event));
   pi.on('tool_execution_end', event => watch?.owners.observeTool(event));
-  pi.on('agent_settled', async () => {
-    settled = true;
-    if (!connector?.active || connector.disposed || connector.active.terminal || connector.active.waiting || connector.active.dispatch !== 'sent') return;
-    // settle proves neither delivery nor stopped subagents; publish a truthful fallback.
-    await connector.serial(async () => {
-      connector.pause();
-      const issue = await connector.api.issue(connector.active.id, connector.controller.signal);
-      const team = connector.team(issue);
-      if (!team || ['completed', 'canceled'].includes(issue.state.type)) return;
-      await connector.publish('settled-without-terminal', 'blocked: coordinator settled without an evidence-backed terminal checkpoint. next action: inspect task, checks, delivery receipts and surviving native owners; no verified success inferred.', team.blocked, connector.controller.signal);
-      connector.active.terminal = 'blocked'; connector.persist();
-    });
+  pi.on('message_start', event => {
+    continuation?.observeMessage(event.message);
+    if (event.message?.customType === 'subagent-notify') {
+      activityVersion++; fallbackController?.abort();
+    }
   });
-  pi.on('session_shutdown', async () => { setupController.abort(); watch?.owners.dispose(); await connector?.dispose(); });
+  const checkSettled = async ctx => {
+    if (!settledReady || !settled || !connector?.active || connector.disposed || connector.active.terminal || connector.active.waiting || connector.active.dispatch !== 'sent' || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+    const version = activityVersion, settlement = settlementVersion, active = connector.active;
+    const fallbacks = active.publications.filter(p => isAutomaticFallbackKey(p.key));
+    const canceled = fallbacks.some(p => p.canceled);
+    const isCurrent = () => settledReady && settled && version === activityVersion && connector.active === active && !active.terminal && !active.waiting && !connector.disposed && ctx.isIdle() && !ctx.hasPendingMessages();
+    let pending, uncertain = false;
+    try { pending = await continuation.pending(); } catch { uncertain = true; }
+    if (!isCurrent()) return;
+    if (!aborted && !uncertain && !connector.active.halted) {
+      if (pending.running.length) return;
+      if (pending.completed.length) {
+        // allow the native notifier to deliver first; control polls repair a missing wake once.
+        continuation.consume(pending.completed);
+        settled = false;
+        pi.sendUserMessage(`native work has finished: ${JSON.stringify(pending.completed)}. inspect these exact native results and the saved task, then continue the original request. do not relaunch work whose outcome is uncertain. report actual findings/test results here and on linear; if a run failed or returned empty output, explain the concrete failure and next action rather than claiming the task is impossible.`);
+        return;
+      }
+      if (!reportingRequested) {
+        reportingRequested = true; settled = false;
+        pi.sendUserMessage('continue the original issue request from the saved task and results. no async work remains pending. finish the requested PR/report and publish kind review with delivery/check evidence, ask a specific question with kind waiting, or publish kind blocked with the actual failure and a useful next action. do not stop with only a chat summary or invent a blocker.');
+        return;
+      }
+      if (canceled && !cancellationReportingRequested) {
+        cancellationReportingRequested = true; settled = false;
+        pi.sendUserMessage('new activity interrupted an automatic status update. continue the original issue from the saved task and actual native results; finish reporting the PR/report, a specific question, or the concrete failure and next action. preserve canceled publication receipts and reconcile any uncertain requests before further status/unassignment changes. do not replay canceled checkpoints or relaunch uncertain work. this is the final reporting reminder.');
+        return;
+      }
+    }
+    if (fallbacks.some(p => p.comment === 'intent' || p.state === 'intent' || p.unassign === 'intent')) return;
+    let attempt = 1, key = 'settled-without-terminal';
+    while (fallbacks.some(p => p.key === key && p.canceled)) key = `settled-without-terminal-${++attempt}`;
+    const cancelFallback = () => {
+      connector.cancelFallbackPublication(key);
+      // a queued wake needs a new settlement; do not discard a newer settled epoch.
+      if (settlementVersion === settlement) { settled = false; settledReady = false; settlementToken = undefined; }
+    };
+    const issue = await connector.api.issue(connector.active.id, connector.controller.signal);
+    const team = connector.team(issue);
+    if (!isCurrent()) return;
+    if (!team || ['completed', 'canceled'].includes(issue.state.type)) return;
+    const reason = aborted ? 'the coordinator was interrupted before delivering a PR or report' : uncertain ? 'abra could not confirm the status of its background work' : 'the coordinator stopped without delivering a PR or report, even after a request to finish reporting';
+    const controller = new AbortController(); fallbackController = controller;
+    try {
+      const publication = await connector.publish(key, `blocked: ${reason}. next action: reopen the saved task and inspect the worker results and any running workers before retrying. no verified delivery is available; this does not mean the requested change is impossible.`, team.blocked, AbortSignal.any([connector.controller.signal, controller.signal]), isCurrent);
+      if (!publication || !isCurrent()) { cancelFallback(); return; }
+      connector.pause(); active.terminal = 'blocked'; active.waiting = false; connector.persist();
+    } catch (error) {
+      // cancellation never erases a request that may already have reached linear.
+      if (!controller.signal.aborted) throw error;
+      cancelFallback();
+    } finally {
+      if (fallbackController === controller) fallbackController = undefined;
+    }
+  };
+  pi.on('agent_settled', (event) => {
+    settled = true; settledReady = false; aborted = event?.aborted === true; activityVersion++; settlementVersion++;
+    fallbackController?.abort();
+    if (!connector?.active || connector.disposed || connector.active.terminal) return;
+    settlementToken = randomUUID();
+    // this command only arms control polling after every settled handler has returned.
+    // it must not await publication: later deferred native wakes still need to drain.
+    pi.sendUserMessage(`/abra-linear settled ${settlementToken}`, { expandPromptTemplates: true });
+  });
+  pi.on('session_shutdown', async () => { setupController.abort(); fallbackController?.abort(); continuation?.dispose(); watch?.owners.dispose(); await connector?.dispose(); });
 }

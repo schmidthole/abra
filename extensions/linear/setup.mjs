@@ -46,10 +46,10 @@ export async function setup(ctx, configDirectory = '.pi', { fetcher = fetch, env
   const store = new Store(ctx.cwd, existing ?? {});
   requireValue(!store.load().active && !fs.existsSync(store.lock), 'reconcile active connector/native ownership before setup');
   store.acquire(ctx.sessionManager.getSessionId());
-  let credentials, provider, secretPath, temporary, stage = 'prerequisites';
+  let credentials, provider, secretPath, temporary, previousJournal, stage = 'prerequisites';
   try {
-    required(await ui.confirm('linear setup prerequisites', `workspace admin: create/edit your own oauth app at https://linear.app/settings/api/applications/new and enable client credentials tokens. no redirect server, webhook or native agent-session integration is supplied. use a dedicated app with exactly ${SCOPES.join(',')}; requesting different scopes revokes its existing app tokens. restrict app team access in linear after initial token creation (initially all public teams). pre-create three distinct nonterminal states per team: working must be started. register repositories with bin/worktree.py. load client id and secret into environment via your secret manager before launching pi; never paste secrets into chat, commands or these dialogs. continue with read-only discovery and token acquisition only?`));
-    if (existing) required(await ui.confirm('replace existing connector configuration?', 'nothing is overwritten until final confirmation. identity pins and authority ceiling are preserved; existing journal identity must remain compatible. setup never starts polling.'));
+    required(await ui.confirm('linear setup prerequisites', `workspace admin: create/edit your own oauth app at https://linear.app/settings/api/applications/new and enable client credentials tokens. no redirect server, webhook or native agent-session integration is supplied. use a dedicated app with exactly ${SCOPES.join(',')}; requesting different scopes revokes its existing app tokens. restrict app team access in linear after initial token creation (initially all public teams). pre-create three distinct nonterminal states per team: working must be started; blocked handoff must map to todo (unstarted). register repositories with bin/worktree.py. load client id and secret into environment via your secret manager before launching pi; never paste secrets into chat, commands or these dialogs. continue with read-only discovery and token acquisition only?`));
+    if (existing) required(await ui.confirm('replace existing connector configuration?', 'nothing is overwritten until final confirmation. identity pins are preserved; authority can be explicitly selected below; existing journal identity must remain compatible. setup never starts polling.'));
     stage = 'credential references';
     const source = existing?.auth ? required(await ui.select('credential source', ['keep saved credential references', 'new environment references'])) : 'new environment references';
     let auth;
@@ -83,7 +83,7 @@ export async function setup(ctx, configDirectory = '.pi', { fetcher = fetch, env
         const states = (await discover(ui, signal => api.pages(statesQuery, { team: team.id }, d => d.workflowStates, signal))).filter(s => s.team?.id === team.id && ['backlog', 'unstarted', 'started'].includes(s.type));
         const saved = { id: team.id };
         for (const key of ['working', 'inReview', 'blocked']) {
-          saved[key] = (await choose(ui, `${display(team.name)}: select ${key === 'inReview' ? 'in-review' : key} state`, states.filter(s => !Object.values(saved).includes(s.id) && (key !== 'working' || s.type === 'started')), s => `${s.name} (${s.type})`)).id;
+          saved[key] = (await choose(ui, `${display(team.name)}: select ${key === 'inReview' ? 'in-review' : key === 'blocked' ? 'todo (blocked handoff)' : key} state`, states.filter(s => !Object.values(saved).includes(s.id) && (key !== 'working' || s.type === 'started') && (key !== 'blocked' || s.type === 'unstarted')), s => `${s.name} (${s.type})`)).id;
         }
         teams.push(saved);
       }
@@ -92,12 +92,19 @@ export async function setup(ctx, configDirectory = '.pi', { fetcher = fetch, env
       if (repositories.length === availableRepos.length) break;
       if (required(await ui.select('repositories', ['finish selection', 'add another repository'])) === 'finish selection') break;
     }
-    const { tokenEnv: _legacy, ...preserved } = existing ?? { version: 1, authority: { mode: 'report' } };
-    const saved = configuration({ ...preserved, auth, workspaceId: config.workspaceId, personaId: config.personaId, repositories, teams });
+    stage = 'delivery authority';
+    const choice = required(await ui.select('delivery authority', [
+      ...(existing ? ['keep existing authority'] : []),
+      'implementation and pr delivery (no merge or deploy)',
+      'investigation reports only (no implementation)',
+    ]));
+    const authority = choice.startsWith('keep') ? existing.authority : choice.startsWith('investigation') ? { mode: 'report' } : { mode: 'pr' };
+    const { tokenEnv: _legacy, ...preserved } = existing ?? { version: 1 };
+    const saved = configuration({ ...preserved, authority, auth, workspaceId: config.workspaceId, personaId: config.personaId, repositories, teams });
     // validate before final confirmation and again after a private file reference is allocated.
     stage = 'final validation and save';
     await discover(ui, signal => new LinearClient(saved, provider, fetcher).validate(signal));
-    const summary = `workspace/app pinned; ${repositories.map(r => r.name).join(', ')}; ${teams.length} team(s); authority unchanged: ${JSON.stringify(saved.authority)}. all eligible delegated issues in this scope may be admitted only on a later explicit start. ${persistSecret ? 'consent: store client id and secret as plaintext in a user-owned 0600 file under a 0700 directory outside the checkout. access tokens stay in memory only.' : 'keep credential references only; environment references must be populated by your secret manager on every launch, including foreground watch.'} save configuration without starting?`;
+    const summary = `workspace/app pinned; ${repositories.map(r => r.name).join(', ')}; ${teams.length} team(s); authorized delivery: ${JSON.stringify(saved.authority)}. all eligible delegated issues in this scope may be admitted only on a later explicit start. ${persistSecret ? 'consent: store client id and secret as plaintext in a user-owned 0600 file under a 0700 directory outside the checkout. access tokens stay in memory only.' : 'keep credential references only; environment references must be populated by your secret manager on every launch, including foreground watch.'} save configuration without starting?`;
     required(await ui.confirm('save linear setup?', summary));
     signal?.throwIfAborted();
     requireValue(ctx.isProjectTrusted() && ctx.isIdle() && !ctx.hasPendingMessages(), 'trust/idle state changed during setup');
@@ -112,13 +119,20 @@ export async function setup(ctx, configDirectory = '.pi', { fetcher = fetch, env
     configuration(saved);
     // old correlations are never migrated, deleted or silently rebound to changed scope.
     stage = 'existing journal compatibility (preserve and reconcile before any manual archival)';
-    new Store(ctx.cwd, saved).load();
+    try { new Store(ctx.cwd, saved).load(); }
+    catch (error) {
+      if (!existing || JSON.stringify(existing.authority) === JSON.stringify(saved.authority)) throw error;
+      // explicit authority selection may update only a fully released journal.
+      previousJournal = store.load();
+      store.reconfigureAuthority(saved);
+    }
     temporary = `${path}.${randomUUID()}.tmp`;
     fs.writeFileSync(temporary, JSON.stringify(saved, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-    fs.renameSync(temporary, path); temporary = null; secretPath = null;
+    fs.renameSync(temporary, path); temporary = null; secretPath = null; previousJournal = null;
     ctx.ui.notify('linear setup saved; polling is off. use /abra-linear start only when ready to admit configured delegations.', 'info');
     return true;
   } catch (error) {
+    if (previousJournal) store.save(previousJournal);
     ctx.ui.notify(error instanceof Cancelled ? 'linear setup cancelled; existing configuration unchanged; no polling started. acquired app tokens expire normally; revoke in linear if required.' : `linear setup blocked during ${stage}; configuration unchanged. check docs/linear-polling.md, credential references, app access, distinct nonterminal states, registry and existing journal compatibility locally. no automatic retry, scope expansion or reset.`, error instanceof Cancelled ? 'info' : 'error');
     return false;
   } finally {
