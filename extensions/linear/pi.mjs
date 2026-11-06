@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { configuration, readJson, Store, LinearClient, Connector, requireValue } from './core.mjs';
 import { ManagedOwners } from './managed.mjs';
+import { ClientCredentials, resolveCredentials } from './auth.mjs';
+import { setup } from './setup.mjs';
 
 const marker = 'abra-linear-dedicated';
 const result = message => ({ content: [{ type: 'text', text: message }], details: {} });
@@ -11,6 +13,8 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let dedicated = false;
   let watch;
   let settled = false;
+  let settingUp = false;
+  const setupController = new AbortController();
   const emitWatch = (ctx, request, state, extra = {}) => {
     pi.appendEntry('abra-linear-watch', { version: 1, nonce: watch.nonce, request, session: ctx.sessionManager.getSessionId(), owner: connector.store.owner, state, issue: connector.active?.id ?? null, task: connector.active?.taskId ?? null, ...extra });
   };
@@ -20,8 +24,9 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   };
   const build = ctx => {
     const config = load(ctx);
+    requireValue(!config.auth?.credentialsFile?.startsWith(ctx.cwd + '/'), 'credential files must be outside checkout');
     const store = new Store(ctx.cwd, config);
-    const api = dependencies.api ?? new LinearClient(config, process.env[config.tokenEnv]);
+    const api = dependencies.api ?? new LinearClient(config, config.auth ? new ClientCredentials(config) : process.env[config.tokenEnv]);
     return new Connector({ root: ctx.cwd, config, store, api, ...dependencies, host: {
       idle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
       send: async prompt => {
@@ -46,10 +51,18 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     }
   });
   pi.registerCommand('abra-linear', {
-    description: 'local linear start | pause | status | poll | stop | resume | release <stopped-owner evidence> | reconcile <receipt.json>',
+    description: 'local linear setup | start | pause | status | poll | stop | resume | release <stopped-owner evidence> | reconcile <receipt.json>',
     handler: async (args, ctx) => {
       const [command, ...rest] = args.trim().split(/\s+/);
       try {
+        requireValue(!settingUp, 'finish or cancel the setup dialog first');
+        if (command === 'setup') {
+          requireValue(!watch && !connector?.active && (!connector || connector.mode === 'off'), 'stop and reconcile connector ownership before setup');
+          settingUp = true;
+          try { await setup(ctx, configDirectory, { ...dependencies.setup, signal: setupController.signal }); }
+          finally { settingUp = false; }
+          return;
+        }
         if (command === 'watch-start') {
           const [nonce] = rest;
           const config = load(ctx);
@@ -90,7 +103,12 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         if (command === 'start') {
           requireValue(ctx.isIdle() && !ctx.hasPendingMessages(), 'wait for current work and queued messages; never inject into a busy session');
           const config = load(ctx);
-          requireValue(process.env[config.tokenEnv] || dependencies.api, 'credential environment reference is not populated');
+          if (!dependencies.api) {
+            if (config.auth) {
+              try { resolveCredentials(config.auth); }
+              catch { throw new Error('client credential references unavailable; run setup or check private storage locally'); }
+            } else requireValue(process.env[config.tokenEnv], 'credential environment reference is not populated');
+          }
           const store = new Store(ctx.cwd, config);
           requireValue(!store.load().active && !fs.existsSync(store.lock), 'existing connector/native ownership must be reconciled before start');
           requireValue(ctx.hasUI && await ctx.ui.confirm('start dedicated linear task session?', 'saves this session and opens a clean coordinator session; polls while pi is alive, admits only one ticket. next ticket needs another explicit /start. configured delegation grants only the saved authority ceiling. no merge/deploy/close.'), 'start not confirmed');
@@ -123,10 +141,10 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         } else if (command === 'reconcile') {
           requireValue(ctx.hasUI && await ctx.ui.confirm('apply explicit publication reconciliation?', 'inspect remote comments/status and any in-flight requests first. not-applied permits a later explicit retry; never assert this from a missing comment alone.'), 'reconciliation not confirmed');
           await connector.reconcile(readJson(rest.join(' ')));
-        } else throw new Error('usage: /abra-linear start|pause|status|poll|stop|resume|release <evidence>|reconcile <absolute receipt.json>');
+        } else throw new Error('usage: /abra-linear setup|start|pause|status|poll|stop|resume|release <evidence>|reconcile <absolute receipt.json>');
         if (ctx.hasUI) ctx.ui.notify(JSON.stringify(connector.status()), 'info');
       } catch (error) {
-        const detail = error instanceof Error ? error.message.split('\n')[0].slice(0, 300) : 'unknown failure';
+        const detail = command === 'setup' ? 'setup requires trusted idle terminal, valid configuration and reconciled ownership; inspect locally' : error instanceof Error ? error.message.split('\n')[0].slice(0, 300) : 'unknown failure';
         if (watch && connector) emitWatch(ctx, rest[1] ?? 'start', 'uncertain', { diagnostic: connector.redacted(detail) });
         if (ctx.hasUI) ctx.ui.notify(`linear command blocked/failed: ${connector?.redacted(detail) ?? detail}. no automatic retry or reset`, 'error');
       }
@@ -163,7 +181,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       return { action: 'handled' };
     }
   });
-  const prevent = () => connector?.active ? { cancel: true } : undefined;
+  const prevent = () => settingUp || connector?.active ? { cancel: true } : undefined;
   pi.on('session_before_switch', prevent);
   pi.on('session_before_fork', prevent);
   pi.on('session_before_tree', prevent);
@@ -183,5 +201,5 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       connector.active.terminal = 'blocked'; connector.persist();
     });
   });
-  pi.on('session_shutdown', async () => { watch?.owners.dispose(); await connector?.dispose(); });
+  pi.on('session_shutdown', async () => { setupController.abort(); watch?.owners.dispose(); await connector?.dispose(); });
 }

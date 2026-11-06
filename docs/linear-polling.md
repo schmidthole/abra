@@ -7,89 +7,128 @@ can open fresh persisted sessions for successive tasks after safe handoff. nothi
 starts on extension load/reload. machine sleep pauses polling; native async owners
 can survive pi exit. no unattended lifetime or automatic recovery is promised.
 
-## app onboarding (operator setup, not performed by this build)
+## interactive setup and automatic authentication
 
-1. a workspace admin creates an OAuth application in Settings → API → OAuth
-   applications ([creation page](https://linear.app/settings/api/applications/new)).
-   choose its name/icon; keep client id/secret in your existing secret manager.
-   use an existing trusted OAuth client with the exact registered redirect URI;
-   this connector supplies no callback server. ongoing polling needs no endpoint.
-2. authorize with **`actor=app`**, not `actor=user` or deprecated `application`.
-   request `read`, `issues:create` (documented issue creation/update access),
-   `comments:create` and `app:assignable`. `app:mentionable` is unnecessary; mentions
-   do not trigger this connector. broad `write`/`admin` access is not required.
-   restrict installed app team access as well as the local allowlists. validate
-   current scope sufficiency before real work; an access error is a blocker, not
-   permission to broaden scopes automatically.
-3. your OAuth client constructs the authorization URL, with percent-encoded values:
+requires node 24+, an installed pi with documented native dialog/session APIs, a
+trusted abra checkout and a workspace admin. no live credentials are needed for
+local tests. `/abra-linear setup` runs in **interactive terminal mode only**, not
+RPC/print/model tools. it never polls issues, admits work or mutates Linear issues.
 
-   ```text
-   https://linear.app/oauth/authorize?client_id=CLIENT_ID&redirect_uri=REGISTERED_REDIRECT_URI&response_type=code&actor=app&scope=read,issues:create,comments:create,app:assignable&state=SECURE_RANDOM_STATE
+1. create/edit your own OAuth app at Settings → API → OAuth applications
+   ([creation page](https://linear.app/settings/api/applications/new)); enable
+   **client credentials tokens**. choose a recognizable app name/icon. use a
+   dedicated app whose client-credentials tokens all use exactly `read`,
+   `issues:create`, `comments:create`, `app:assignable`. do not request broad
+   `write`/`admin`, `app:mentionable` or extra scopes. Linear revokes existing app
+   tokens when client-credentials scopes differ; setup explicitly asks you to
+   acknowledge this prerequisite before acquiring a token. no scope upgrades,
+   authorization callback, webhook server or native AgentSession implementation
+   are provided. this is the existing delegation/comment/status polling connector.
+2. register actual repositories with `bin/worktree.py` in this checkout and verify
+   path/origin/base/instructions. the wizard reads `data/repos.json` without editing
+   it, and lets you choose one or multiple repositories by name. each needs a
+   unique existing routing label in Linear (global or belonging to its team).
+   create three **distinct nonterminal** states per team first: working must have
+   type `started`; in-review/blocked may be `backlog`, `unstarted` or `started`.
+   an authorized team admin must create missing states/labels; the wizard only reads.
+3. supply client id/secret using your secret manager's environment injection when
+   launching pi. the default reference names are `ABRA_LINEAR_CLIENT_ID` and
+   `ABRA_LINEAR_CLIENT_SECRET`; setup asks for **names only, never secret values**.
+   alternatively, from a private external bash terminal (not pi chat or model tools),
+   use masked shell input, never literal secrets in commands/history:
+
+   ```bash
+   set +x
+   IFS= read -r -p 'linear client id: ' ABRA_LINEAR_CLIENT_ID
+   IFS= read -r -s -p 'linear client secret: ' ABRA_LINEAR_CLIENT_SECRET
+   printf '\n'
+   export ABRA_LINEAR_CLIENT_ID ABRA_LINEAR_CLIENT_SECRET
+   pi
    ```
 
-   generate/verify cryptographically random state. prefer PKCE `S256`, retaining
-   the verifier only in that client. exchange the returned code at
-   `POST https://api.linear.app/oauth/token`, form fields `grant_type=authorization_code`,
-   `code`, identical `redirect_uri`, `client_id`, `client_secret`; PKCE also supplies
-   `code_verifier` and makes the secret optional. save access/refresh tokens, expiry
-   and scopes securely, never in tickets/config/prompts/shell history.
-4. the operator's client owns refresh (`grant_type=refresh_token`, `refresh_token`,
-   client authentication or PKCE client id). authorization-code access tokens
-   currently expire after about 24 hours; retain rotated refresh tokens. the
-   documented 30-minute OAuth refresh replay grace does not authorize replaying
-   uncertain issue mutations. alternatively, your own OAuth app may enable client
-   credentials tokens: request `grant_type=client_credentials` and scopes with
-   client authentication. these currently last 30 days without refresh, initially
-   access all public teams, and should be acquired per run with restricted teams.
-   the connector neither acquires nor refreshes credentials and captures its token
-   when built: stop/reconcile before restarting with new credentials.
-5. use the installed app token for authorized read-only GraphQL setup queries at
-   `https://api.linear.app/graphql` with `Authorization: Bearer <access token>`:
+   use a trusted terminal without recording and trusted extensions/tools. do not
+   paste credentials into `/abra-linear`, chat, tickets, config, logs or reports.
+   if launching through another environment/terminal/service, inject the references
+   there too; exporting into one shell does not update an already-running pi.
+4. run `/abra-linear setup`. acknowledge prerequisites, choose references, then
+   either keep secret-manager/env references or explicitly consent at final save
+   to **plaintext local credential storage**. the latter writes only client
+   credentials to a new random `~/.abra-linear/<uuid>.json`, outside the checkout,
+   with POSIX file mode `0600` and directory `0700`, owned by your user; symlinks, hardlinks
+   and broad modes reject. it never overwrites another credential file. this is
+   not encryption or an OS keychain. access tokens are never persisted. cancelling
+   any dialog (escape), including the discovery progress/cancel dialog, leaves
+   existing config unchanged and removes any newly allocated secret file on failed
+   save. token issuance itself cannot be undone by cancelling: acquired tokens
+   expire normally; revoke in Linear if required.
+5. read-only, fully paginated discovery shows app/workspace identity, teams, states
+   and labels. verify the displayed workspace **and app persona** before confirming
+   pins. `viewer.id` is the workspace-specific app user, not OAuth client id or an
+   installing admin. client-credentials grants are app-actor tokens; initial access
+   covers **all public teams**. restrict the app's team access in Linear's app
+   details page before starting work, in addition to the wizard's local allowlists.
+   select each repository's team, three states and routing label without copying
+   UUIDs. existing identity pins cannot change through setup. existing authority
+   and watch opt-in are preserved; fresh config is **report-only**, without watch
+   opt-in. final confirmation summarizes saved scope and storage consent.
+6. setup saves gitignored `.pi/abra-linear.json` only after final confirmation;
+   existing config requires an additional replacement confirmation. no polling
+   starts. active ownership/locks, untrusted/busy sessions or incompatible journal
+   identity block setup. an existing journal is never migrated, reset or deleted;
+   changed configuration may require manual preservation/archival **only after**
+   all old owners and receipts have been reconciled (see recovery below). setup
+   cannot rotate identity or expand authority. no work may start during setup.
+7. only when ready, `/abra-linear start` opens the dedicated session after a
+   separate admission confirmation. delegate disposable report-only issues to the
+   **app**, verifying `delegate.id`, not human `assignee.id`. a local token/setup
+   check is not a reason to admit real work. see the smoke-check guidance below.
 
-   ```graphql
-   query AbraIdentity { viewer { id name } organization { id name } }
-   query AbraTeams($after: String) {
-     teams(first: 100, after: $after) {
-       nodes { id name key } pageInfo { hasNextPage endCursor }
-     }
-   }
-   query AbraLabels($after: String) {
-     issueLabels(first: 100, after: $after) {
-       nodes { id name team { id } } pageInfo { hasNextPage endCursor }
-     }
-   }
-   query AbraStates($team: ID!, $after: String) {
-     workflowStates(first: 100, after: $after, filter: {team: {id: {eq: $team}}}) {
-       nodes { id name type team { id } } pageInfo { hasNextPage endCursor }
-     }
-   }
-   ```
+### credential lifecycle and legacy compatibility
 
-   paginate using `endCursor` until `hasNextPage=false`. `viewer.id` is the
-   workspace-specific **app user** (`personaId`), not OAuth client/application id
-   or installing admin. `organization.id` is `workspaceId`. record exact team,
-   repository-routing label and three distinct nonterminal status UUIDs. working
-   must be `started`; in-review/blocked may be `backlog`, `unstarted` or `started`.
-   never guess states by name or reuse completed/canceled. an authorized team
-   admin must create/select a blocked state if absent.
-6. delegate issues to the app in Linear's assignment UI, verifying `delegate.id`,
-   not human `assignee.id`; retain a human assignee for accountability. apps cannot
-   be project members/leads. revoke in workspace app settings or with
-   `POST https://api.linear.app/oauth/revoke`, form `token` and optional
-   `token_type_hint=access_token|refresh_token` (not legacy fields). secret rotation
-   alone does not revoke previously granted access/refresh tokens, though it
-   invalidates client-credentials tokens. reconcile owners after any access loss.
+client credentials are exchanged at `POST https://api.linear.app/oauth/token`
+using form-encoded `grant_type=client_credentials`, `client_id`, `client_secret`
+and the fixed comma-separated scopes above. returned scopes must match exactly.
+each new connector/foreground launcher child acquires its own in-memory token;
+Linear currently documents a 30-day lifetime, with no refresh token. requests use
+expiry from the response and renew **before** expiry (five-minute margin, or 10%
+for short lifetimes), on the next polling/API request. normal live polling provides
+proactive renewal without restarting pi. concurrent callers share one acquisition
+and identity check; cancelled callers do not cancel other waiters, but cancelling
+all waiters/shutdown aborts acquisition. token requests have bounded deadlines and
+no automatic retry. every new token must match the pinned workspace/app before
+any issue request. no timer/service runs while the connector is off; a sleeping or
+stopped process cannot renew. after wake the next request renews before use.
 
-Linear's native agents guide recommends webhooks/agent-session activities. this
-connector deliberately uses public issue delegation, ordinary comments and issue
-states instead, not that native protocol. leave webhook subscriptions off. if the
-current installation UI requires an endpoint/native protocol, stop and validate
-with the operator/Linear; do not invent a fake endpoint. onboarding/scopes/polling-only
-installation were not live-tested. public references:
-[agents](https://linear.app/developers/agents),
-[OAuth](https://linear.app/developers/oauth-2-0-authentication),
+HTTP/GraphQL authentication failure invalidates the cached token, pauses admission
+and halts active work for local owner reconciliation; it never blindly retries an
+uncertain issue/comment/status mutation. explicit later reads can acquire again,
+but renewing credentials does not resume halted work. revoked credentials, changed
+identity/scopes or unavailable access fail closed, without broadening permissions.
+secret rotation invalidates client-credentials tokens; reconcile work before
+rotation/restart. revoke via workspace app settings (or Linear's documented revoke
+endpoint), not by deleting the local journal. old consented credential files are
+not automatically removed on reconfiguration; remove them manually only when no
+process/config still uses them.
+
+`docs/linear.example.json` shows environment-reference client credentials for
+manual inspection, not a second setup requirement. durable private-file mode saves
+`"auth": {"credentialsFile": "/absolute/private/path/<uuid>.json"}` instead.
+keep `tokenEnv` **or** `auth`, never both. existing version-1 `"tokenEnv":
+"ABRA_LINEAR_TOKEN"` configs still work unchanged with operator-managed tokens;
+legacy tokens are not acquired/renewed automatically. rerun setup with client
+references to migrate, preserving existing pins/authority. no access/refresh token
+is requested through the UI, sent to the model, written to config or placed in
+process arguments. secret references/files remain accessible to trusted code with
+your OS permissions; this is not a sandbox against malicious tools/extensions.
+
+Linear's current native [agents](https://linear.app/developers/agents) guide instead
+recommends webhooks and AgentSession activities; this connector deliberately does
+not implement that protocol. do not invent a fake webhook endpoint if installation
+requires it; validate your polling-only app with the operator/Linear. references:
+[OAuth/client credentials](https://linear.app/developers/oauth-2-0-authentication),
 [app actors](https://linear.app/developers/oauth-actor-authorization),
-[GraphQL](https://linear.app/developers/graphql).
+[GraphQL](https://linear.app/developers/graphql). documentation inspected during this
+build; no live app provisioning/authentication certified.
 
 ## configure and start
 
@@ -97,11 +136,11 @@ requires node 24+, pi's documented session replacement/settled/RPC APIs and a tr
 abra checkout. pi discovers `.pi/extensions/abra-linear/index.ts`; no npm dependency
 installation is needed. inspect your installed harness docs and agent tool profiles.
 
-- register actual repositories with `bin/worktree.py`; confirm path/origin/base and
-  project instructions. copy `docs/linear.example.json` to gitignored
-  `.pi/abra-linear.json` and replace **every** example value.
-- `tokenEnv` names an environment variable supplied through your secret mechanism,
-  not a token/command. start validates viewer/workspace and all paginated states.
+- use `/abra-linear setup` above, or manually populate **every** field in
+  `docs/linear.example.json` and save as gitignored `.pi/abra-linear.json`.
+- `auth` references client credentials, never secret literals or commands; legacy
+  `tokenEnv` still references an operator-managed token environment variable. start
+  validates viewer/workspace and all paginated states before any admission.
 - each configured repository maps one routing label UUID and team to its registered
   name/path, GitHub remote and base. only nonterminal issues delegated to this app
   in an allowlisted team with exactly one matching label are eligible; ambiguous
@@ -120,6 +159,7 @@ and opens a clean dedicated session; admission consumes that session once. contr
 
 | command | behavior |
 | --- | --- |
+| `setup` | interactive read-only configuration wizard; never starts polling or admits work |
 | `status` | show mode, issue/dispatch, errors, terminal and pending receipts; off is not stopped-owner proof |
 | `pause` | stop admission; active control polling continues |
 | `poll` | serialized explicit poll while enabled, not redispatch |
@@ -302,11 +342,13 @@ malformed/foreign/incompatible/symlink/leftover-temporary evidence rejects uncha
 
 extensions/tools share OS permissions; worktrees/prompts are not containment. use
 suitable report-only harness permissions and never expose broad credentials to
-untrusted work. redaction removes the connector token, common secret patterns and
+untrusted work. redaction removes all session-acquired connector tokens/client secrets, common secret patterns and
 home paths, not arbitrary confidential content; prepare public summaries carefully.
 
 `make format` and `make test` cover baseline worktrees plus fake GraphQL/pi/native
-boundaries and harmless RPC subprocesses: dedupe, scope/control, cancellation,
+boundaries and harmless RPC subprocesses: credential acquisition/proactive renewal,
+revocation/failure, single-flight/cancellation, secret storage/redaction, wizard
+cancellation/persistence/legacy migration, dedupe, scope/control, cancellation,
 report/delivery gates, uncertain receipts, exact native proofs, session handoffs and
 failure/interrupt/lock handling. no live Linear/OAuth/pi model/PR/CI behavior is
 certified. a later authorized smoke check should use disposable report-only issues,
