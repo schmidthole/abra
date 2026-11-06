@@ -85,8 +85,8 @@ export class ClientCredentials {
       const value = await response.json();
       requireValue(typeof value.access_token === 'string' && value.access_token.length > 0 && value.token_type?.toLowerCase() === 'bearer' && Number.isFinite(value.expires_in) && value.expires_in >= 2 && value.expires_in <= 366 * 86400, 'invalid token response');
       this.remember(value.access_token);
-      const scopes = typeof value.scope === 'string' ? value.scope.split(/[ ,]+/).filter(Boolean) : [];
-      requireValue(new Set(scopes).size === SCOPES.length && SCOPES.every(s => scopes.includes(s)), 'unexpected token scopes');
+      const scopes = typeof value.scope === 'string' ? value.scope.split(/[ ,]+/).filter(Boolean) : value.scope;
+      requireValue(Array.isArray(scopes) && scopes.every(s => typeof s === 'string') && new Set(scopes).size === SCOPES.length && SCOPES.every(s => scopes.includes(s)), 'unexpected token scopes');
       await verify(value.access_token, signal);
       signal.throwIfAborted();
       this.expires = started + value.expires_in * 1000;

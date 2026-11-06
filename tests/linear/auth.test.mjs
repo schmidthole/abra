@@ -62,6 +62,42 @@ test('client credentials use exact documented form and single-flight identity-pi
   provider.dispose();
 });
 
+test('legacy scope arrays authenticate and renew with the exact allowed scope set', async () => {
+  let now = 0;
+  const fake = boundary(), { provider, api } = client(fake, { clock: () => now });
+  fake.scope = [...SCOPES].reverse(); fake.expires = 30 * 86400;
+  try {
+    assert.deepEqual(await api.query('query Read { ok }'), { ok: true, variables: {} });
+    assert.equal(fake.tokenCount, 1);
+    now = provider.renewAt;
+    await api.query('query Read { ok }');
+    assert.equal(fake.tokenCount, 2);
+    assert.equal(fake.calls.filter(c => c.body.includes('AbraIdentity')).length, 2);
+    assert.equal(fake.calls.filter(c => c.body.includes('query Read')).length, 2);
+  } finally { provider.dispose(); }
+});
+
+for (const [name, scope] of [
+  ['extra scope', [...SCOPES, 'write']],
+  ['missing scope', SCOPES.slice(1)],
+  ['nonstring entry', [...SCOPES, 1]],
+  ['nested array', [SCOPES]],
+  ['null entry', [...SCOPES.slice(0, -1), null]],
+  ['empty array', []],
+  ['missing scopes', undefined],
+  ['object instead of array', { scopes: SCOPES }],
+]) {
+  test(`malformed or unauthorized scope arrays fail before issue requests: ${name}`, async () => {
+    const fake = boundary(), { provider, api } = client(fake);
+    fake.scope = scope;
+    try {
+      await assert.rejects(api.query('query Read { ok }'), error => error.auth === true);
+      assert.equal(fake.tokenCount, 1);
+      assert.equal(fake.calls.filter(c => c.url.endsWith('/graphql')).length, 0);
+    } finally { provider.dispose(); }
+  });
+}
+
 test('proactive renewal before expiry needs no restart and revalidates identity', async () => {
   let now = 0;
   const fake = boundary(), { provider, api } = client(fake, { clock: () => now });

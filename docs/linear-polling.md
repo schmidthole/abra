@@ -87,7 +87,9 @@ RPC/print/model tools. it never polls issues, admits work or mutates Linear issu
 
 client credentials are exchanged at `POST https://api.linear.app/oauth/token`
 using form-encoded `grant_type=client_credentials`, `client_id`, `client_secret`
-and the fixed comma-separated scopes above. returned scopes must match exactly.
+and the fixed comma-separated scopes above. returned scopes may be a scope string
+or a legacy array of strings; either must match the exact allowed scope set.
+missing/extra scopes and malformed or nonstring array entries reject authentication.
 each new connector/foreground launcher child acquires its own in-memory token;
 Linear currently documents a 30-day lifetime, with no refresh token. requests use
 expiry from the response and renew **before** expiry (five-minute margin, or 10%
