@@ -12,8 +12,13 @@ const text = value => typeof value === 'string' && value.trim().length > 0;
 const keys = (value, allowed) => requireValue(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(k => allowed.includes(k)), 'unknown or invalid configuration fields');
 
 export function configuration(value) {
-  keys(value, ['version', 'tokenEnv', 'workspaceId', 'personaId', 'teams', 'repositories', 'authority', 'pollMs', 'controlMs', 'timeoutMs', 'watch']);
-  requireValue(value.version === 1 && /^[A-Z][A-Z0-9_]*$/.test(value.tokenEnv), 'version 1 and credential environment reference required');
+  keys(value, ['version', 'tokenEnv', 'auth', 'workspaceId', 'personaId', 'teams', 'repositories', 'authority', 'pollMs', 'controlMs', 'timeoutMs', 'watch']);
+  requireValue(value.version === 1 && Boolean(value.auth) !== Boolean(value.tokenEnv), 'version 1 and exactly one credential source required');
+  if (value.auth) {
+    keys(value.auth, ['clientIdEnv', 'clientSecretEnv', 'credentialsFile']);
+    if (value.auth.credentialsFile) requireValue(isAbsolute(value.auth.credentialsFile) && !value.auth.clientIdEnv && !value.auth.clientSecretEnv, 'absolute credential file reference required without environment references');
+    else requireValue(/^[A-Z][A-Z0-9_]*$/.test(value.auth.clientIdEnv) && /^[A-Z][A-Z0-9_]*$/.test(value.auth.clientSecretEnv) && value.auth.clientIdEnv !== value.auth.clientSecretEnv, 'distinct client credential environment references required');
+  } else requireValue(/^[A-Z][A-Z0-9_]*$/.test(value.tokenEnv), 'credential environment reference required');
   requireValue(uuid(value.workspaceId) && uuid(value.personaId), 'workspace and app persona ids required');
   requireValue(Array.isArray(value.teams) && value.teams.length > 0, 'team allowlist required');
   for (const team of value.teams) {
@@ -126,20 +131,41 @@ export class ApiError extends Error {
 }
 export class LinearClient {
   constructor(config, token, fetcher = fetch) {
-    requireValue(text(token), 'credential environment variable is empty');
-    this.config = config; this.token = token; this.fetcher = fetcher;
+    requireValue(text(token) || typeof token?.get === 'function', 'credential environment variable is empty');
+    this.config = config; this.credentials = typeof token === 'string' ? null : token; this.token = typeof token === 'string' ? token : null; this.fetcher = fetcher;
   }
   async query(query, variables = {}, signal) {
+    signal?.throwIfAborted();
+    const token = this.credentials ? await this.credentials.get(signal, async (candidate, authSignal) => {
+      const identity = await this.request('query AbraIdentity { viewer { id } organization { id } }', {}, authSignal, candidate);
+      if (this.config.personaId || this.config.workspaceId) requireValue(identity.viewer.id === this.config.personaId && identity.organization.id === this.config.workspaceId, 'credential is not pinned workspace app persona');
+    }) : this.token;
+    return this.request(query, variables, signal, token);
+  }
+  async request(query, variables, signal, token) {
     const timeout = AbortSignal.timeout(this.config.timeoutMs);
-    const response = await this.fetcher('https://api.linear.app/graphql', {
-      method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }),
-    });
+    let response;
+    try {
+      response = await this.fetcher('https://api.linear.app/graphql', {
+        method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ query, variables }),
+      });
+    } catch (error) {
+      if (['AbortError', 'TimeoutError'].includes(error?.name)) throw new DOMException('linear request cancelled; outcome may be uncertain', error.name);
+      throw new ApiError('linear request failed; outcome may be uncertain');
+    }
+    if ([401, 403].includes(response.status)) this.credentials?.invalidate();
     const retry = response.headers.get('retry-after');
     const retryMs = retry ? (Number.isFinite(Number(retry)) ? Number(retry) * 1000 : Math.max(0, Date.parse(retry) - Date.now())) : 0;
     if (!response.ok) throw new ApiError(`linear http ${response.status}`, { auth: [401, 403].includes(response.status), retryMs: Number.isFinite(retryMs) ? retryMs : 0 });
-    const result = await response.json();
-    if (result.errors?.length || !result.data) throw new ApiError('linear graphql error; inspect credentials/schema locally', { auth: result.errors?.some(e => ['AUTHENTICATION_ERROR', 'FORBIDDEN'].includes(e.extensions?.code)) });
+    let result;
+    try { result = await response.json(); }
+    catch { throw new ApiError('invalid linear response; outcome may be uncertain'); }
+    if (result.errors?.length || !result.data) {
+      const auth = result.errors?.some(e => ['AUTHENTICATION_ERROR', 'FORBIDDEN'].includes(e.extensions?.code));
+      if (auth) this.credentials?.invalidate();
+      throw new ApiError('linear graphql error; inspect credentials/schema locally', { auth });
+    }
     return result.data;
   }
   async pages(query, variables, field, signal) {
@@ -361,7 +387,7 @@ export class Connector {
     }
   }
   redacted(value) {
-    let result = value;
+    let result = this.api.credentials?.redact(value) ?? value;
     const secret = this.api.token;
     if (secret) result = result.split(secret).join('[redacted]');
     return result.replace(/(?:Bearer\s+\S+|(?:api[_-]?key|token|secret|password)\s*[:=]\s*\S+)/gi, '[redacted]').replace(/\/(?:Users|home)\/[^\s)]+/g, '[private local path]');
@@ -553,6 +579,7 @@ export class Connector {
   async dispose() {
     this.disposed = true; this.mode = 'off'; clearTimeout(this.timer); this.nextPoll = null;
     this.controller?.abort();
+    this.api.credentials?.dispose();
     await this.busy;
     this.store.release();
   }

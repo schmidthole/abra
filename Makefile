@@ -7,6 +7,8 @@ test:
 	python3 -m unittest discover -s tests -v
 	node --check extensions/linear/core.mjs
 	node --check extensions/linear/pi.mjs
+	node --check extensions/linear/auth.mjs
+	node --check extensions/linear/setup.mjs
 	node --check extensions/linear/managed.mjs
 	node --check extensions/linear/watch.mjs
 	node --check bin/linear-watch

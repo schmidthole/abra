@@ -1,6 +1,9 @@
 {
   "version": 1,
-  "tokenEnv": "ABRA_LINEAR_TOKEN",
+  "auth": {
+    "clientIdEnv": "ABRA_LINEAR_CLIENT_ID",
+    "clientSecretEnv": "ABRA_LINEAR_CLIENT_SECRET"
+  },
   "workspaceId": "00000000-0000-0000-0000-000000000001",
   "personaId": "00000000-0000-0000-0000-000000000002",
   "teams": [
