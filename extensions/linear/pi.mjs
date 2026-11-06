@@ -19,6 +19,10 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   let continuation;
   let reportingRequested = false;
   let aborted = false;
+  let activityVersion = 0;
+  let settlementToken;
+  let settledReady = false;
+  let fallbackController;
   const setupController = new AbortController();
   const emitWatch = (ctx, request, state, extra = {}) => {
     pi.appendEntry('abra-linear-watch', { version: 1, nonce: watch.nonce, request, session: ctx.sessionManager.getSessionId(), owner: connector.store.owner, state, issue: connector.active?.id ?? null, task: connector.active?.taskId ?? null, ...extra });
@@ -34,7 +38,7 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
     const api = dependencies.api ?? new LinearClient(config, config.auth ? new ClientCredentials(config) : process.env[config.tokenEnv]);
     const built = new Connector({ root: ctx.cwd, config, store, api, ...dependencies, host: {
       idle: () => ctx.isIdle() && !ctx.hasPendingMessages(),
-      afterControl: () => checkSettled(ctx, true),
+      afterControl: () => checkSettled(ctx),
       send: async prompt => {
         if (watch) emitWatch(ctx, 'start', 'admitted');
         pi.setSessionName(`abra linear coordinator`); pi.sendUserMessage(prompt);
@@ -69,6 +73,11 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
       const [command, ...rest] = args.trim().split(/\s+/);
       try {
         requireValue(!settingUp, 'finish or cancel the setup dialog first');
+        if (command === 'settled') {
+          requireValue(settlementToken && rest[0] === settlementToken && connector?.active?.session === ctx.sessionManager.getSessionId(), 'foreign or stale settlement control');
+          settlementToken = undefined; settledReady = true;
+          return;
+        }
         if (command === 'setup') {
           requireValue(!watch && !connector?.active && (!connector || connector.mode === 'off'), 'stop and reconcile connector ownership before setup');
           settingUp = true;
@@ -221,20 +230,30 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
   pi.on('session_before_switch', prevent);
   pi.on('session_before_fork', prevent);
   pi.on('session_before_tree', prevent);
-  pi.on('agent_start', () => { settled = false; });
+  pi.on('agent_start', () => {
+    settled = false; settledReady = false; settlementToken = undefined; activityVersion++;
+    fallbackController?.abort();
+  });
   pi.on('tool_execution_start', event => watch?.owners.observeTool(event));
   pi.on('tool_execution_end', event => watch?.owners.observeTool(event));
-  pi.on('message_start', event => continuation?.observeMessage(event.message));
-  const checkSettled = async (ctx, fromControl = false) => {
-    if (!settled || !connector?.active || connector.disposed || connector.active.terminal || connector.active.waiting || connector.active.dispatch !== 'sent' || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+  pi.on('message_start', event => {
+    continuation?.observeMessage(event.message);
+    if (event.message?.customType === 'subagent-notify') {
+      activityVersion++; fallbackController?.abort();
+    }
+  });
+  const checkSettled = async ctx => {
+    if (!settledReady || !settled || !connector?.active || connector.disposed || connector.active.terminal || connector.active.waiting || connector.active.dispatch !== 'sent' || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+    if (connector.active.publications.some(p => p.key === 'settled-without-terminal' && p.canceled)) return;
+    const version = activityVersion, active = connector.active;
+    const isCurrent = () => settledReady && settled && version === activityVersion && connector.active === active && !active.terminal && !active.waiting && !connector.disposed && ctx.isIdle() && !ctx.hasPendingMessages();
     let pending, uncertain = false;
     try { pending = await continuation.pending(); } catch { uncertain = true; }
-    if (!settled || !ctx.isIdle() || ctx.hasPendingMessages() || connector.disposed) return;
+    if (!isCurrent()) return;
     if (!aborted && !uncertain && !connector.active.halted) {
       if (pending.running.length) return;
       if (pending.completed.length) {
         // allow the native notifier to deliver first; control polls repair a missing wake once.
-        if (!fromControl) return;
         continuation.consume(pending.completed);
         settled = false;
         pi.sendUserMessage(`native work has finished: ${JSON.stringify(pending.completed)}. inspect these exact native results and the saved task, then continue the original request. do not relaunch work whose outcome is uncertain. report actual findings/test results here and on linear; if a run failed or returned empty output, explain the concrete failure and next action rather than claiming the task is impossible.`);
@@ -246,18 +265,32 @@ export function install(pi, configDirectory = '.pi', dependencies = {}) {
         return;
       }
     }
-    connector.pause();
     const issue = await connector.api.issue(connector.active.id, connector.controller.signal);
     const team = connector.team(issue);
-    if (!settled || !ctx.isIdle() || ctx.hasPendingMessages() || connector.disposed) return;
+    if (!isCurrent()) return;
     if (!team || ['completed', 'canceled'].includes(issue.state.type)) return;
     const reason = aborted ? 'the coordinator was interrupted before delivering a PR or report' : uncertain ? 'abra could not confirm the status of its background work' : 'the coordinator stopped without delivering a PR or report, even after a request to finish reporting';
-    await connector.publish('settled-without-terminal', `blocked: ${reason}. next action: reopen the saved task and inspect the worker results and any running workers before retrying. no verified delivery is available; this does not mean the requested change is impossible.`, team.blocked, connector.controller.signal);
-    connector.active.terminal = 'blocked'; connector.active.waiting = false; connector.persist();
+    const controller = new AbortController(); fallbackController = controller;
+    try {
+      const publication = await connector.publish('settled-without-terminal', `blocked: ${reason}. next action: reopen the saved task and inspect the worker results and any running workers before retrying. no verified delivery is available; this does not mean the requested change is impossible.`, team.blocked, AbortSignal.any([connector.controller.signal, controller.signal]), isCurrent);
+      if (!publication || !isCurrent()) { connector.cancelFallbackPublication(); return; }
+      connector.pause(); active.terminal = 'blocked'; active.waiting = false; connector.persist();
+    } catch (error) {
+      // cancellation never erases a request that may already have reached linear.
+      if (!controller.signal.aborted) throw error;
+      connector.cancelFallbackPublication();
+    } finally {
+      if (fallbackController === controller) fallbackController = undefined;
+    }
   };
-  pi.on('agent_settled', async (event, ctx) => {
-    settled = true; aborted = event?.aborted === true;
-    await connector?.serial(() => checkSettled(ctx));
+  pi.on('agent_settled', (event) => {
+    settled = true; settledReady = false; aborted = event?.aborted === true; activityVersion++;
+    fallbackController?.abort();
+    if (!connector?.active || connector.disposed || connector.active.terminal) return;
+    settlementToken = randomUUID();
+    // this command only arms control polling after every settled handler has returned.
+    // it must not await publication: later deferred native wakes still need to drain.
+    pi.sendUserMessage(`/abra-linear settled ${settlementToken}`, { expandPromptTemplates: true });
   });
-  pi.on('session_shutdown', async () => { setupController.abort(); continuation?.dispose(); watch?.owners.dispose(); await connector?.dispose(); });
+  pi.on('session_shutdown', async () => { setupController.abort(); fallbackController?.abort(); continuation?.dispose(); watch?.owners.dispose(); await connector?.dispose(); });
 }

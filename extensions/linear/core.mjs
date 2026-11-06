@@ -10,6 +10,13 @@ export const requireValue = (ok, message) => { if (!ok) throw new Error(message)
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
 const text = value => typeof value === 'string' && value.trim().length > 0;
+// canceled automatic fallbacks still require every issued mutation receipt to settle.
+export const publicationSettled = p => {
+  const canceledFallback = p.canceled === true && p.key === 'settled-without-terminal';
+  const commentSettled = p.comment && p.comment !== 'intent' || canceledFallback && p.comment === null && p.notApplied?.includes('comment');
+  const stateSettled = !p.stateId || p.state === 'confirmed' || canceledFallback && p.state === null;
+  return Boolean(commentSettled && stateSettled && p.unassign !== 'intent');
+};
 const keys = (value, allowed) => requireValue(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(k => allowed.includes(k)), 'unknown or invalid configuration fields');
 
 export function configuration(value) {
@@ -101,6 +108,8 @@ export class Store {
       requireValue(uuid(r.id) && text(r.session) && /^[a-f0-9]{64}$/.test(r.fingerprint) && ['reserved', 'intent', 'sent'].includes(r.dispatch) && typeof r.bound === 'boolean' && ['review', 'blocked', null].includes(r.terminal) && (r.halted === null || text(r.halted)) && Array.isArray(r.publications) && r.comments && typeof r.comments === 'object', 'malformed correlation');
       if (r.bound) requireValue(r.binding && ['report', 'pr'].includes(r.binding.requestedDelivery) && r.binding.source === `data/${r.taskId}/source.json` && /^[a-f0-9]{64}$/.test(r.binding.sourceHash), 'incompatible task binding; preserve journal and reconcile original source/acceptance');
       if (r.terminal === 'review') requireValue(r.bound && r.delivery?.kind === r.binding.requestedDelivery, 'review differs from bound requested delivery; preserve and reconcile');
+      requireValue(r.publications.every(p => p.canceled === undefined || (p.canceled === true && p.key === 'settled-without-terminal' && this.config.teams.some(t => t.blocked === p.stateId))), 'malformed fallback cancellation receipt');
+      requireValue(r.publications.every(p => p.notApplied === undefined || (p.canceled === true && Array.isArray(p.notApplied) && p.notApplied.length > 0 && new Set(p.notApplied).size === p.notApplied.length && p.notApplied.every(k => ['comment', 'state', 'unassign'].includes(k) && p[k] === null) && text(p.reconciliation))), 'malformed fallback reconciliation receipt');
       requireValue(r.publications.every(p => p.unassign === undefined || [null, 'intent', 'confirmed'].includes(p.unassign)), 'malformed unassignment receipt');
       requireValue(new Set(r.publications.map(p => p.key)).size === r.publications.length, 'duplicate publication key');
       for (const p of r.publications) requireValue(text(p.key) && text(p.body) && (p.comment === null || text(p.comment)) && [null, 'intent', 'confirmed'].includes(p.state) && (p.stateId === null || uuid(p.stateId)), 'malformed publication receipt');
@@ -121,7 +130,7 @@ export class Store {
   reconfigureAuthority(config) {
     requireValue(hash({ ...this.config, authority: null }) === hash({ ...config, authority: null }), 'only authority may change through journal reconciliation');
     const state = this.load();
-    requireValue(state.active === null && state.records.every(r => r.releaseEvidence && r.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed') && p.unassign !== 'intent')), 'reconcile native ownership and publication receipts before changing authority');
+    requireValue(state.active === null && state.records.every(r => r.releaseEvidence && r.publications.every(publicationSettled)), 'reconcile native ownership and publication receipts before changing authority');
     state.identity = hash(config);
     this.save(state);
   }
@@ -300,7 +309,7 @@ export class Connector {
           for (const issue of issues) {
             if (this.mode !== 'running' || this.disposed) break;
             const previous = this.state.records.find(r => r.id === issue.id);
-            if (previous && !(previous.terminal === 'blocked' && previous.releaseEvidence && previous.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed') && p.unassign !== 'intent'))) continue;
+            if (previous && !(previous.terminal === 'blocked' && previous.releaseEvidence && previous.publications.every(publicationSettled))) continue;
             const repo = this.eligible(issue);
             if (!repo) continue;
             requireValue(this.host.idle(), 'dedicated session is busy; admission deferred');
@@ -391,7 +400,13 @@ export class Connector {
         requireValue(publication?.unassign === 'intent' && (issue.delegate?.id === this.config.personaId || issue.assignee?.id === this.config.personaId), 'unassignment already applied or not uncertain');
         publication.unassign = null;
       }
-      if (publication) publication.reconciliation = this.redacted(receipt.evidence);
+      if (publication) {
+        publication.reconciliation = this.redacted(receipt.evidence);
+        if (publication.canceled) {
+          const notApplied = ['comment', 'state', 'unassign'].filter(k => receipt[k] === 'not-applied');
+          if (notApplied.length) publication.notApplied = [...new Set([...(publication.notApplied ?? []), ...notApplied])];
+        }
+      }
       this.persist();
       if (receipt.dispatch === 'not-sent') {
         const active = this.active;
@@ -433,21 +448,34 @@ export class Connector {
     if (secret) result = result.split(secret).join('[redacted]');
     return result.replace(/(?:Bearer\s+\S+|(?:api[_-]?key|token|secret|password)\s*[:=]\s*\S+)/gi, '[redacted]').replace(/\/(?:Users|home)\/[^\s)]+/g, '[private local path]');
   }
-  async publish(key, body, stateId, signal) {
+  cancelFallbackPublication() {
+    const publication = this.active.publications.find(p => p.key === 'settled-without-terminal');
+    if (!publication) return;
+    if (!publication.comment && !publication.state && !publication.unassign) this.active.publications.splice(this.active.publications.indexOf(publication), 1);
+    else publication.canceled = true;
+    this.persist();
+  }
+  async publish(key, body, stateId, signal, isCurrent = () => true) {
     requireValue(/^[a-z0-9-]{1,80}$/.test(key) && text(body) && body.length <= 16000, 'bounded checkpoint key/body required');
     const active = this.active;
     const savedMarker = active.publications.find(p => p.key === key)?.body.match(/<!-- abra-linear:[^\n]+ -->$/)?.[0];
     const marker = savedMarker ?? `<!-- abra-linear:${active.id}:${active.session}:${key} -->`;
     body = `${this.redacted(body)}\n\n${marker}`;
     let publication = active.publications.find(p => p.key === key);
+    requireValue(!publication?.canceled, 'canceled fallback publication cannot be replayed; reconcile issued receipts and report the actual outcome with a new checkpoint');
     if (publication) requireValue(publication.body === body && publication.stateId === (stateId ?? null), 'checkpoint key already used with different content');
-    else {
+    if (!isCurrent()) return null;
+    const current = await this.api.issue(active.id, signal);
+    if (!isCurrent()) return null;
+    const comments = await this.api.comments(active.id, signal);
+    if (!isCurrent()) return null;
+    await this.reconcilePublications(current, comments);
+    if (!isCurrent()) return null;
+    // do not save an empty fallback receipt when a wake canceled only publication reads.
+    if (!publication) {
       publication = { key, body, stateId: stateId ?? null, comment: null, state: null };
       active.publications.push(publication); this.persist();
     }
-    const current = await this.api.issue(active.id, signal);
-    const comments = await this.api.comments(active.id, signal);
-    await this.reconcilePublications(current, comments);
     // a confirmed review retry after our own unassignment needs no more mutations.
     if (this.reviewReceipt(current) === publication && !active.halted) return publication;
     if (key === 'pickup' || stateId === this.team(current)?.inReview) {
@@ -455,32 +483,40 @@ export class Connector {
     }
     if (publication.comment === 'intent') throw new Error('comment outcome uncertain; inspect remote receipt; never blind replay');
     if (!publication.comment) {
+      if (!isCurrent()) return null;
       publication.comment = 'intent'; this.persist();
       publication.comment = await this.api.comment(active.id, body, signal); this.persist();
     }
+    if (!isCurrent()) return null;
     if (stateId === this.team(current)?.inReview && active.delivery?.kind === 'pr' && !publication.attachment) {
       publication.attachment = await this.api.attachPR(active.id, active.delivery.reference, signal); this.persist();
     }
+    if (!isCurrent()) return null;
     if (stateId && publication.state !== 'confirmed') {
       if (publication.state === 'intent') throw new Error('status outcome uncertain; reconcile before any replay');
       const latest = await this.api.issue(active.id, signal);
+      if (!isCurrent()) return null;
       requireValue(this.team(latest) && this.team(latest).id === this.team(current)?.id && !['completed', 'canceled'].includes(latest.state.type), 'never alter a completed/canceled or foreign-team issue');
       if (key === 'pickup' || stateId === this.team(latest).inReview) requireValue(this.eligible(latest) && fingerprint(latest) === active.fingerprint && !active.halted, 'delegation/source changed before status mutation');
+      if (!isCurrent()) return null;
       publication.state = 'intent'; this.persist();
       await this.api.status(active.id, stateId, signal);
       publication.state = 'confirmed'; this.persist();
     }
-    if (stateId && [this.team(current)?.blocked, this.team(current)?.inReview].includes(stateId)) await this.unassign(publication, signal);
-    return publication;
+    if (!isCurrent()) return null;
+    if (stateId && [this.team(current)?.blocked, this.team(current)?.inReview].includes(stateId)) await this.unassign(publication, signal, isCurrent);
+    return isCurrent() ? publication : null;
   }
-  async unassign(publication, signal) {
-    if (publication.unassign === 'confirmed') return;
+  async unassign(publication, signal, isCurrent = () => true) {
+    if (publication.unassign === 'confirmed' || !isCurrent()) return;
     const current = await this.api.issue(this.active.id, signal);
+    if (!isCurrent()) return;
     if (current.delegate?.id !== this.config.personaId && current.assignee?.id !== this.config.personaId) {
       publication.unassign = 'confirmed'; this.persist(); return;
     }
     requireValue(current.delegate == null || current.delegate.id === this.config.personaId, 'delegation changed; never remove another delegate');
     requireValue(!this.active.publications.some(p => p.unassign === 'intent'), 'unassignment outcome uncertain; reconcile before retry');
+    if (!isCurrent()) return;
     publication.unassign = 'intent'; this.persist();
     await this.api.unassign(this.active.id, current.assignee?.id === this.config.personaId, signal);
     publication.unassign = 'confirmed'; this.persist();
@@ -530,6 +566,7 @@ export class Connector {
         active.binding = binding; active.bound = true; this.persist();
         return binding.requestedDelivery === 'pr' && this.config.authority.mode !== 'pr' ? 'code intent bound without publication authority; report blocked, do not dispatch or substitute a report' : 'tasks-axi source/acceptance and requested delivery bound; keep native dispatch and material continuity in the task';
       }
+      requireValue(input.key !== 'settled-without-terminal', 'automatic fallback key is reserved');
       requireValue(active.bound && ['approach', 'progress', 'checks', 'waiting', 'blocked', 'review'].includes(input.kind), 'bind task first; structured checkpoint kind required');
       requireValue(text(input.summary) && text(input.nextAction), 'summary and next action required');
       if (input.kind !== 'blocked') requireValue(active.binding.requestedDelivery !== 'pr' || this.config.authority.mode === 'pr', 'no configured code publication authority; report blocked, not a substitute report');
@@ -622,7 +659,7 @@ export class Connector {
   release(evidence, verify) {
     return this.serial(async () => {
       requireValue(this.active?.terminal && text(evidence) && this.host.idle(), 'terminal checkpoint, idle coordinator and explicit stopped-owner evidence required');
-      requireValue(this.active.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed') && p.unassign !== 'intent'), 'unresolved partial publication; reconcile before release');
+      requireValue(this.active.publications.every(publicationSettled), 'unresolved partial publication; reconcile before release');
       if (verify) {
         requireValue(this.active.bound && this.active.dispatch === 'sent', 'unbound or uncertain coordinator dispatch');
         this.active.managedProofs = await verify();

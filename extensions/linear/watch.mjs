@@ -4,7 +4,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { once } from 'node:events';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
-import { configuration, readJson, Store, requireValue } from './core.mjs';
+import { configuration, readJson, Store, requireValue, publicationSettled } from './core.mjs';
 import { WatchFailure, failureCode, diagnosticCode, diagnosticText, requireWatch } from './diagnostics.mjs';
 
 // strict lf framing: unicode separators are legal inside json strings.
@@ -79,7 +79,7 @@ export class RpcChild {
 function released(root, config, outcome) {
   const store = new Store(root, config), state = store.load();
   const record = state.records.find(r => r.id === outcome.issue);
-  requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.bound === true && record.dispatch === 'sent' && (record.terminal !== 'review' || record.delivery) && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(p => p.comment && p.comment !== 'intent' && (!p.stateId || p.state === 'confirmed') && p.unassign !== 'intent'), 'handoff disagrees with durable connector/lock/publication receipts');
+  requireValue(!fs.existsSync(store.lock) && state.active === null && record?.session === outcome.session && record.bound === true && record.dispatch === 'sent' && (record.terminal !== 'review' || record.delivery) && record.taskId === outcome.task && record.terminal === outcome.outcome && record.releaseEvidence && Array.isArray(record.managedProofs) && record.publications.every(publicationSettled), 'handoff disagrees with durable connector/lock/publication receipts');
 }
 
 // display only allowlisted descriptions and validated ids, never remote prose or raw streams.

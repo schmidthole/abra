@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { configuration, Store, LinearClient, ApiError, Connector, coordinatorPrompt } from '../../extensions/linear/core.mjs';
 import { install } from '../../extensions/linear/pi.mjs';
 import { seedDedicatedSession } from '../../extensions/linear/session.mjs';
-import { SessionManager } from './fixtures/session-manager.mjs';
+import { SessionManager, installedAgentSession } from './fixtures/session-manager.mjs';
 
 const root = resolve('.');
 const id = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
@@ -330,9 +330,17 @@ test('prompt preserves policy, exact-candidate review, authority and terminal di
 });
 
 function fakePi() {
-  const handlers = {}, commands = {}, tools = {}, sent = [], entries = [], emitter = new EventEmitter();
+  const handlers = {}, commands = {}, tools = {}, sent = [], entries = [], deferred = [], emitter = new EventEmitter();
   const events = { on: (name, fn) => { emitter.on(name, fn); return () => emitter.off(name, fn); }, emit: (...args) => emitter.emit(...args) };
-  return { handlers, commands, tools, sent, events, entries, appendEntry: (customType, data) => entries.push({ customType, data }), on: (event, fn) => handlers[event] = fn, registerCommand: (name, cmd) => commands[name] = cmd, registerTool: tool => tools[tool.name] = tool, sendUserMessage: (...args) => sent.push(args), setSessionName: () => {} };
+  return { handlers, commands, tools, sent, events, entries, appendEntry: (customType, data) => entries.push({ customType, data }), on: (event, fn) => handlers[event] = fn, registerCommand: (name, cmd) => commands[name] = cmd, registerTool: tool => tools[tool.name] = tool, sendUserMessage: (...args) => {
+    if (args[1]?.expandPromptTemplates && args[0].startsWith('/abra-linear settled ')) deferred.push(args[0]);
+    else sent.push(args);
+  }, drainSettled: async ctx => { while (deferred.length) await commands['abra-linear'].handler(deferred.shift().slice('/abra-linear '.length), ctx); }, setSessionName: () => {} };
+}
+async function settleAndPoll(pi, ctx, event = {}) {
+  await pi.handlers.agent_settled(event, ctx);
+  await pi.drainSettled(ctx);
+  await pi.commands['abra-linear'].handler('poll', ctx);
 }
 function context(path, entries = []) {
   const notifications = [];
@@ -355,8 +363,8 @@ test('pi idle without delivery gets one reporting continuation before readable b
   ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
   seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
   await pi.handlers.session_start({ reason: 'new' }, ctx); assert.equal(pi.sent.length, 1); assert.deepEqual(pi.handlers.session_before_switch(), { cancel: true });
-  await pi.handlers.agent_settled({}, ctx); assert.equal(api.issues[0].state.id, id(4)); assert.equal(pi.sent.length, 2);
-  await pi.handlers.agent_settled({}, ctx); assert.equal(api.issues[0].state.id, id(6)); assert.match(api.thread.at(-1).body, /coordinator stopped without delivering/);
+  await settleAndPoll(pi, ctx); assert.equal(api.issues[0].state.id, id(4)); assert.equal(pi.sent.length, 2);
+  await settleAndPoll(pi, ctx); assert.equal(api.issues[0].state.id, id(6)); assert.match(api.thread.at(-1).body, /coordinator stopped without delivering/);
   assert.equal(api.issues[0].delegate, null);
   await pi.handlers.session_shutdown(); assert.ok(!fs.existsSync(join(path, 'data/linear/owner.lock')));
 });
@@ -483,7 +491,7 @@ test('extension watch binds nonce/session/task, confirmed linear delivery and se
   await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/report' } }, null, null, f.ctx);
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
-  await f.pi.handlers.agent_settled({}, f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
   f.ctx.hasPendingMessages = () => true;
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`); assert.equal(f.pi.entries.at(-1).data.state, 'working');
   f.ctx.hasPendingMessages = () => false;
@@ -498,7 +506,7 @@ test('waiting checkpoint retains clarification session without false blocked fal
   const f = await watchFixture(t);
   await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('wait', checkpoint('waiting'), null, null, f.ctx);
-  await f.pi.handlers.agent_settled({}, f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
   assert.equal(f.pi.entries.at(-1).data.state, 'awaiting-input'); assert.equal(f.api.issues[0].state.id, id(4));
   assert.ok(new Store(f.path, f.cfg).load().active);
@@ -508,7 +516,7 @@ test('watch never releases terminal blocked while native launch intent is unreso
   const f = await watchFixture(t);
   await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
   await f.pi.tools.abra_linear_checkpoint.execute('blocked', checkpoint('blocked'), null, null, f.ctx);
-  await f.pi.handlers.agent_settled({}, f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
   f.pi.handlers.tool_execution_start({ toolName: 'subagent', toolCallId: 'unresolved', args: { agent: 'worker', async: true } });
   await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
   assert.equal(f.pi.entries.at(-1).data.state, 'uncertain'); assert.ok(new Store(f.path, f.cfg).load().active);
@@ -867,16 +875,16 @@ for (const mode of ['manual', 'watch']) for (const outcome of ['complete', 'fail
   status = { lifecycleArtifactVersion: 3, runId: 'scout-1', sessionId: ctx.sessionManager.getSessionFile(), mode: 'single', state: 'running' };
   const save = () => fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status)); save();
   activePi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: 'scout-1', sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
-  await activePi.handlers.agent_settled({}, ctx); await command('poll');
+  await settleAndPoll(activePi, ctx); await command('poll');
   assert.equal(f.api.issues[0].state.id, id(4)); assert.equal(activePi.sent.length, 1); assert.equal(f.api.thread.length, 1);
   status.state = outcome; save();
   // terminal artifact can precede its grouped completion notice; settle must still wait.
-  await activePi.handlers.agent_settled({}, ctx); assert.equal(activePi.sent.length, 1);
+  await activePi.handlers.agent_settled({}, ctx); await activePi.drainSettled(ctx); assert.equal(activePi.sent.length, 1);
   activePi.handlers.message_start({ message: { role: 'custom', customType: 'subagent-notify', details: { runs: [{ runId: 'scout-1', status: outcome === 'complete' ? 'completed' : 'failed' }] } } });
   activePi.handlers.agent_start();
   const input = outcome === 'complete' ? { ...checkpoint('review'), summary: 'scout located the renewal bug', delivery: { kind: 'report', reference: 'https://example.test/scout-report' } } : { ...checkpoint('blocked'), summary: 'scout returned no findings', blocker: 'scout failed with an empty response; no code was changed', nextAction: 'check the scout model configuration and retry the investigation' };
   await activePi.tools.abra_linear_checkpoint.execute('terminal', input, null, null, ctx);
-  await activePi.handlers.agent_settled({}, ctx);
+  await settleAndPoll(activePi, ctx);
   assert.equal(f.api.issues[0].state.id, outcome === 'complete' ? id(5) : id(6)); assert.equal(f.api.issues[0].delegate, null);
   assert.doesNotMatch(f.api.thread.at(-1).body, /evidence-backed terminal|not changed|not run/);
   if (outcome === 'failed') assert.match(f.api.thread.at(-1).body, /empty response/);
@@ -894,12 +902,12 @@ test('a missing native completion notice gets one result-inspection wake, not a 
   const status = { lifecycleArtifactVersion: 3, runId: 'scout-1', sessionId: ctx.sessionManager.getSessionFile(), mode: 'single', state: 'failed' };
   fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status));
   pi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: 'scout-1', sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
-  await pi.handlers.agent_settled({}, ctx); assert.equal(pi.sent.length, 1);
+  await pi.handlers.agent_settled({}, ctx); await pi.drainSettled(ctx); assert.equal(pi.sent.length, 1);
   await pi.commands['abra-linear'].handler('poll', ctx); assert.equal(pi.sent.length, 2); assert.match(pi.sent.at(-1)[0], /inspect these exact native results/);
   await pi.commands['abra-linear'].handler('poll', ctx); assert.equal(pi.sent.length, 2);
   assert.equal(api.issues[0].state.id, id(4));
-  await pi.handlers.agent_settled({}, ctx); assert.equal(pi.sent.length, 3);
-  await pi.handlers.agent_settled({}, ctx); assert.equal(api.issues[0].state.id, id(6));
+  await settleAndPoll(pi, ctx); assert.equal(pi.sent.length, 3);
+  await settleAndPoll(pi, ctx); assert.equal(api.issues[0].state.id, id(6));
   assert.match(api.thread.at(-1).body, /stopped without delivering/);
 });
 
@@ -917,12 +925,12 @@ test('a native completion wake during status inspection cannot publish a stale s
   seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
   await pi.handlers.session_start({ reason: 'new' }, ctx);
   // use the single reporting reminder so a stale second settle would otherwise block.
-  await pi.handlers.agent_settled({}, ctx); assert.equal(pi.sent.length, 2);
+  await settleAndPoll(pi, ctx); assert.equal(pi.sent.length, 2);
   const status = { lifecycleArtifactVersion: 3, runId: 'scout-1', sessionId: ctx.sessionManager.getSessionFile(), mode: 'single', state: 'complete' };
   fs.writeFileSync(join(nativeDir, 'status.json'), JSON.stringify(status));
   pi.events.emit('subagent:async-started', { lifecycleArtifactVersion: 3, id: 'scout-1', sessionId: status.sessionId, mode: 'single', asyncDir: nativeDir });
   wake = true;
-  await pi.handlers.agent_settled({}, ctx);
+  await settleAndPoll(pi, ctx);
   assert.equal(api.issues[0].state.id, id(4)); assert.equal(pi.sent.length, 2);
   assert.equal(api.thread.length, 1);
 });
@@ -930,9 +938,204 @@ test('a native completion wake during status inspection cannot publish a stale s
 for (const scenario of ['aborted', 'unknown-native']) test(`${scenario} gives a readable blocked handoff without freeing ownership`, async t => {
   const f = await watchFixture(t);
   if (scenario === 'unknown-native') f.pi.events.emit('subagent:async-started', { id: 'foreign', sessionId: 'foreign' });
-  await f.pi.handlers.agent_settled({ aborted: scenario === 'aborted' }, f.ctx);
+  await settleAndPoll(f.pi, f.ctx, { aborted: scenario === 'aborted' });
   assert.equal(f.api.issues[0].state.id, id(6)); assert.equal(f.api.issues[0].delegate, null);
   assert.match(f.api.thread.at(-1).body, scenario === 'aborted' ? /interrupted/ : /could not confirm the status/);
   assert.ok(new Store(f.path, f.cfg).load().active);
   assert.ok(fs.existsSync(join(f.path, 'data/linear/owner.lock')));
+});
+
+async function fallbackFixture(t) {
+  const path = temporary(t), api = new FakeApi(), pi = fakePi(), ctx = context(path), cfg = config();
+  fs.mkdirSync(join(path, '.pi')); fs.writeFileSync(join(path, '.pi/abra-linear.json'), JSON.stringify(cfg));
+  install(pi, '.pi', { api });
+  resources.set(t, [{ dispose: () => pi.handlers.session_shutdown() }]);
+  ctx.sessionManager = SessionManager.create(path, join(path, 'sessions'));
+  seedDedicatedSession(ctx.sessionManager, { source: 'interactive', token: randomUUID(), previousSession: 'old-session' });
+  await pi.handlers.session_start({ reason: 'new' }, ctx);
+  await settleAndPoll(pi, ctx); assert.equal(pi.sent.length, 2);
+  const poll = () => pi.commands['abra-linear'].handler('poll', ctx);
+  const state = () => new Store(path, cfg).load().records[0];
+  return { path, api, pi, ctx, cfg, poll, state };
+}
+
+for (const activity of ['wake', 'queued']) test(`late ${activity} during fallback comments read leaves no blocker or empty receipt`, async t => {
+  const f = await fallbackFixture(t), comments = f.api.comments.bind(f.api);
+  let reads = 0, interrupted = false;
+  f.api.comments = async (...args) => {
+    // first is normal control; second is the fallback publish read from the review probe.
+    if (++reads === 2) {
+      interrupted = true;
+      if (activity === 'wake') { f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; }
+      else f.ctx.hasPendingMessages = () => true;
+    }
+    return comments(...args);
+  };
+  await f.pi.handlers.agent_settled({}, f.ctx);
+  assert.equal(f.api.thread.length, 1);
+  await f.pi.drainSettled(f.ctx); await f.poll();
+  assert.equal(interrupted, true);
+  assert.equal(f.api.issues[0].state.id, id(4)); assert.notEqual(f.api.issues[0].delegate, null);
+  assert.equal(f.api.thread.length, 1);
+  assert.deepEqual(f.state().publications.map(p => p.key), ['pickup']);
+  assert.equal(f.state().terminal, null); assert.equal(f.state().halted, null);
+});
+
+for (const boundary of ['publication-issue', 'status-read', 'unassignment-read', 'comment-response', 'status-response', 'unassignment-response']) test(`fallback wake at ${boundary} stops later mutations and terminal marking, preserving issued receipts`, async t => {
+  const f = await fallbackFixture(t);
+  let interrupted = false, issues = 0;
+  const wake = () => { interrupted = true; f.pi.handlers.agent_start(); f.ctx.isIdle = () => false; };
+  const readTarget = { 'publication-issue': 3, 'status-read': 4, 'unassignment-read': 5 }[boundary];
+  if (readTarget) {
+    const issue = f.api.issue.bind(f.api);
+    f.api.issue = async (...args) => { const value = await issue(...args); if (++issues === readTarget) wake(); return value; };
+  } else {
+    const method = { 'comment-response': 'comment', 'status-response': 'status', 'unassignment-response': 'unassign' }[boundary];
+    const original = f.api[method].bind(f.api);
+    f.api[method] = async (...args) => { const value = await original(...args); wake(); return value; };
+  }
+  const writesBefore = f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length;
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(interrupted, true);
+  const writes = f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).slice(writesBefore);
+  const expected = ['publication-issue'].includes(boundary) ? [] : ['status-read', 'comment-response'].includes(boundary) ? ['comment'] : ['unassignment-read', 'status-response'].includes(boundary) ? ['comment', 'status'] : ['comment', 'status', 'unassign'];
+  assert.deepEqual(writes, expected);
+  const state = f.state(), receipt = state.publications.find(p => p.key === 'settled-without-terminal');
+  assert.equal(state.terminal, null); assert.equal(state.halted, null); assert.equal(state.releaseEvidence, undefined);
+  if (!expected.length) assert.equal(receipt, undefined);
+  else {
+    assert.ok(receipt.comment && receipt.comment !== 'intent');
+    assert.equal(receipt.state, expected.includes('status') ? 'confirmed' : null);
+    assert.equal(receipt.unassign, expected.includes('unassign') ? 'confirmed' : undefined);
+  }
+});
+
+for (const applied of [false, true]) test(`wake aborts in-flight fallback comment and retains uncertain receipt (applied=${applied})`, async t => {
+  const f = await fallbackFixture(t), comment = f.api.comment.bind(f.api);
+  let cancellationObserved = false;
+  f.api.comment = async (issue, body, signal) => {
+    if (applied) await comment(issue, body, signal);
+    f.pi.handlers.agent_start(); f.ctx.isIdle = () => false;
+    cancellationObserved = signal.aborted;
+    throw signal.reason;
+  };
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(cancellationObserved, true);
+  const receipt = f.state().publications.find(p => p.key === 'settled-without-terminal');
+  assert.equal(receipt.comment, 'intent'); assert.equal(receipt.state, null);
+  assert.equal(f.state().terminal, null); assert.equal(f.state().halted, null);
+  assert.equal(f.api.issues[0].state.id, id(4)); assert.notEqual(f.api.issues[0].delegate, null);
+  assert.equal(f.api.thread.length, applied ? 2 : 1);
+  await f.poll();
+  assert.equal(f.api.thread.length, applied ? 2 : 1, 'control must not replay an aborted comment');
+  assert.equal(f.state().publications.at(-1).comment === 'intent', !applied);
+});
+
+test('an intervening run that starts and settles during publication invalidates the old fallback epoch', async t => {
+  const f = await fallbackFixture(t), comments = f.api.comments.bind(f.api);
+  let reads = 0;
+  f.api.comments = async (...args) => {
+    if (++reads === 2) {
+      f.pi.handlers.agent_start();
+      await f.pi.handlers.agent_settled({}, f.ctx);
+      await f.pi.drainSettled(f.ctx);
+    }
+    return comments(...args);
+  };
+  await settleAndPoll(f.pi, f.ctx);
+  assert.equal(f.api.thread.length, 1); assert.equal(f.state().terminal, null);
+  assert.deepEqual(f.state().publications.map(p => p.key), ['pickup']);
+});
+
+test('installed pi defers later settled-handler native wakes until after the connector handler returns', async t => {
+  const f = await fallbackFixture(t), { AgentSession } = await installedAgentSession();
+  const host = Object.create(AgentSession.prototype);
+  Object.assign(host, { _deferredSettledActions: [], _isAgentRunActive: true, _agentRunAbortRequested: false, _emit: () => {} });
+  host._tryExecuteExtensionCommand = async text => {
+    assert.match(text, /^\/abra-linear settled /);
+    await f.pi.commands['abra-linear'].handler(text.slice('/abra-linear '.length), f.ctx);
+    return true;
+  };
+  host._startRun = async ({ message }) => {
+    host._isAgentRunActive = true;
+    f.ctx.isIdle = () => false;
+    f.pi.handlers.agent_start(); f.pi.handlers.message_start({ message });
+  };
+  f.pi.sendUserMessage = (text, options) => { void host.prompt(text, options); };
+  host._extensionRunner = { emit: async event => {
+    await f.pi.handlers.agent_settled(event, f.ctx);
+    // a poll can run while a later settled handler is still awaiting its result.
+    await f.poll(); assert.equal(f.api.thread.length, 1);
+    await host.sendCustomMessage({ customType: 'subagent-notify', content: 'scout finished; inspect its result', display: false, details: { runs: [{ runId: 'scout-1', status: 'completed' }] } }, { triggerTurn: true });
+    assert.equal(f.ctx.isIdle(), true, 'installed pi has not drained the native wake yet');
+    await f.poll(); assert.equal(f.api.thread.length, 1);
+  } };
+  await host._emitAgentSettled();
+  assert.equal(f.ctx.isIdle(), false, 'native completion starts after all settled handlers return');
+  await f.poll();
+  assert.equal(f.api.thread.length, 1); assert.equal(f.state().terminal, null);
+  assert.deepEqual(f.state().publications.map(p => p.key), ['pickup']);
+  assert.equal(f.api.issues[0].state.id, id(4)); assert.notEqual(f.api.issues[0].delegate, null);
+});
+
+test('confirmed fallback comment canceled by wake allows later real review and exact stopped-owner handoff', async t => {
+  const f = await watchFixture(t);
+  await f.pi.tools.abra_linear_checkpoint.execute('bind', { ...checkpoint('bind'), requestedDelivery: 'report' }, null, null, f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
+  const comment = f.api.comment.bind(f.api);
+  f.api.comment = async (...args) => {
+    const value = await comment(...args);
+    f.pi.handlers.agent_start(); f.ctx.isIdle = () => false;
+    return value;
+  };
+  await settleAndPoll(f.pi, f.ctx);
+  const canceled = new Store(f.path, f.cfg).load().records[0].publications.at(-1);
+  assert.equal(canceled.canceled, true); assert.equal(canceled.state, null); assert.ok(canceled.comment !== 'intent');
+  assert.equal(f.api.thread.length, 2, 'a confirmed public comment cannot be retracted');
+  f.api.comment = comment; f.ctx.isIdle = () => true;
+  await f.pi.tools.abra_linear_checkpoint.execute('review', { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/actual-findings' } }, null, null, f.ctx);
+  await settleAndPoll(f.pi, f.ctx);
+  await f.command(`watch-check ${f.nonce} ${randomUUID()}`);
+  assert.equal(f.pi.entries.at(-1).data.state, 'handoff');
+  const state = new Store(f.path, f.cfg).load();
+  assert.equal(state.active, null); assert.equal(state.records[0].terminal, 'review');
+  assert.deepEqual(state.records[0].managedProofs, [], 'coordinator-only work still passes exact native owner verification');
+  assert.deepEqual(state.records[0].publications.find(p => p.key === canceled.key), canceled);
+  assert.equal(f.api.issues[0].state.id, id(5));
+});
+
+for (const step of ['comment', 'state', 'unassign']) test(`canceled fallback retains issued uncertain ${step} and blocks release until explicit reconciliation`, async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  const method = step === 'state' ? 'status' : step, original = f.api[method].bind(f.api);
+  let current = true;
+  f.api[method] = async () => { current = false; throw new DOMException('request canceled after starting', 'AbortError'); };
+  await assert.rejects(f.connector.publish('settled-without-terminal', 'blocked: interrupted fallback', id(6), f.connector.controller.signal, () => current));
+  f.connector.cancelFallbackPublication(); f.api[method] = original;
+  const receipt = f.connector.active.publications.at(-1);
+  assert.equal(receipt.canceled, true); assert.equal(receipt[step], 'intent');
+  const input = { ...checkpoint('review'), delivery: { kind: 'report', reference: 'https://example.test/actual-report' } };
+  if (step === 'unassign') await assert.rejects(f.connector.checkpoint(input), /unassignment outcome uncertain/);
+  else await f.connector.checkpoint(input);
+  await assert.rejects(f.connector.release('owners stopped', async () => []), /terminal checkpoint|unresolved partial publication/);
+  const writes = f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length;
+  await assert.rejects(f.connector.publish('settled-without-terminal', 'blocked: interrupted fallback', id(6), f.connector.controller.signal), /cannot be replayed/);
+  assert.equal(f.api.calls.filter(c => ['comment', 'status', 'unassign'].includes(c)).length, writes);
+  await f.connector.reconcile({ key: receipt.key, [step]: 'not-applied', evidence: 'operator confirmed original request ended without applying; inspected remote issue and native owners' });
+  assert.deepEqual(receipt.notApplied, [step]);
+  await f.connector.checkpoint(input);
+  await f.connector.release('all exact native owners inspected and stopped', async () => []);
+  const saved = f.store.load(); assert.equal(saved.active, null);
+  assert.equal(saved.records[0].publications.find(p => p.key === receipt.key).canceled, true);
+});
+
+test('ordinary checkpoints cannot cancel publications or use the automatic fallback key', async t => {
+  const f = fixture(t); await f.connector.enable('session-1'); await bind(f);
+  await assert.rejects(f.connector.checkpoint({ ...checkpoint('blocked'), key: 'settled-without-terminal' }), /reserved/);
+  const raw = fs.readFileSync(f.store.path, 'utf8');
+  for (const extra of [{ canceled: true }, { canceled: false }, { canceled: 'true' }, { notApplied: ['comment'] }]) {
+    const state = JSON.parse(raw); Object.assign(state.records[0].publications[0], extra);
+    fs.writeFileSync(f.store.path, JSON.stringify(state));
+    assert.throws(() => new Store(f.path, f.cfg).load(), /fallback/);
+  }
+  fs.writeFileSync(f.store.path, raw);
 });

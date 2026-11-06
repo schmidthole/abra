@@ -303,9 +303,30 @@ coordinator then stops with no pending async work or terminal/clarification chec
 it gets one bounded request to finish the original task and reporting. stopping again
 produces a readable blocked handoff, not endless idle waiting. an explicit abort or
 unconfirmable native status blocks without auto-resuming; any native owners remain
-retained for inspection. busy/queued-message rechecks prevent a concurrent completion
-wake from being mistaken for a terminal failure. explicit waiting still retains the
-session; a subsequent progress/check checkpoint clears waiting.
+retained for inspection. explicit waiting still retains the session; a subsequent
+progress/check checkpoint clears waiting.
+
+settled handlers only arm detection through a nonce-correlated internal command sent
+with documented `sendUserMessage(..., {expandPromptTemplates: true})`. pi executes it
+after every settled handler returns; it performs no publication and does not start a
+model turn. native wakes queued by later handlers can then drain. only the existing
+control poll checks for a genuinely stopped coordinator, never the settled handler
+itself. the fallback captures the settlement/activity version and rechecks it, idle
+state and pending messages after awaited reads and immediately before each mutation
+and terminal marking. a new run or native completion notice aborts in-flight fallback
+requests. pi's `isIdle()` alone does not expose deferred settled-handler wakes.
+
+canceling before any remote request leaves no empty publication or intent receipt.
+if a fallback request already started, cancellation cannot prove it was not applied
+and cannot retract a public comment. all issued comment/status/unassignment intents
+and confirmations are retained. only interrupted **automatic** fallback publications
+may carry `canceled: true`; their reserved key cannot be used by ordinary checkpoints
+or replayed. remaining never-issued steps are not obligations to perform stale Todo
+or unassignment mutations. issued uncertainties still block release until observed
+receipts or explicit known-not-applied reconciliation resolve them; the latter is
+retained in `notApplied` with reconciliation evidence. release still requires a later
+valid terminal checkpoint and every exact native stopped-owner proof. neither a
+canceled fallback nor its partial public comment establishes task success.
 
 these hooks follow installed pi 1.5.0 `docs/extensions.md` agent lifecycle and message
 APIs and the `notify.ts`, `send-user-message.ts`, `event-bus.ts` examples; pi-subagents
