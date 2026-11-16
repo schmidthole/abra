@@ -38,22 +38,6 @@ instructs the coordinator to use native subagents and fill the role templates;
 claude code loads it through `CLAUDE.md`, which adds claude-specific notes.
 templates are portable prompts, not a new spawning api or custom agent runtime.
 
-## optional linear polling for pi
-
-[configure the app identity and connector](docs/linear-polling.md), then explicitly
-start a dedicated one-ticket session with `/abra-linear start`, or keep the
-foreground launcher open for fresh sessions across successive tasks:
-
-```sh
-bin/linear-watch --help
-bin/linear-watch --trusted-managed-work
-```
-
-requires node 24+, trusted pi project resources and compatible pi-subagents native
-terminal proofs for watch. no installation, credentials or live calls occur merely
-by loading the extension. tasks-axi remains the backlog; the connector journal holds
-only correlation/reporting receipts. no workflow manifests or agent trackers.
-
 ## worktrees
 
 ```sh
